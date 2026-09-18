@@ -54,6 +54,22 @@ instead of opening a duplicate request.
   frontend build passed. Proposed upstream in
   [#30](https://github.com/jstevenscl/vod-manager/pull/30).
 
+## 2026-09-18
+
+- ✅ Post-import series episode discovery now runs with a reduced automatic
+  concurrency of four provider requests, while preserving persistent provider
+  HTTP clients. This lowers burst pressure and avoids unnecessary provider
+  backoff during the one-request-per-series episode phase.
+
+- ✅ Enrichment progress now counts canonical series once instead of counting
+  each provider source separately, preventing misleading totals above 100%.
+
+- ✅ Metadata Review now provides an explicit **Merge into existing** action
+  when a reviewer confirms a same-title catalog match that has no TMDB ID.
+  Automatic matching remains disabled in that case; the merge requires an
+  explicit confirmation. Proposed upstream in
+  [#31](https://github.com/jstevenscl/vod-manager/pull/31).
+
 - ✅ Stream Recovery is now a dedicated Operations page for movies blocked
   after every playable source repeatedly fails. It lists the blocked title,
   provider copies, failure counts, and last failure time. Test source opens
