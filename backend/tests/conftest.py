@@ -25,5 +25,6 @@ def db(tmp_path, monkeypatch):
     db_path = tmp_path / "vod_db.sqlite"
     monkeypatch.setattr(vod_db, "DB_PATH", db_path)
     monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.setattr(config, "_raw_cache", None)
     vod_db.init_db()
     return vod_db

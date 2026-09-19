@@ -71,6 +71,9 @@ class EmbyVodClient:
         self.base_url = provider["base_url"].rstrip("/")
         self.api_key = provider["password"]
         self._client: httpx.AsyncClient | None = None
+        # Some Jellyfin installations do not expose the /emby/* aliases.
+        # Remember a successful native-path fallback for this client session.
+        self._emby_prefix_unsupported = False
 
     async def __aenter__(self) -> "EmbyVodClient":
         self._client = httpx.AsyncClient(timeout=_REQUEST_TIMEOUT)
@@ -81,23 +84,54 @@ class EmbyVodClient:
             await self._client.aclose()
             self._client = None
 
+    def _auth_headers(self) -> dict:
+        """Send Jellyfin/Emby's documented token header on every request.
+
+        Keep the query parameter too for compatibility with servers that only
+        accept that form. Some deployments reject query-string-only auth on
+        native (non-/emby/) paths.
+        """
+        return {**_SESSION_HEADERS, "X-Emby-Token": self.api_key}
+
     async def _get(self, path: str, params: dict | None = None, timeout: float = _REQUEST_TIMEOUT) -> dict:
         query = {"api_key": self.api_key}
         if params:
             query.update(params)
+        effective_path = path
+        if self._emby_prefix_unsupported and path.startswith("/emby/"):
+            effective_path = path[len("/emby"):]
 
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient(timeout=timeout)
         t0 = time.monotonic()
         try:
             r = await asyncio.wait_for(
-                client.get(f"{self.base_url}{path}", params=query, timeout=timeout),
+                client.get(
+                    f"{self.base_url}{effective_path}", params=query,
+                    headers=self._auth_headers(), timeout=timeout,
+                ),
                 timeout=timeout + 5.0,
             )
+            if r.status_code == 404 and effective_path == path and path.startswith("/emby/"):
+                native_path = path[len("/emby"):]
+                r2 = await asyncio.wait_for(
+                    client.get(
+                        f"{self.base_url}{native_path}", params=query,
+                        headers=self._auth_headers(), timeout=timeout,
+                    ),
+                    timeout=timeout + 5.0,
+                )
+                # A non-404 response is not proof that the native path works:
+                # a 401 must not permanently latch the fallback path.
+                if r2.is_success:
+                    self._emby_prefix_unsupported = True
+                    r = r2
+                else:
+                    r = r2
             r.raise_for_status()
             return r.json() if r.content else {}
         except Exception:
-            logger.warning("[emby_vod_client] GET %s failed after %.1fs", path, time.monotonic() - t0)
+            logger.warning("[emby_vod_client] GET %s failed after %.1fs", effective_path, time.monotonic() - t0)
             raise
         finally:
             if owns_client:
@@ -107,15 +141,18 @@ class EmbyVodClient:
         """Best-effort: a failed session report shouldn't interrupt the
         actual video relay in xc_server.py, so this swallows its own
         errors (same contract as plex_client.report_timeline)."""
+        effective_path = path
+        if self._emby_prefix_unsupported and path.startswith("/emby/"):
+            effective_path = path[len("/emby"):]
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient(timeout=_REQUEST_TIMEOUT)
         try:
             await client.post(
-                f"{self.base_url}{path}", params={"api_key": self.api_key},
-                json=body, headers=_SESSION_HEADERS,
+                f"{self.base_url}{effective_path}", params={"api_key": self.api_key},
+                json=body, headers=self._auth_headers(),
             )
         except Exception as exc:
-            logger.warning("[emby_vod_client] POST %s failed: %s", path, _redact(exc))
+            logger.warning("[emby_vod_client] POST %s failed: %s", effective_path, _redact(exc))
         finally:
             if owns_client:
                 await client.aclose()

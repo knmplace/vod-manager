@@ -94,6 +94,17 @@ async def _sync_provider_to_connection(provider: dict, connection: dict) -> dict
     client = DispatcharrClient(connection["url"], connection["token"])
     existing_profile_id = vod_db.get_provider_sync_profile(provider["id"], connection["id"])
 
+    if not existing_profile_id:
+        # Dispatcharr enforces a unique (account, name) profile constraint
+        # but reports collisions as HTTP 500. A previous partial sync, or a
+        # deleted/recreated provider, can leave a profile without our local
+        # provider_sync_profiles mapping. Adopt that exact-name profile.
+        existing_profiles = await client.get(f"/api/m3u/accounts/{account_id}/profiles/")
+        name_match = next((p for p in existing_profiles if p.get("name") == provider["name"]), None)
+        if name_match:
+            existing_profile_id = name_match["id"]
+            vod_db.set_provider_sync_profile(provider["id"], connection["id"], existing_profile_id)
+
     if existing_profile_id:
         # Dispatcharr requires search_pattern on PATCH too for non-default
         # profiles ("This field is required for non-default profiles."),

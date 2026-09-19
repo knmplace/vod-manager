@@ -25,18 +25,41 @@ LOG_FILE        = LOG_DIR / "vod_manager.log"
 LOG_BACKUP_COUNT = 5
 
 
+# Configuration is read from the synchronous request path by many getters,
+# including the authentication guard. Keep the parsed document in memory so
+# large SQLite/import operations cannot turn every request into a blocking
+# config.json disk read. Writes refresh the cache immediately.
+_raw_cache: dict | None = None
+
+
 def _read_raw() -> dict:
-    if CONFIG_FILE.exists():
-        try:
-            return json.loads(CONFIG_FILE.read_text())
-        except Exception:
-            pass
-    return {}
+    global _raw_cache
+    if _raw_cache is None:
+        if CONFIG_FILE.exists():
+            try:
+                _raw_cache = json.loads(CONFIG_FILE.read_text())
+            except Exception:
+                _raw_cache = {}
+        else:
+            _raw_cache = {}
+    return _raw_cache
 
 
 def _write_raw(data: dict) -> None:
+    global _raw_cache
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_FILE.write_text(json.dumps(data, indent=2))
+    _raw_cache = data
+
+
+def invalidate_cache() -> None:
+    """Force the next getter to reread config.json from disk.
+
+    Backup/restore can replace the file without going through _write_raw.
+    Tests also use this when switching CONFIG_FILE to an isolated path.
+    """
+    global _raw_cache
+    _raw_cache = None
 
 
 # ── Dispatcharr connection ───────────────────────────────────────────────────
