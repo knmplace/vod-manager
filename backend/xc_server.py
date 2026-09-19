@@ -1412,6 +1412,16 @@ async def _proxy_vod_stream(
             upstream_resp.status_code, time.monotonic() - t_connect_start, _redact_upstream_url(upstream_url),
         )
         vod_db.record_source_success(kind, source["source_id"])
+        if "range" in forward_headers:
+            cleared_failures = vod_db.clear_recovered_stream_failures(
+                kind, title, username, movie_id=movie_id, episode_id=episode_id,
+                client_ip=client_ip, xc_client_id=xc_client_id,
+            )
+            if cleared_failures:
+                logger.info(
+                    "[xc_server] %s stream id=%s cleared %d superseded failure row(s) after successful range handoff",
+                    kind, conn_id, cleared_failures,
+                )
 
         # Approximate playback position from the requested Range's start byte
         # — we're relaying raw bytes, not a real player, so this is the only
