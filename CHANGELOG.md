@@ -54,6 +54,19 @@ instead of opening a duplicate request.
   frontend build passed. Proposed upstream in
   [#30](https://github.com/jstevenscl/vod-manager/pull/30).
 
+## 2026-09-19
+
+- ✅ Xtream/Emby catalog refreshes now scope episode-source ranking to the
+  requested series before SQLite runs its source-selection window, instead of
+  ranking the entire episode catalog for every `get_series_info` request.
+  Repeated client activity updates are also debounced, eliminating a SQLite
+  write for every catalog item. This reduces CPU and refresh latency for direct
+  Emby connections and for Dispatcharr instances using VOD Manager as their
+  upstream catalog. Regression coverage and before/after measurements are
+  recorded with the deployment validation: representative series requests fell
+  from about 4.05–4.12 seconds to 16–28 milliseconds on the production-sized
+  catalog snapshot.
+
 ## 2026-09-18
 
 - ✅ Post-import series episode discovery now runs with a reduced automatic
