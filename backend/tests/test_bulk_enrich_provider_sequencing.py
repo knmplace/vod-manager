@@ -45,10 +45,41 @@ def _reset_enrich_progress():
         "running": False,
         "movies_total": 0, "movies_done": 0, "movies_errors": 0, "movies_backoff_skipped": 0,
         "series_total": 0, "series_done": 0, "series_errors": 0, "series_backoff_skipped": 0,
+        "series_sources_total": 0, "series_sources_done": 0, "progress_phase": "catalog",
         "started_at": None, "finished_at": None,
         "providers_incomplete": [],
     })
     yield
+
+
+def test_episode_progress_counts_provider_sources_separately(monkeypatch):
+    """Episode sync is source-scoped: two provider source rows for one
+    canonical series must report 2 episode sources, not 2/1 series."""
+    async def fake_enrich_series(series_id, provider_id, **kwargs):
+        return {"fetched": True, "reason": None}
+
+    monkeypatch.setattr(vod_importer, "enrich_series_source_only", fake_enrich_series)
+    vod_importer._ENRICH_PROGRESS.update({
+        "series_sources_total": 2, "series_sources_done": 0,
+        "series_total": 1, "series_done": 0,
+    })
+
+    async def run():
+        sem = asyncio.Semaphore(2)
+        await asyncio.gather(
+            vod_importer._enrich_one(
+                "series", sem, 10, False, provider_id=1, series_id=10,
+                source_id=101, episodes_only=True, progress_mode="source",
+            ),
+            vod_importer._enrich_one(
+                "series", sem, 10, False, provider_id=2, series_id=10,
+                source_id=202, episodes_only=True, progress_mode="source",
+            ),
+        )
+
+    asyncio.run(run())
+    assert vod_importer._ENRICH_PROGRESS["series_sources_done"] == 2
+    assert vod_importer._ENRICH_PROGRESS["series_done"] == 0
 
 
 def _provider(pid, name):

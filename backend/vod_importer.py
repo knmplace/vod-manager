@@ -1779,19 +1779,27 @@ async def bulk_enrich_series_episodes(concurrency: int = 6, limit: int | None = 
     TMDB remains authoritative for series metadata; the provider call exists
     only because XC series detail supplies episode listings and stream IDs.
     """
+    if _ENRICH_PROGRESS["running"]:
+        logger.info("[vod_importer] episode enrichment already running; skipping overlapping request")
+        return
     providers = [p for p in await asyncio.to_thread(vod_db.list_providers)
                  if p.get("is_active", True)]
+    _ENRICH_DONE_SOURCE_IDS.clear()
     pending_provider_ids = []
     series_ids: set[int] = set()
+    source_count = 0
     for provider in providers:
         rows = await asyncio.to_thread(vod_db.list_pending_series_sources, provider["id"], limit)
         if rows:
             pending_provider_ids.append(provider["id"])
             series_ids.update(row["series_id"] for row in rows)
+            source_count += len(rows)
 
     _ENRICH_PROGRESS.update({
         "running": True, "movies_total": 0, "movies_done": 0,
         "movies_errors": 0, "series_total": len(series_ids), "series_done": 0,
+        "series_sources_total": source_count, "series_sources_done": 0,
+        "progress_phase": "series_episodes",
         "series_errors": 0, "series_backoff_skipped": 0,
         "started_at": time.time(), "finished_at": None,
         "cancelled": False, "providers_incomplete": [],
@@ -1924,6 +1932,8 @@ _ENRICH_PROGRESS: dict = {
     "running": False,
     "movies_total": 0, "movies_done": 0, "movies_errors": 0, "movies_backoff_skipped": 0,
     "series_total": 0, "series_done": 0, "series_errors": 0, "series_backoff_skipped": 0,
+    "series_sources_total": 0, "series_sources_done": 0,
+    "progress_phase": "catalog",
     "started_at": None, "finished_at": None,
     "cancelled": False,
     # Populated by bulk_enrich_all's per-provider sequencing (beads-f7e/
@@ -1953,6 +1963,7 @@ def reset_enrichment_progress() -> None:
     _ENRICH_PROGRESS.update({
         "movies_total": 0, "movies_done": 0, "movies_errors": 0, "movies_backoff_skipped": 0,
         "series_total": 0, "series_done": 0, "series_errors": 0, "series_backoff_skipped": 0,
+        "series_sources_total": 0, "series_sources_done": 0, "progress_phase": "catalog",
         "started_at": None, "finished_at": None, "cancelled": False,
         "providers_incomplete": [],
     })
@@ -1966,6 +1977,7 @@ def reset_enrichment_progress() -> None:
 # movies_total of 62854 on 2026-09-12 (live, WOBO/WarpTV retry storm).
 # Reset at the start of every bulk_enrich_all run.
 _ENRICH_DONE_IDS: dict[str, set] = {"movie": set(), "series": set()}
+_ENRICH_DONE_SOURCE_IDS: set = set()
 
 
 def get_enrich_progress() -> dict:
@@ -1997,6 +2009,7 @@ async def _enrich_one(
     skip_auto_merge: bool = False, movie_batch: list | None = None, provider_id: int | None = None,
     write_queue: "asyncio.Queue | None" = None, series_id: int | None = None,
     episodes_only: bool = False, source_id: int | None = None,
+    progress_mode: str = "canonical",
 ) -> bool:
     """Returns True iff this item's enrichment call actually succeeded (no
     exception, including no ProviderBackoffError) -- used by bulk_enrich_all's
@@ -2069,10 +2082,16 @@ async def _enrich_one(
             # id is enriched again later (the single-retry pass re-runs a
             # failed provider's FULL id list, so an already-succeeded item
             # can hit this function a second time) -- see _ENRICH_DONE_IDS.
-            done_ids = _ENRICH_DONE_IDS[kind]
-            if item_id not in done_ids:
-                done_ids.add(item_id)
-                _ENRICH_PROGRESS[f"{prefix}_done"] += 1
+            if kind == "series" and progress_mode == "source":
+                source_key = source_id if source_id is not None else item_id
+                if source_key not in _ENRICH_DONE_SOURCE_IDS:
+                    _ENRICH_DONE_SOURCE_IDS.add(source_key)
+                    _ENRICH_PROGRESS["series_sources_done"] += 1
+            else:
+                done_ids = _ENRICH_DONE_IDS[kind]
+                if item_id not in done_ids:
+                    done_ids.add(item_id)
+                    _ENRICH_PROGRESS[f"{prefix}_done"] += 1
 
 
 # One global writer serializes these transactions.  250 keeps commits bounded
@@ -2244,7 +2263,7 @@ async def _run_provider_series_phase(
                     outcome = await _enrich_one(
                         "series", sem, item["series_id"], force, skip_auto_merge=True, provider_id=provider["id"],
                         write_queue=write_queue, series_id=item["series_id"], episodes_only=episodes_only,
-                        source_id=item["id"],
+                        source_id=item["id"], progress_mode="source" if episodes_only else "canonical",
                     )
                 else:
                     outcome = await _enrich_one(
@@ -2367,7 +2386,8 @@ async def bulk_enrich_all(concurrency: int = 8, force: bool = False, pending_onl
     never double-runs during a bulk pass -- single on-demand enrich (outside
     bulk_enrich_all) keeps its immediate inline merge unchanged."""
     global _ENRICH_CANCEL_REQUESTED
-    if _ENRICH_PROGRESS["running"]:
+    if _ENRICH_PROGRESS["running"] or (_BACKGROUND_TMDB_TASK and not _BACKGROUND_TMDB_TASK.done()):
+        logger.info("[vod_importer] enrichment already running; skipping overlapping catalog run")
         return
     _ENRICH_CANCEL_REQUESTED = False
 
@@ -2426,6 +2446,7 @@ async def bulk_enrich_all(concurrency: int = 8, force: bool = False, pending_onl
         "running": True,
         "movies_total": len(movie_ids_all), "movies_done": 0, "movies_errors": 0, "movies_backoff_skipped": 0,
         "series_total": len(series_ids_all), "series_done": 0, "series_errors": 0, "series_backoff_skipped": 0,
+        "series_sources_total": 0, "series_sources_done": 0, "progress_phase": "catalog",
         "started_at": time.time(), "finished_at": None,
         "cancelled": False,
         "providers_incomplete": [],

@@ -1358,6 +1358,8 @@ interface EnrichProgress {
   running: boolean
   movies_total: number; movies_done: number; movies_errors: number; movies_backoff_skipped: number
   series_total: number; series_done: number; series_errors: number; series_backoff_skipped: number
+  series_sources_total: number; series_sources_done: number
+  progress_phase?: 'catalog' | 'series_episodes'
   started_at: number | null; finished_at: number | null
   cancelled?: boolean
   providers_backing_off: { provider_id: number; seconds_remaining: number }[]
@@ -7695,7 +7697,10 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
               // syncing) and read "101%" -- same Math.min(100, ...) guard
               // the playback-progress bar already uses elsewhere.
               const mPct = enrichProgress.movies_total ? Math.min(100, Math.round((enrichProgress.movies_done / enrichProgress.movies_total) * 100)) : 100
-              const sPct = enrichProgress.series_total ? Math.min(100, Math.round((enrichProgress.series_done / enrichProgress.series_total) * 100)) : 100
+              const episodePhase = enrichProgress.progress_phase === 'series_episodes'
+              const sDone = episodePhase ? enrichProgress.series_sources_done : enrichProgress.series_done
+              const sTotal = episodePhase ? enrichProgress.series_sources_total : enrichProgress.series_total
+              const sPct = sTotal ? Math.min(100, Math.round((sDone / sTotal) * 100)) : 100
               return (
                 <>
                   <div>
@@ -7707,8 +7712,8 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
                   </div>
                   <div>
                     <div className="flex items-center justify-between text-[11px] text-muted-foreground mb-0.5">
-                      <span>Series</span>
-                      <span className="tabular-nums">{enrichProgress.series_done.toLocaleString()} / {enrichProgress.series_total.toLocaleString()}{enrichProgress.series_errors > 0 && ` (${enrichProgress.series_errors} errors)`}{enrichProgress.series_backoff_skipped > 0 && ` (${enrichProgress.series_backoff_skipped} paused for backoff)`}</span>
+                      <span>{episodePhase ? 'Episode sources' : 'Series'}</span>
+                      <span className="tabular-nums">{sDone.toLocaleString()} / {sTotal.toLocaleString()}{enrichProgress.series_errors > 0 && ` (${enrichProgress.series_errors} errors)`}{enrichProgress.series_backoff_skipped > 0 && ` (${enrichProgress.series_backoff_skipped} paused for backoff)`}</span>
                     </div>
                     <div className="h-1.5 rounded-full bg-secondary overflow-hidden"><div className="h-full bg-primary" style={{ width: `${sPct}%` }} /></div>
                   </div>

@@ -33,6 +33,16 @@ instead of opening a duplicate request.
 
 ## 2026-09-17
 
+## 2026-09-19
+
+- ✅ Episode enrichment progress now reports provider episode sources in a
+  separate counter from canonical series, so multi-provider catalogs no
+  longer display misleading values such as `98 / 30`. Overlapping catalog
+  enrichment runs are coalesced instead of overwriting one another's progress.
+  The deployed `6c3a991` playback relay recovery remains included; its
+  transient mid-stream reconnect and incomplete-Activity filtering are now
+  running in the fork image.
+
 - ✅ Post-import catalog processing now completes the intended staged handoff:
   TMDB metadata resolution runs first, then series-only provider detail calls
   discover episode streams. Movie metadata never falls back to a second
