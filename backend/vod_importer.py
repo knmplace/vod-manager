@@ -1786,12 +1786,14 @@ async def bulk_enrich_series_episodes(concurrency: int = 6, limit: int | None = 
                  if p.get("is_active", True)]
     _ENRICH_DONE_SOURCE_IDS.clear()
     pending_provider_ids = []
+    pending_by_provider: dict[int, list[dict]] = {}
     series_ids: set[int] = set()
     source_count = 0
     for provider in providers:
         rows = await asyncio.to_thread(vod_db.list_pending_series_sources, provider["id"], limit)
         if rows:
             pending_provider_ids.append(provider["id"])
+            pending_by_provider[provider["id"]] = rows
             series_ids.update(row["series_id"] for row in rows)
             source_count += len(rows)
 
@@ -1813,6 +1815,7 @@ async def bulk_enrich_series_episodes(concurrency: int = 6, limit: int | None = 
             _run_provider_series_phase(
                 provider, series_sem, False, write_queue=write_queue,
                 provider_count=len(selected), pending_only=True, episodes_only=True,
+                pending_sources=pending_by_provider[provider["id"]],
             ) for provider in selected
         ))
         for provider, result in zip(selected, results):
@@ -2218,6 +2221,7 @@ async def _run_provider_movie_phase(
 async def _run_provider_series_phase(
     provider: dict, sem: asyncio.Semaphore, force: bool, write_queue: "asyncio.Queue | None" = None,
     provider_count: int = 1, pending_only: bool = False, episodes_only: bool = False,
+    pending_sources: list[dict] | None = None,
 ) -> tuple[bool, list]:
     """Runs one provider's series phase to completion. Same ok semantics as
     _run_provider_movie_phase. write_queue: see _run_provider_movie_phase's
@@ -2236,9 +2240,10 @@ async def _run_provider_series_phase(
     that phase's docstring). Now uses the same bounded worker-pool
     pattern: a fixed pool of `sem`-sized workers pulls one id at a time
     off a plain asyncio.Queue. Throughput/concurrency is unchanged."""
-    pending_sources = await asyncio.to_thread(
-        vod_db.list_pending_series_sources, provider["id"]
-    ) if pending_only else None
+    if pending_only and pending_sources is None:
+        pending_sources = await asyncio.to_thread(
+            vod_db.list_pending_series_sources, provider["id"]
+        )
     series_ids = [source["series_id"] for source in pending_sources] if pending_sources is not None else await asyncio.to_thread(
         vod_db.list_all_series_ids, provider_id=provider["id"]
     )

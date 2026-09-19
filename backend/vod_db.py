@@ -2241,6 +2241,50 @@ def log_stream_failure(
     conn.close()
 
 
+def clear_recovered_stream_failures(
+    kind: str, title: str, username: str | None,
+    movie_id: int | None = None, episode_id: int | None = None,
+    client_ip: str | None = None, xc_client_id: int | None = None,
+    window_seconds: int = 120,
+) -> int:
+    """Remove recent terminal rows superseded by a successful range request.
+
+    Dispatcharr normally opens the next byte-range request before the prior
+    request has fully unwound.  A provider disconnect can therefore create a
+    failure row for an obsolete request even while the logical playback
+    session continues.  Failed Streams is intended for terminal playback
+    failures, so a successful successor in a short window clears that stale
+    row.  Older history is left untouched.
+    """
+    if movie_id is None and episode_id is None:
+        return 0
+    cutoff = str(time.time() - max(0, window_seconds))
+    conn = _connect()
+    clauses = ["kind = ?", "title = ?", "created_at >= ?"]
+    params: list = [kind, title, cutoff]
+    if movie_id is not None:
+        clauses.append("movie_id = ?")
+        params.append(movie_id)
+    else:
+        clauses.append("episode_id = ?")
+        params.append(episode_id)
+    clauses.append("(username = ? OR (username IS NULL AND ? IS NULL))")
+    params.extend([username, username])
+    if client_ip is not None:
+        clauses.append("(client_ip = ? OR client_ip IS NULL)")
+        params.append(client_ip)
+    if xc_client_id is not None:
+        clauses.append("(xc_client_id = ? OR xc_client_id IS NULL)")
+        params.append(xc_client_id)
+    cur = conn.execute(
+        f"DELETE FROM vod_stream_failures WHERE {' AND '.join(clauses)}", params
+    )
+    deleted = cur.rowcount
+    _commit_with_retry(conn)
+    conn.close()
+    return deleted
+
+
 def record_source_failure(kind: str, source_id: int) -> None:
     """Bumps one specific source's own failure streak -- called on every
     per-source failure in xc_server._proxy_vod_stream's failover loop, not

@@ -72,6 +72,26 @@ instead of opening a duplicate request.
   `undefined`/`NaN`. Proposed upstream in
   [#34](https://github.com/jstevenscl/vod-manager/pull/34).
 
+- ✅ Production validation with placeholder Provider A confirmed the staged
+  import path: 22,884 movies completed in 8.75s fetch / 1.14s database time
+  with 0 errors, and 5,228 series completed in 10.03s fetch / 0.42s database
+  time with 296 created, 4,931 matched, 376 source changes, 48 review flags,
+  and one item-level error. Post-import enrichment was queued after the
+  import drained. During the same validation window, a representative movie
+  continued playing at 60% after a mid-stream upstream disconnect: the relay
+  issued range recovery and Dispatcharr opened the following range request
+  successfully. The obsolete failed range request still appeared in Failed
+  Streams in the deployed build; the follow-up now clears that row when a
+  matching successor range request opens successfully, while preserving
+  genuine terminal failures.
+
+- ✅ Episode-source progress now uses the exact bounded pending-source snapshot
+  that the worker processes, instead of calculating the denominator from one
+  list and processing a larger list later. This prevents displays such as
+  `317 / 113` during staged episode discovery. The stale recovered-failure
+  cleanup and bounded-progress regression coverage passed 24 focused backend
+  tests.
+
 - ✅🔀 Xtream/Emby catalog refreshes now scope episode-source ranking to the
   requested series before SQLite runs its source-selection window, instead of
   ranking the entire episode catalog for every `get_series_info` request.
