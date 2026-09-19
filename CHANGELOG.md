@@ -39,24 +39,32 @@ instead of opening a duplicate request.
   provider call in this workflow. Automatic TMDB merges now require matching
   non-null years; conflicting or missing years remain for user review.
 
-- ✅🔄 Language policy now applies consistently at import: XC, Plex, and
+- ✅🔼 Language policy now applies consistently at import: XC, Plex, and
   Emby catalogs use the enabled playback languages, classify from the raw
   provider title before display rules can remove a prefix, and skip excluded
   items before they enter the catalog. Legacy automatically excluded entries
   are safely cleaned up while manual archives remain untouched. Regression
   coverage: 53 focused language-policy tests passed. Proposed upstream in
-  [#29](https://github.com/jstevenscl/vod-manager/pull/29).
+  [#29](https://github.com/jstevenscl/vod-manager/pull/29). The submitted PR
+  was closed without a merge commit; the functionality was incorporated in
+  upstream [v0.2.18](https://github.com/jstevenscl/vod-manager/releases/tag/v0.2.18).
 
-- ✅🔄 Configuration now includes preview-before-apply language maintenance:
+- ✅🔼 Configuration now includes preview-before-apply language maintenance:
   backfill missing source-language values or recompute values that no longer
   match the raw provider title. These operations correct source metadata only;
   catalog entries are not changed. Regression tests and the production
   frontend build passed. Proposed upstream in
-  [#30](https://github.com/jstevenscl/vod-manager/pull/30).
+  [#30](https://github.com/jstevenscl/vod-manager/pull/30). The submitted PR
+  was closed without a merge commit; the functionality was incorporated in
+  upstream [v0.2.18](https://github.com/jstevenscl/vod-manager/releases/tag/v0.2.18).
 
 ## 2026-09-19
 
-- ✅ Xtream/Emby catalog refreshes now scope episode-source ranking to the
+- ✅ The fork image version label now tracks upstream **v0.2.19**. This aligns
+  the release baseline with the latest upstream release while retaining the
+  fork-only workflow and operational improvements documented below.
+
+- ✅🔀 Xtream/Emby catalog refreshes now scope episode-source ranking to the
   requested series before SQLite runs its source-selection window, instead of
   ranking the entire episode catalog for every `get_series_info` request.
   Repeated client activity updates are also debounced, eliminating a SQLite
@@ -65,7 +73,8 @@ instead of opening a duplicate request.
   upstream catalog. Regression coverage and before/after measurements are
   recorded with the deployment validation: representative series requests fell
   from about 4.05–4.12 seconds to 16–28 milliseconds on the production-sized
-  catalog snapshot.
+  catalog snapshot. Proposed upstream in
+  [#33](https://github.com/jstevenscl/vod-manager/pull/33).
 
 ## 2026-09-18
 
@@ -77,7 +86,7 @@ instead of opening a duplicate request.
 - ✅ Enrichment progress now counts canonical series once instead of counting
   each provider source separately, preventing misleading totals above 100%.
 
-- ✅ Metadata Review now provides an explicit **Merge into existing** action
+- ✅🔀 Metadata Review now provides an explicit **Merge into existing** action
   when a reviewer confirms a same-title catalog match that has no TMDB ID.
   Automatic matching remains disabled in that case; the merge requires an
   explicit confirmation. Proposed upstream in
@@ -91,7 +100,7 @@ instead of opening a duplicate request.
   Failed Streams remains the diagnostic history. TV recovery remains
   episode-level work so one bad episode never hides an entire series.
 
-- ✅🔄 A movie is now automatically blocked from exported client catalogs when
+- ✅🔼 A movie is now automatically blocked from exported client catalogs when
   every active, enabled-language provider source has repeatedly failed. The
   source rows and failure history remain available for diagnosis; a successful
   retry clears the block and returns the title to the catalog. Deployment also
@@ -99,16 +108,20 @@ instead of opening a duplicate request.
   without needing another playback attempt. Live validation confirmed the
   reported all-404 case was an upstream provider issue; after the provider was
   corrected, the affected movies played normally again. Proposed upstream in
-  [#28](https://github.com/jstevenscl/vod-manager/pull/28).
+  [#28](https://github.com/jstevenscl/vod-manager/pull/28). The submitted PR
+  was closed without a merge commit; the functionality was incorporated in
+  upstream [v0.2.18](https://github.com/jstevenscl/vod-manager/releases/tag/v0.2.18).
 
-- ✅🔄 Series refreshes now preserve the canonical row already attached to a
+- ✅🔼 Series refreshes now preserve the canonical row already attached to a
   provider's source ID, including when that provider is a secondary source.
   This fixes a regression that could reassign a source during a refresh and
   leave a duplicate zero-source series row in Metadata Review or Duplicate
   Finder. Successful imports now also purge existing rows with neither a
   provider source nor playable episode source; normal newly listed series
   awaiting episode detail are retained. Proposed upstream in
-  [#28](https://github.com/jstevenscl/vod-manager/pull/28).
+  [#28](https://github.com/jstevenscl/vod-manager/pull/28). The submitted PR
+  was closed without a merge commit; the functionality was incorporated in
+  upstream [v0.2.18](https://github.com/jstevenscl/vod-manager/releases/tag/v0.2.18).
 
 - ✅ Metadata Review now calls out likely existing catalog matches when a row is
   expanded. Same-title rows from another provider show their year, source
@@ -157,14 +170,15 @@ instead of opening a duplicate request.
   being mistaken for missing identities and triggering thousands of unnecessary
   provider-detail requests.
 
-- ✅🔀 Cross-provider matches now preserve an existing automatic archive by
+- ✅🔼 Cross-provider matches now preserve an existing automatic archive by
   default. If a movie or series was archived and a later provider supplies the
   same title, that source is attached without resurrecting the catalog item;
   only an exact re-import of the already-known source can clear an automatic
   archive. Manual archive decisions remain protected. Regression coverage now
   includes both movies and series. Submitted as clean upstream PR
-  [#26](https://github.com/jstevenscl/vod-manager/pull/26) after confirming the
-  behavior is not covered by v0.2.15/v0.2.16.
+  [#26](https://github.com/jstevenscl/vod-manager/pull/26). The submitted PR
+  was closed without a merge commit; the functionality was incorporated in
+  upstream [v0.2.17](https://github.com/jstevenscl/vod-manager/releases/tag/v0.2.17).
 
 - ✅ Undated cross-provider movie/series cards now inherit a confirmed TMDB
   identity when exactly one normalized-title candidate already exists in the
@@ -172,16 +186,16 @@ instead of opening a duplicate request.
   Review row for an already-fixed title; ambiguous candidates remain manual.
   Regression tests cover both safe inheritance and ambiguity protection.
 
-- ✅⛔ Provider-supplied `trailer`/`youtube_trailer` values are now preserved
+- ✅🔼 Provider-supplied `trailer`/`youtube_trailer` values are now preserved
   during movie and series imports and exposed through Dispatcharr list/detail
   responses. This avoids unnecessary TMDB/YouTube requests and keeps the
   provider's own verified trailer reference. Synthetic movie/series fixtures
   cover persistence and exclusion of already-saved values from the review
   queue. PR [#25](https://github.com/jstevenscl/vod-manager/pull/25) was closed
   because the submitted branch contained the full fork history and unrelated
-  files. Upstream will review the current behavior directly; no duplicate PR
-  should be opened until a clean focused branch is prepared.
-  Status: closed without inclusion in [#25](https://github.com/jstevenscl/vod-manager/pull/25).
+  files. The functionality was subsequently incorporated in upstream
+  [v0.2.17](https://github.com/jstevenscl/vod-manager/releases/tag/v0.2.17)
+  without merging that PR.
 
 - ✅ Provider imports now have one shared **Catalog workflow** handoff instead
   of leaving people to infer readiness from separate progress bars. The
@@ -200,7 +214,7 @@ instead of opening a duplicate request.
   apply. This closes the live multi-provider import case where exact-TMDB
   movie pairs remained in Duplicate Finder after all progress bars completed.
 
-- ✅🔀 Provider-free TMDB enrichment for known series IDs now also records TMDB's
+- ✅🔼 Provider-free TMDB enrichment for known series IDs now also records TMDB's
   first-air year. A confirmed series no longer remains falsely held in
   **Metadata Review** merely because its provider omitted a year; the existing
   held records are safely picked up and backfilled on the next enrichment run.
@@ -211,8 +225,10 @@ instead of opening a duplicate request.
   variants and human decisions remain untouched. A reviewer-selected TMDB ID
   in Metadata Review now invokes that same safe merge path immediately rather
   than waiting for the next import.
-  This was included, with upstream hardening, in v0.2.16 via
-  [#24](https://github.com/jstevenscl/vod-manager/pull/24).
+  The submitted PR [#24](https://github.com/jstevenscl/vod-manager/pull/24) was
+  closed without a merge commit; this functionality was incorporated, with
+  upstream hardening, in
+  [v0.2.16](https://github.com/jstevenscl/vod-manager/releases/tag/v0.2.16).
 
 - ✅ Metadata Review now has an **Incorrect TMDB IDs** tab for titles whose
   stored ID receives a confirmed TMDB 404. It supports a pending-ID scan,
@@ -347,14 +363,16 @@ instead of opening a duplicate request.
   refreshes no longer re-fetch stable movie metadata or previously discovered
   episode lists merely because a timer elapsed.
 
-- ✅🔀 XC movie catalog imports now retain the provider's bulk artwork URL
+- ✅🔼 XC movie catalog imports now retain the provider's bulk artwork URL
   (`stream_icon`) immediately, matching the existing series-cover behavior.
   Movie cards no longer need an expensive per-title enrichment request merely
   to display a poster; enrichment and TMDB remain fallbacks for missing or
   improved artwork. The importer keeps the first usable poster for a
   canonical movie, so alternate source variants cannot cause artwork to
   flip on later refreshes.
-  ([#23](https://github.com/jstevenscl/vod-manager/pull/23))
+  [#23](https://github.com/jstevenscl/vod-manager/pull/23); the submitted PR
+  was closed without a merge commit and the functionality was incorporated in
+  upstream [v0.2.17](https://github.com/jstevenscl/vod-manager/releases/tag/v0.2.17).
 
 - ✅ Bulk enrichment no longer creates a task for every movie/series in a
   provider's catalog up front. It used to launch all of them at once (a
