@@ -5404,7 +5404,7 @@ def list_all_movie_ids(
     return [r["id"] for r in rows]
 
 
-def list_movie_ids_pending_tmdb_enrichment() -> list[int]:
+def list_movie_ids_pending_tmdb_enrichment(limit: int | None = None) -> list[int]:
     """Movies whose imported TMDB identity has not yet been resolved.
 
     This deliberately keys off ``last_enriched_at IS NULL``, not the general
@@ -5413,18 +5413,39 @@ def list_movie_ids_pending_tmdb_enrichment() -> list[int]:
     movies whose metadata is already complete.
     """
     conn = _connect()
+    limit_clause = " LIMIT ?" if limit is not None else ""
+    params: tuple = (max(1, int(limit)),) if limit is not None else ()
     rows = conn.execute("""
         SELECT id FROM movies
         WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> ''
           AND is_adult=0 AND review_excluded=0
           AND last_enriched_at IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM tmdb_lookup_failures f
+              WHERE f.content_type='movie' AND f.item_id=movies.id
+          )
         ORDER BY id
-    """).fetchall()
+    """ + limit_clause, params).fetchall()
     conn.close()
     return [r["id"] for r in rows]
 
 
-def list_series_pending_tmdb_metadata_enrichment() -> list[dict]:
+def count_movies_pending_tmdb_enrichment() -> int:
+    conn = _connect()
+    row = conn.execute("""
+        SELECT COUNT(*) AS c FROM movies
+        WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> ''
+          AND is_adult=0 AND review_excluded=0 AND last_enriched_at IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM tmdb_lookup_failures f
+              WHERE f.content_type='movie' AND f.item_id=movies.id
+          )
+    """).fetchone()
+    conn.close()
+    return int(row["c"])
+
+
+def list_series_pending_tmdb_metadata_enrichment(limit: int | None = None) -> list[dict]:
     """Known-TMDB series awaiting their canonical TMDB title/detail pass.
 
     This is canonical-series scoped, deliberately not source scoped: source
@@ -5432,6 +5453,8 @@ def list_series_pending_tmdb_metadata_enrichment() -> list[dict]:
     TMDB name regardless of how many providers or variants carry it.
     """
     conn = _connect()
+    limit_clause = " LIMIT ?" if limit is not None else ""
+    params: tuple = (max(1, int(limit)),) if limit is not None else ()
     rows = conn.execute("""
         SELECT id, tmdb_id FROM series
         WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> ''
@@ -5444,10 +5467,30 @@ def list_series_pending_tmdb_metadata_enrichment() -> list[dict]:
                 -- full-catalog TMDB crawl.
                 OR (needs_year_review=1 AND year IS NULL)
               )
+          AND NOT EXISTS (
+              SELECT 1 FROM tmdb_lookup_failures f
+              WHERE f.content_type='series' AND f.item_id=series.id
+          )
         ORDER BY id
-    """).fetchall()
+    """ + limit_clause, params).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def count_series_pending_tmdb_metadata_enrichment() -> int:
+    conn = _connect()
+    row = conn.execute("""
+        SELECT COUNT(*) AS c FROM series
+        WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> ''
+          AND is_adult=0 AND review_excluded=0
+          AND (tmdb_metadata_enriched_at IS NULL OR (needs_year_review=1 AND year IS NULL))
+          AND NOT EXISTS (
+              SELECT 1 FROM tmdb_lookup_failures f
+              WHERE f.content_type='series' AND f.item_id=series.id
+          )
+    """).fetchone()
+    conn.close()
+    return int(row["c"])
 
 
 def list_pending_trailer_enrichment(limit: int = 100) -> list[dict]:
@@ -6512,7 +6555,7 @@ def has_pending_series_source_enrichment(provider_id: int) -> bool:
     return row is not None
 
 
-def list_pending_series_sources(provider_id: int | None = None) -> list[dict]:
+def list_pending_series_sources(provider_id: int | None = None, limit: int | None = None) -> list[dict]:
     """Lists unprocessed episode-discovery sources, not just canonical series.
 
     A canonical series can retain several source variants from one provider.
@@ -6525,6 +6568,9 @@ def list_pending_series_sources(provider_id: int | None = None) -> list[dict]:
     if provider_id is not None:
         provider_clause = "AND ss.provider_id=?"
         params = (provider_id,)
+    limit_clause = " LIMIT ?" if limit is not None else ""
+    if limit is not None:
+        params = (*params, max(1, int(limit)))
     rows = conn.execute(f"""
         SELECT ss.id, ss.series_id, ss.provider_id
         FROM series_sources ss
@@ -6533,9 +6579,23 @@ def list_pending_series_sources(provider_id: int | None = None) -> list[dict]:
           AND s.review_excluded=0
           {provider_clause}
         ORDER BY ss.id
+        {limit_clause}
     """, params).fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+
+def count_pending_series_sources() -> int:
+    conn = _connect()
+    row = conn.execute("""
+        SELECT COUNT(*) AS c
+        FROM series_sources ss
+        JOIN series s ON s.id=ss.series_id
+        WHERE ss.episodes_last_enriched_at IS NULL
+          AND s.review_excluded=0
+    """).fetchone()
+    conn.close()
+    return int(row["c"])
 
 
 def set_series_source_enrichment(series_id: int, provider_id: int, provider_series_id: str) -> None:

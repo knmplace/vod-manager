@@ -155,18 +155,21 @@ def test_adult_known_tmdb_ids_are_not_retried(db):
 def test_post_import_runs_series_episode_phase_after_tmdb_phases(monkeypatch):
     calls = []
 
-    async def movie_phase():
+    async def movie_phase(**_kwargs):
         calls.append("movie-tmdb")
 
-    async def series_metadata_phase():
+    async def series_metadata_phase(**_kwargs):
         calls.append("series-tmdb")
 
-    async def episode_phase():
+    async def episode_phase(**_kwargs):
         calls.append("series-episodes")
 
     monkeypatch.setattr(vod_importer, "bulk_enrich_tmdb_movies", movie_phase)
     monkeypatch.setattr(vod_importer, "bulk_enrich_tmdb_series_metadata", series_metadata_phase)
     monkeypatch.setattr(vod_importer, "bulk_enrich_series_episodes", episode_phase)
+    monkeypatch.setattr(vod_importer.vod_db, "count_movies_pending_tmdb_enrichment", lambda: 0)
+    monkeypatch.setattr(vod_importer.vod_db, "count_series_pending_tmdb_metadata_enrichment", lambda: 0)
+    monkeypatch.setattr(vod_importer, "_schedule_background_tmdb_work", lambda: None)
 
     asyncio.run(vod_importer._post_import_enrichment(track_catalog_workflow=False))
 

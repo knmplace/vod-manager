@@ -60,6 +60,17 @@ instead of opening a duplicate request.
 
 ## 2026-09-19
 
+- ✅ Automatic catalog handoff is now bounded and incremental. The initial
+  pass processes up to 30% of eligible new/changed TMDB records, capped at
+  15,000 movies and 3,000 series/episode sources; remaining work drains in
+  controlled background batches. Completed metadata, invalid TMDB IDs, and
+  unchanged records are skipped. Series episode discovery remains the final
+  provider-sync stage, is series-only, runs at concurrency 6, and is gated by
+  each source's stored episode-enrichment marker so completed sources are not
+  called again. Baseline production logs showed a roughly 9,000-second
+  handoff; backend validation after this change: 201 tests passed in 34.30s.
+  A live before/after duration comparison remains pending deployment.
+
 - ✅ The fork image version label now tracks upstream **v0.2.19**. This aligns
   the release baseline with the latest upstream release while retaining the
   fork-only workflow and operational improvements documented below.

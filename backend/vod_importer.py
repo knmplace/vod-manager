@@ -11,6 +11,7 @@ bounded concurrency instead of a human clicking one movie at a time.
 """
 
 import asyncio
+import math
 import hashlib
 import json
 import logging
@@ -1632,13 +1633,23 @@ _TMDB_ENRICH_PROGRESS: dict = {
     "started_at": None, "finished_at": None,
 }
 _POST_IMPORT_ENRICH_TASK: asyncio.Task | None = None
+_BACKGROUND_TMDB_TASK: asyncio.Task | None = None
+
+# The first pass is deliberately bounded.  The remaining eligible records are
+# handled by the low-priority continuation so a large provider catalog does
+# not hold the catalog handoff open for hours.
+_TMDB_INITIAL_FRACTION = 0.30
+_TMDB_INITIAL_MOVIE_CAP = 15_000
+_TMDB_INITIAL_SERIES_CAP = 3_000
+_TMDB_BACKGROUND_BATCH = 500
+_TMDB_BACKGROUND_DELAY_SECONDS = 5
 
 
 def get_tmdb_enrich_progress() -> dict:
     return dict(_TMDB_ENRICH_PROGRESS)
 
 
-async def bulk_enrich_tmdb_movies(concurrency: int = 8) -> None:
+async def bulk_enrich_tmdb_movies(concurrency: int = 8, limit: int | None = None) -> None:
     """Resolve imported movie TMDB IDs without opening provider connections.
 
     The import list already supplies identity for many movies.  Keeping this
@@ -1648,7 +1659,7 @@ async def bulk_enrich_tmdb_movies(concurrency: int = 8) -> None:
     """
     if _TMDB_ENRICH_PROGRESS["running"]:
         return
-    ids = await asyncio.to_thread(vod_db.list_movie_ids_pending_tmdb_enrichment)
+    ids = await asyncio.to_thread(vod_db.list_movie_ids_pending_tmdb_enrichment, limit)
     _TMDB_ENRICH_PROGRESS.update({
         "running": True, "total": len(ids), "done": 0, "errors": 0,
         "started_at": time.time(), "finished_at": None,
@@ -1694,9 +1705,9 @@ async def bulk_enrich_tmdb_movies(concurrency: int = 8) -> None:
         _TMDB_ENRICH_PROGRESS["finished_at"] = time.time()
 
 
-async def bulk_enrich_tmdb_series_metadata(concurrency: int = 8) -> None:
+async def bulk_enrich_tmdb_series_metadata(concurrency: int = 8, limit: int | None = None) -> None:
     """Normalize known-TMDB series cards before provider episode discovery."""
-    pending_series = await asyncio.to_thread(vod_db.list_series_pending_tmdb_metadata_enrichment)
+    pending_series = await asyncio.to_thread(vod_db.list_series_pending_tmdb_metadata_enrichment, limit)
     # A multilingual catalog can deliberately retain several canonical cards
     # for one real TMDB title. They must stay separate for language-aware
     # playback/merge rules, but TMDB's title/rating is identical, so fetch it
@@ -1762,7 +1773,7 @@ async def bulk_enrich_tmdb_series_metadata(concurrency: int = 8) -> None:
     await asyncio.to_thread(vod_db.auto_merge_series_tmdb_collisions)
 
 
-async def bulk_enrich_series_episodes(concurrency: int = 4) -> None:
+async def bulk_enrich_series_episodes(concurrency: int = 6, limit: int | None = None) -> None:
     """Fetch provider detail only for pending series episode sources.
 
     TMDB remains authoritative for series metadata; the provider call exists
@@ -1773,7 +1784,7 @@ async def bulk_enrich_series_episodes(concurrency: int = 4) -> None:
     pending_provider_ids = []
     series_ids: set[int] = set()
     for provider in providers:
-        rows = await asyncio.to_thread(vod_db.list_pending_series_sources, provider["id"])
+        rows = await asyncio.to_thread(vod_db.list_pending_series_sources, provider["id"], limit)
         if rows:
             pending_provider_ids.append(provider["id"])
             series_ids.update(row["series_id"] for row in rows)
@@ -1822,15 +1833,29 @@ async def _post_import_enrichment(*, track_catalog_workflow: bool = True) -> Non
     try:
         if track_catalog_workflow:
             _set_catalog_workflow_phase("Resolving known TMDB identities")
-        await bulk_enrich_tmdb_movies()
-        await bulk_enrich_tmdb_series_metadata()
+        movie_count = await asyncio.to_thread(vod_db.count_movies_pending_tmdb_enrichment)
+        series_count = await asyncio.to_thread(vod_db.count_series_pending_tmdb_metadata_enrichment)
+        episode_count = await asyncio.to_thread(vod_db.count_pending_series_sources)
+        movie_limit = min(_TMDB_INITIAL_MOVIE_CAP, max(1, math.ceil(movie_count * _TMDB_INITIAL_FRACTION))) if movie_count else 0
+        series_limit = min(_TMDB_INITIAL_SERIES_CAP, max(1, math.ceil(series_count * _TMDB_INITIAL_FRACTION))) if series_count else 0
+        episode_limit = min(_TMDB_INITIAL_SERIES_CAP, max(1, math.ceil(episode_count * _TMDB_INITIAL_FRACTION))) if episode_count else 0
+        logger.info(
+            "[vod_importer] bounded initial pass: movies=%s/%s series_tmdb=%s/%s episodes=%s/%s",
+            movie_limit, movie_count, series_limit, series_count, episode_limit, episode_count,
+        )
+        await bulk_enrich_tmdb_movies(limit=movie_limit or 1)
+        await bulk_enrich_tmdb_series_metadata(limit=series_limit or 1)
         if track_catalog_workflow:
-            _set_catalog_workflow_phase("Discovering series episodes")
-        await bulk_enrich_series_episodes()
+            _set_catalog_workflow_phase("Synchronizing series episodes")
+        # Episode data is the final provider-sync stage.  It is source-gated
+        # and therefore only calls providers for series sources that have not
+        # yet been imported or that an import explicitly invalidated.
+        await bulk_enrich_series_episodes(limit=episode_limit or 1)
         if track_catalog_workflow:
             _set_catalog_workflow_phase("Preparing catalog review")
         if track_catalog_workflow:
             mark_catalog_workflow_ready()
+        _schedule_background_tmdb_work()
     except Exception:
         logger.exception("[vod_importer] post-import enrichment failed")
         if track_catalog_workflow:
@@ -1853,6 +1878,46 @@ def schedule_post_import_enrichment(*, track_catalog_workflow: bool = True) -> b
         _post_import_enrichment(track_catalog_workflow=track_catalog_workflow)
     )
     return True
+
+
+async def _background_tmdb_enrichment() -> None:
+    """Drain remaining eligible work at low priority.
+
+    Episode synchronization remains series-only and source-gated; movies
+    never receive a provider detail call here. TMDB work uses the same
+    persisted eligibility gates, so completed records disappear from the
+    queue and a restart can safely resume on the next scheduled run.
+    """
+    while True:
+        before = (
+            await asyncio.to_thread(vod_db.count_pending_series_sources),
+            await asyncio.to_thread(vod_db.count_movies_pending_tmdb_enrichment),
+            await asyncio.to_thread(vod_db.count_series_pending_tmdb_metadata_enrichment),
+        )
+        if before[0]:
+            await bulk_enrich_series_episodes(concurrency=6, limit=_TMDB_BACKGROUND_BATCH)
+        if before[1]:
+            await bulk_enrich_tmdb_movies(concurrency=4, limit=_TMDB_BACKGROUND_BATCH)
+        if before[2]:
+            await bulk_enrich_tmdb_series_metadata(concurrency=4, limit=_TMDB_BACKGROUND_BATCH)
+        after = (
+            await asyncio.to_thread(vod_db.count_pending_series_sources),
+            await asyncio.to_thread(vod_db.count_movies_pending_tmdb_enrichment),
+            await asyncio.to_thread(vod_db.count_series_pending_tmdb_metadata_enrichment),
+        )
+        if not any(after):
+            return
+        if after == before:
+            logger.warning("[vod_importer] background enrichment made no progress; leaving work for the next scheduled run: %s", after)
+            return
+        await asyncio.sleep(_TMDB_BACKGROUND_DELAY_SECONDS)
+
+
+def _schedule_background_tmdb_work() -> None:
+    global _BACKGROUND_TMDB_TASK
+    if _BACKGROUND_TMDB_TASK and not _BACKGROUND_TMDB_TASK.done():
+        return
+    _BACKGROUND_TMDB_TASK = asyncio.create_task(_background_tmdb_enrichment())
 
 
 _ENRICH_PROGRESS: dict = {
