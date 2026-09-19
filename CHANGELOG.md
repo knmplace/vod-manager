@@ -31,23 +31,16 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
-## 2026-09-17
-
 ## 2026-09-19
 
-- ✅ Episode enrichment progress now reports provider episode sources in a
-  separate counter from canonical series, so multi-provider catalogs no
-  longer display misleading values such as `98 / 30`. Overlapping catalog
-  enrichment runs are coalesced instead of overwriting one another's progress.
-  The deployed `6c3a991` playback relay recovery remains included; its
-  transient mid-stream reconnect and incomplete-Activity filtering are now
-  running in the fork image.
-
-- ✅ Post-import catalog processing now completes the intended staged handoff:
-  TMDB metadata resolution runs first, then series-only provider detail calls
-  discover episode streams. Movie metadata never falls back to a second
-  provider call in this workflow. Automatic TMDB merges now require matching
-  non-null years; conflicting or missing years remain for user review.
+- ✅🔀 Post-import catalog processing now completes the intended staged
+  handoff: TMDB metadata resolution runs first, then series-only provider
+  detail calls discover episode streams. Movie metadata never falls back to a
+  second provider call in this workflow. Automatic TMDB merges require
+  matching non-null years; conflicting or missing years remain for user review.
+  Episode progress reports provider sources separately from canonical series,
+  and bounded work drains incrementally in the background. Proposed upstream
+  in [#31](https://github.com/jstevenscl/vod-manager/pull/31).
 
 - ✅🔼 Language policy now applies consistently at import: XC, Plex, and
   Emby catalogs use the enabled playback languages, classify from the raw
@@ -68,29 +61,16 @@ instead of opening a duplicate request.
   was closed without a merge commit; the functionality was incorporated in
   upstream [v0.2.18](https://github.com/jstevenscl/vod-manager/releases/tag/v0.2.18).
 
-## 2026-09-19
-
-- ✅ Playback relay recovery now retries a provider `ReadError` in-place by
-  reopening the upstream at the next byte range before exposing a broken
-  response to Dispatcharr. Client disconnects and superseded cache/range
-  requests remain normal playback behavior, and incomplete capacity
-  reservations are hidden from Activity so they cannot display as
-  `undefined`/`NaN`. Backend validation: 201 tests passed in 34.30s.
-
-- ✅ Automatic catalog handoff is now bounded and incremental. The initial
-  pass processes up to 30% of eligible new/changed TMDB records, capped at
-  15,000 movies and 3,000 series/episode sources; remaining work drains in
-  controlled background batches. Completed metadata, invalid TMDB IDs, and
-  unchanged records are skipped. Series episode discovery remains the final
-  provider-sync stage, is series-only, runs at concurrency 6, and is gated by
-  each source's stored episode-enrichment marker so completed sources are not
-  called again. Baseline production logs showed a roughly 9,000-second
-  handoff; backend validation after this change: 201 tests passed in 34.30s.
-  A live before/after duration comparison remains pending deployment.
-
 - ✅ The fork image version label now tracks upstream **v0.2.19**. This aligns
   the release baseline with the latest upstream release while retaining the
   fork-only workflow and operational improvements documented below.
+
+- ✅🔀 Playback relay recovery retries transient provider disconnects by
+  reopening the upstream at the next byte range. Normal client disconnects
+  and superseded range requests remain normal playback behavior, and incomplete
+  capacity reservations are hidden from Activity instead of displaying as
+  `undefined`/`NaN`. Proposed upstream in
+  [#34](https://github.com/jstevenscl/vod-manager/pull/34).
 
 - ✅🔀 Xtream/Emby catalog refreshes now scope episode-source ranking to the
   requested series before SQLite runs its source-selection window, instead of
@@ -106,10 +86,9 @@ instead of opening a duplicate request.
 
 ## 2026-09-18
 
-- ✅ Post-import series episode discovery now runs with a reduced automatic
-  concurrency of four provider requests, while preserving persistent provider
-  HTTP clients. This lowers burst pressure and avoids unnecessary provider
-  backoff during the one-request-per-series episode phase.
+- ✅ Post-import series episode discovery now runs with automatic concurrency
+  of six provider requests, while preserving persistent provider HTTP clients.
+  This is the current value documented in upstream [#31](https://github.com/jstevenscl/vod-manager/pull/31).
 
 - ✅ Enrichment progress now counts canonical series once instead of counting
   each provider source separately, preventing misleading totals above 100%.
