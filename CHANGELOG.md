@@ -60,6 +60,13 @@ instead of opening a duplicate request.
 
 ## 2026-09-19
 
+- ✅ Playback relay recovery now retries a provider `ReadError` in-place by
+  reopening the upstream at the next byte range before exposing a broken
+  response to Dispatcharr. Client disconnects and superseded cache/range
+  requests remain normal playback behavior, and incomplete capacity
+  reservations are hidden from Activity so they cannot display as
+  `undefined`/`NaN`. Backend validation: 201 tests passed in 34.30s.
+
 - ✅ Automatic catalog handoff is now bounded and incremental. The initial
   pass processes up to 30% of eligible new/changed TMDB records, capped at
   15,000 movies and 3,000 series/episode sources; remaining work drains in
