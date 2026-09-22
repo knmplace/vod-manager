@@ -46,8 +46,35 @@ interface CatalogSyncEvent {
   title: string
   year: number | null
   action: string
-  detail: { tmdb_id?: string | null; summary?: Record<string, unknown> }
+  detail: Record<string, any>
   created_at: string
+}
+
+function syncLabel(value: string): string {
+  return value.replace(/_/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
+
+function syncDuration(start: string | null | undefined, finish: string | null | undefined): string {
+  if (!start || !finish) return 'pending'
+  const seconds = Math.max(0, Math.round(Number(finish) - Number(start)))
+  return `${seconds}s`
+}
+
+function syncEventDescription(event: CatalogSyncEvent): string {
+  const detail = event.detail ?? {}
+  if (event.action === 'merged') {
+    return `Merged “${detail.merged_title ?? 'duplicate'}” into “${detail.survivor_title ?? event.title}”.`
+  }
+  if (event.action === 'episodes_synced') {
+    const added = Number(detail.episodes_added ?? 0)
+    const sources = Number(detail.episode_sources_added ?? 0)
+    return `${Number(detail.after?.episode_count ?? 0).toLocaleString()} episodes across ${Number(detail.after?.season_count ?? 0).toLocaleString()} seasons${added ? ` · ${added > 0 ? '+' : ''}${added} episode${Math.abs(added) === 1 ? '' : 's'}` : ''}${sources ? ` · ${sources > 0 ? '+' : ''}${sources} source${Math.abs(sources) === 1 ? '' : 's'}` : ''}.`
+  }
+  if (event.action === 'source_removed') return 'A provider source was removed from this catalog item.'
+  if (event.action === 'archived') return 'Archived from active review/playback queues by the import rules.'
+  if (event.action === 'unarchived') return 'Returned to the active review/playback queues.'
+  const sourceCount = detail.source_count
+  return `${event.action === 'added' ? 'Added to the catalog.' : 'Catalog metadata or sources changed.'}${sourceCount != null ? ` ${Number(sourceCount).toLocaleString()} source${Number(sourceCount) === 1 ? '' : 's'}.` : ''}`
 }
 
 interface CatalogSyncRun {
@@ -7783,16 +7810,30 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
         <div className="overflow-x-auto rounded border border-border/60">
           <table className="w-full text-xs"><thead className="text-left text-muted-foreground bg-muted/20"><tr><th className="p-2 w-8" /><th className="p-2">Run</th><th className="p-2">Provider</th><th className="p-2">Status</th><th className="p-2">Changes</th><th className="p-2">Duration</th></tr></thead>
             <tbody>{(syncHistoryQuery.data ?? []).map((run) => {
-              const started = run.import_started_at ? Number(run.import_started_at) : NaN
-              const finished = run.ready_at ? Number(run.ready_at) : NaN
-              const duration = Number.isFinite(started) && Number.isFinite(finished) ? `${Math.max(0, Math.round(finished - started))}s` : '—'
+              const duration = syncDuration(run.import_started_at, run.ready_at)
+              // duration is sourced from the durable report timestamps above
               const phaseDurations = [
-                run.import_started_at && run.import_finished_at ? `import ${Math.max(0, Math.round(Number(run.import_finished_at) - Number(run.import_started_at)))}s` : null,
-                run.enrichment_started_at && run.enrichment_finished_at ? `enrich ${Math.max(0, Math.round(Number(run.enrichment_finished_at) - Number(run.enrichment_started_at)))}s` : null,
-                run.reconciliation_started_at && run.reconciliation_finished_at ? `review ${Math.max(0, Math.round(Number(run.reconciliation_finished_at) - Number(run.reconciliation_started_at)))}s` : null,
+                run.import_started_at && run.import_finished_at ? `import ${syncDuration(run.import_started_at, run.import_finished_at)}` : null,
+                run.enrichment_started_at && run.enrichment_finished_at ? `enrich ${syncDuration(run.enrichment_started_at, run.enrichment_finished_at)}` : null,
+                run.reconciliation_started_at && run.reconciliation_finished_at ? `review ${syncDuration(run.reconciliation_started_at, run.reconciliation_finished_at)}` : null,
               ].filter(Boolean).join(' · ')
               return <Fragment key={run.id}><tr className="border-t border-border/40 hover:bg-muted/10"><td className="p-2"><input type="checkbox" checked={syncHistorySelected.has(run.id)} onChange={() => setSyncHistorySelected((current) => { const next = new Set(current); if (next.has(run.id)) next.delete(run.id); else next.add(run.id); return next })} /></td><td className="p-2"><button className="text-primary hover:underline" onClick={() => setSyncHistoryOpen(syncHistoryOpen === run.id ? null : run.id)}>{new Date(Number(run.queued_at) * 1000).toLocaleString()}</button></td><td className="p-2">{run.provider_name}</td><td className="p-2">{run.status}</td><td className="p-2">{run.event_count}</td><td className="p-2 tabular-nums"><span>{duration}</span>{phaseDurations && <span className="block text-[10px] text-muted-foreground">{phaseDurations}</span>}</td></tr>
-                {syncHistoryOpen === run.id && <tr className="border-t border-border/20 bg-muted/5"><td colSpan={6} className="p-2">{syncHistoryDetailQuery.isLoading ? <span className="text-muted-foreground">Loading report…</span> : <ul className="space-y-1 max-h-64 overflow-y-auto">{(syncHistoryDetailQuery.data?.events ?? []).map((event) => <li key={event.id} className="flex items-center gap-2"><span className="text-muted-foreground">{event.content_type}</span><span>{event.title}{event.year ? ` (${event.year})` : ''}</span><span className="text-cyan-300">{event.action.split('_').join(' ')}</span>{event.detail?.tmdb_id && <span className="text-muted-foreground">TMDB {event.detail.tmdb_id}</span>}</li>)}</ul>}</td></tr>}
+                {syncHistoryOpen === run.id && <tr className="border-t border-border/20 bg-muted/5"><td colSpan={6} className="p-3">{syncHistoryDetailQuery.isLoading ? <span className="text-muted-foreground">Loading report…</span> : syncHistoryDetailQuery.isError ? <span className="text-destructive">Could not load this report. Refresh and try again.</span> : syncHistoryDetailQuery.data && <div className="space-y-3">
+                  {(() => {
+                    const detail = syncHistoryDetailQuery.data
+                    const summaryEntries = Object.entries(detail.summary ?? {}).filter(([key, value]) => !['provider', 'catalog_changed', 'post_import_enrichment_queued'].includes(key) && typeof value !== 'object' && value !== null)
+                    return <>
+                      <div className="grid gap-2 sm:grid-cols-4">{[
+                        ['Total', syncDuration(detail.import_started_at, detail.ready_at)],
+                        ['Import', syncDuration(detail.import_started_at, detail.import_finished_at)],
+                        ['Enrichment', syncDuration(detail.enrichment_started_at, detail.enrichment_finished_at)],
+                        ['Review', syncDuration(detail.reconciliation_started_at, detail.reconciliation_finished_at)],
+                      ].map(([label, value]) => <div key={label} className="rounded border border-border/50 bg-background/40 px-2 py-1.5"><div className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</div><div className="font-semibold tabular-nums">{value}</div></div>)}</div>
+                      <div className="rounded border border-border/50 bg-background/30 p-2"><div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">What this run did</div>{summaryEntries.length ? <div className="grid gap-x-4 gap-y-1 sm:grid-cols-3">{summaryEntries.map(([key, value]) => <div key={key} className="flex justify-between gap-2"><span className="text-muted-foreground">{syncLabel(key)}</span><span className="font-medium tabular-nums">{String(value)}</span></div>)}</div> : <div className="text-muted-foreground">No summary counters were recorded.</div>}</div>
+                      {detail.events?.length ? <div className="space-y-1.5"><div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Catalog changes and actions</div><ul className="space-y-1.5">{detail.events.map((event) => <li key={event.id} className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded border border-border/40 bg-background/25 px-2 py-1.5"><span className="text-muted-foreground">{event.content_type === 'movie' ? 'Movie' : 'TV'}</span><span className="font-medium">{event.title}{event.year ? ` (${event.year})` : ''}</span><span className="text-cyan-300">{syncLabel(event.action)}</span><span className="text-muted-foreground">{syncEventDescription(event)}</span><Button size="sm" variant="ghost" className="ml-auto h-6 px-1.5 text-[10px]" onClick={() => setActiveTab(event.content_type === 'movie' ? 'movies' : 'series')}>Open {event.content_type === 'movie' ? 'Movies' : 'TV Shows'}</Button></li>)}</ul></div> : <div className="rounded border border-dashed border-border/60 p-2 text-muted-foreground">No catalog cards changed in this run. The provider refresh completed without enrichment, automatic merges, or review work.</div>}
+                    </>
+                  })()}
+                </div>}</td></tr>}
               </Fragment>
             })}{!syncHistoryQuery.data?.length && <tr><td colSpan={6} className="p-3 text-muted-foreground">No sync reports yet.</td></tr>}</tbody>
           </table>

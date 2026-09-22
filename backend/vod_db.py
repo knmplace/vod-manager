@@ -1311,7 +1311,40 @@ def update_catalog_sync_run(run_id: int, **fields) -> None:
     conn.close()
 
 
-def record_catalog_sync_events(run_id: int, *, movie_ids=(), series_ids=(), created_movie_ids=(), created_series_ids=(), summary: dict | None = None) -> int:
+def _catalog_sync_row_detail(conn: sqlite3.Connection, content_type: str, row: sqlite3.Row, summary: dict | None) -> dict:
+    """Build durable, user-facing context for one catalog card event."""
+    if content_type == "movie":
+        source_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM movie_sources WHERE movie_id=?", (row["id"],)
+        ).fetchone()["c"]
+        detail = {"source_count": int(source_count)}
+    else:
+        episode_counts = conn.execute(
+            """SELECT COUNT(DISTINCT e.id) AS episodes,
+                      COUNT(DISTINCT e.season_number) AS seasons,
+                      COUNT(DISTINCT es.id) AS episode_sources
+                 FROM episodes e
+                 LEFT JOIN episode_sources es ON es.episode_id=e.id
+                WHERE e.series_id=?""",
+            (row["id"],),
+        ).fetchone()
+        source_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM series_sources WHERE series_id=?", (row["id"],)
+        ).fetchone()["c"]
+        detail = {
+            "source_count": int(source_count),
+            "episode_count": int(episode_counts["episodes"]),
+            "season_count": int(episode_counts["seasons"]),
+            "episode_source_count": int(episode_counts["episode_sources"]),
+        }
+    detail.update({"tmdb_id": row["tmdb_id"], "summary": summary or {}})
+    return detail
+
+
+def record_catalog_sync_events(
+    run_id: int, *, movie_ids=(), series_ids=(), created_movie_ids=(), created_series_ids=(),
+    summary: dict | None = None, extra_events: list[dict] | None = None,
+) -> int:
     """Snapshot meaningful changed catalog cards into a report.
 
     Episode-level changes are intentionally summarized on the series event;
@@ -1335,7 +1368,7 @@ def record_catalog_sync_events(run_id: int, *, movie_ids=(), series_ids=(), crea
                 f"SELECT id, name, year, tmdb_id FROM {table} WHERE id IN ({placeholders})", batch,
             ).fetchall()
             for row in rows:
-                detail = {"tmdb_id": row["tmdb_id"], "summary": summary or {}}
+                detail = _catalog_sync_row_detail(conn, content_type, row, summary)
                 conn.execute(
                     """INSERT INTO catalog_sync_events
                        (run_id, content_type, content_id, title, year, action, detail_json, created_at)
@@ -1345,6 +1378,22 @@ def record_catalog_sync_events(run_id: int, *, movie_ids=(), series_ids=(), crea
                      json.dumps(detail, separators=(",", ":")), now),
                 )
                 inserted += 1
+    for event in extra_events or []:
+        content_type = event.get("content_type")
+        if content_type not in ("movie", "series"):
+            continue
+        conn.execute(
+            """INSERT INTO catalog_sync_events
+               (run_id, content_type, content_id, provider_source_id, title, year, action, detail_json, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (
+                run_id, content_type, event.get("content_id"), event.get("provider_source_id"),
+                str(event.get("title") or "Untitled"), event.get("year"),
+                str(event.get("action") or "changed"),
+                json.dumps(event.get("detail") or {}, separators=(",", ":")), now,
+            ),
+        )
+        inserted += 1
     if inserted:
         _commit_with_retry(conn)
     conn.close()
@@ -1394,6 +1443,11 @@ def get_catalog_sync_run(run_id: int) -> dict | None:
             item["detail"] = {}
         result["events"].append(item)
     return result
+
+
+def get_latest_catalog_sync_run() -> dict | None:
+    runs = list_catalog_sync_runs(limit=1)
+    return runs[0] if runs else None
 
 
 def delete_catalog_sync_runs(run_ids: list[int]) -> int:
@@ -5614,7 +5668,7 @@ def list_all_movie_ids(
     return [r["id"] for r in rows]
 
 
-def list_movie_ids_pending_tmdb_enrichment(limit: int | None = None) -> list[int]:
+def list_movie_ids_pending_tmdb_enrichment(limit: int | None = None, item_ids: set[int] | None = None) -> list[int]:
     """Movies whose imported TMDB identity has not yet been resolved.
 
     This deliberately keys off ``last_enriched_at IS NULL``, not the general
@@ -5623,13 +5677,24 @@ def list_movie_ids_pending_tmdb_enrichment(limit: int | None = None) -> list[int
     movies whose metadata is already complete.
     """
     conn = _connect()
+    scope_clause = ""
+    params: list = []
+    if item_ids is not None:
+        ids = sorted({int(item_id) for item_id in item_ids})
+        if not ids:
+            conn.close()
+            return []
+        scope_clause = f" AND id IN ({','.join('?' * len(ids))})"
+        params.extend(ids)
     limit_clause = " LIMIT ?" if limit is not None else ""
-    params: tuple = (max(1, int(limit)),) if limit is not None else ()
-    rows = conn.execute("""
+    if limit is not None:
+        params.append(max(1, int(limit)))
+    rows = conn.execute(f"""
         SELECT id FROM movies
         WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> ''
           AND is_adult=0 AND review_excluded=0
           AND last_enriched_at IS NULL
+          {scope_clause}
           AND NOT EXISTS (
               SELECT 1 FROM tmdb_lookup_failures f
               WHERE f.content_type='movie' AND f.item_id=movies.id
@@ -5640,22 +5705,32 @@ def list_movie_ids_pending_tmdb_enrichment(limit: int | None = None) -> list[int
     return [r["id"] for r in rows]
 
 
-def count_movies_pending_tmdb_enrichment() -> int:
+def count_movies_pending_tmdb_enrichment(item_ids: set[int] | None = None) -> int:
     conn = _connect()
-    row = conn.execute("""
+    scope_clause = ""
+    params: list = []
+    if item_ids is not None:
+        ids = sorted({int(item_id) for item_id in item_ids})
+        if not ids:
+            conn.close()
+            return 0
+        scope_clause = f" AND id IN ({','.join('?' * len(ids))})"
+        params.extend(ids)
+    row = conn.execute(f"""
         SELECT COUNT(*) AS c FROM movies
         WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> ''
           AND is_adult=0 AND review_excluded=0 AND last_enriched_at IS NULL
-          AND NOT EXISTS (
+           {scope_clause}
+           AND NOT EXISTS (
               SELECT 1 FROM tmdb_lookup_failures f
               WHERE f.content_type='movie' AND f.item_id=movies.id
           )
-    """).fetchone()
+    """, params).fetchone()
     conn.close()
     return int(row["c"])
 
 
-def list_series_pending_tmdb_metadata_enrichment(limit: int | None = None) -> list[dict]:
+def list_series_pending_tmdb_metadata_enrichment(limit: int | None = None, item_ids: set[int] | None = None) -> list[dict]:
     """Known-TMDB series awaiting their canonical TMDB title/detail pass.
 
     This is canonical-series scoped, deliberately not source scoped: source
@@ -5663,12 +5738,23 @@ def list_series_pending_tmdb_metadata_enrichment(limit: int | None = None) -> li
     TMDB name regardless of how many providers or variants carry it.
     """
     conn = _connect()
+    scope_clause = ""
+    params: list = []
+    if item_ids is not None:
+        ids = sorted({int(item_id) for item_id in item_ids})
+        if not ids:
+            conn.close()
+            return []
+        scope_clause = f" AND id IN ({','.join('?' * len(ids))})"
+        params.extend(ids)
     limit_clause = " LIMIT ?" if limit is not None else ""
-    params: tuple = (max(1, int(limit)),) if limit is not None else ()
-    rows = conn.execute("""
+    if limit is not None:
+        params.append(max(1, int(limit)))
+    rows = conn.execute(f"""
         SELECT id, tmdb_id FROM series
         WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> ''
           AND is_adult=0 AND review_excluded=0
+          {scope_clause}
           AND (
                 tmdb_metadata_enriched_at IS NULL
                 -- Backfill an older successful identity lookup that predated
@@ -5687,18 +5773,28 @@ def list_series_pending_tmdb_metadata_enrichment(limit: int | None = None) -> li
     return [dict(r) for r in rows]
 
 
-def count_series_pending_tmdb_metadata_enrichment() -> int:
+def count_series_pending_tmdb_metadata_enrichment(item_ids: set[int] | None = None) -> int:
     conn = _connect()
-    row = conn.execute("""
+    scope_clause = ""
+    params: list = []
+    if item_ids is not None:
+        ids = sorted({int(item_id) for item_id in item_ids})
+        if not ids:
+            conn.close()
+            return 0
+        scope_clause = f" AND id IN ({','.join('?' * len(ids))})"
+        params.extend(ids)
+    row = conn.execute(f"""
         SELECT COUNT(*) AS c FROM series
         WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> ''
           AND is_adult=0 AND review_excluded=0
-          AND (tmdb_metadata_enriched_at IS NULL OR (needs_year_review=1 AND year IS NULL))
+           {scope_clause}
+           AND (tmdb_metadata_enriched_at IS NULL OR (needs_year_review=1 AND year IS NULL))
           AND NOT EXISTS (
               SELECT 1 FROM tmdb_lookup_failures f
               WHERE f.content_type='series' AND f.item_id=series.id
           )
-    """).fetchone()
+    """, params).fetchone()
     conn.close()
     return int(row["c"])
 
@@ -6765,7 +6861,9 @@ def has_pending_series_source_enrichment(provider_id: int) -> bool:
     return row is not None
 
 
-def list_pending_series_sources(provider_id: int | None = None, limit: int | None = None) -> list[dict]:
+def list_pending_series_sources(
+    provider_id: int | None = None, limit: int | None = None, series_ids: set[int] | None = None,
+) -> list[dict]:
     """Lists unprocessed episode-discovery sources, not just canonical series.
 
     A canonical series can retain several source variants from one provider.
@@ -6778,6 +6876,14 @@ def list_pending_series_sources(provider_id: int | None = None, limit: int | Non
     if provider_id is not None:
         provider_clause = "AND ss.provider_id=?"
         params = (provider_id,)
+    series_clause = ""
+    if series_ids is not None:
+        ids = sorted({int(series_id) for series_id in series_ids})
+        if not ids:
+            conn.close()
+            return []
+        series_clause = f"AND ss.series_id IN ({','.join('?' * len(ids))})"
+        params = (*params, *ids)
     limit_clause = " LIMIT ?" if limit is not None else ""
     if limit is not None:
         params = (*params, max(1, int(limit)))
@@ -6786,8 +6892,9 @@ def list_pending_series_sources(provider_id: int | None = None, limit: int | Non
         FROM series_sources ss
         JOIN series s ON s.id=ss.series_id
         WHERE ss.episodes_last_enriched_at IS NULL
-          AND s.review_excluded=0
-          {provider_clause}
+           AND s.review_excluded=0
+           {provider_clause}
+           {series_clause}
         ORDER BY ss.id
         {limit_clause}
     """, params).fetchall()
@@ -6795,17 +6902,57 @@ def list_pending_series_sources(provider_id: int | None = None, limit: int | Non
     return [dict(row) for row in rows]
 
 
-def count_pending_series_sources() -> int:
+def count_pending_series_sources(series_ids: set[int] | None = None) -> int:
     conn = _connect()
-    row = conn.execute("""
+    series_clause = ""
+    params: list = []
+    if series_ids is not None:
+        ids = sorted({int(series_id) for series_id in series_ids})
+        if not ids:
+            conn.close()
+            return 0
+        series_clause = f"AND ss.series_id IN ({','.join('?' * len(ids))})"
+        params.extend(ids)
+    row = conn.execute(f"""
         SELECT COUNT(*) AS c
         FROM series_sources ss
         JOIN series s ON s.id=ss.series_id
-        WHERE ss.episodes_last_enriched_at IS NULL
-          AND s.review_excluded=0
-    """).fetchone()
+          WHERE ss.episodes_last_enriched_at IS NULL
+           AND s.review_excluded=0
+           {series_clause}
+    """, params).fetchone()
     conn.close()
     return int(row["c"])
+
+
+def get_series_episode_summaries(series_ids: set[int] | list[int] | None) -> dict[int, dict]:
+    """Return compact series-level episode totals for sync reports."""
+    ids = sorted({int(series_id) for series_id in (series_ids or [])})
+    if not ids:
+        return {}
+    conn = _connect()
+    rows = conn.execute(
+        f"""SELECT s.id, s.name, s.year,
+                    COUNT(DISTINCT e.id) AS episode_count,
+                    COUNT(DISTINCT e.season_number) AS season_count,
+                    COUNT(DISTINCT es.id) AS episode_source_count
+               FROM series s
+               LEFT JOIN episodes e ON e.series_id=s.id
+               LEFT JOIN episode_sources es ON es.episode_id=e.id
+              WHERE s.id IN ({','.join('?' * len(ids))})
+              GROUP BY s.id""",
+        ids,
+    ).fetchall()
+    conn.close()
+    return {
+        int(row["id"]): {
+            "title": row["name"], "year": row["year"],
+            "episode_count": int(row["episode_count"]),
+            "season_count": int(row["season_count"]),
+            "episode_source_count": int(row["episode_source_count"]),
+        }
+        for row in rows
+    }
 
 
 def set_series_source_enrichment(series_id: int, provider_id: int, provider_series_id: str) -> None:
@@ -9157,7 +9304,7 @@ def _shares_a_language(conn: sqlite3.Connection, sources_table: str, fk_column: 
     )
 
 
-def auto_merge_movie_by_tmdb(movie_id: int) -> None:
+def auto_merge_movie_by_tmdb(movie_id: int) -> list[dict]:
     """Called right after enrichment confirms/refreshes `movie_id`'s tmdb_id
     (see vod_importer.enrich_movie) -- every OTHER movie row sharing that
     same non-null tmdb_id gets merged into it automatically, no human click,
@@ -9193,12 +9340,12 @@ def auto_merge_movie_by_tmdb(movie_id: int) -> None:
     call inside _merge_movie_row is the only audit trail, which is why every
     call site here logs the year-agreement status on top of it."""
     if not get_duplicate_finder_auto_merge_tmdb():
-        return
+        return []
 
     movie = get_movie(movie_id)
     tmdb_id = movie.get("tmdb_id") if movie else None
     if not tmdb_id:
-        return
+        return []
 
     conn = _connect()
     other_rows = conn.execute(
@@ -9206,10 +9353,11 @@ def auto_merge_movie_by_tmdb(movie_id: int) -> None:
     ).fetchall()
     conn.close()
     if not other_rows:
-        return
+        return []
 
     ignored_sigs = set(list_ignored_duplicate_signatures("movie"))
     this_year = movie.get("year")
+    merge_events = []
     for row in other_rows:
         signature = _duplicate_ignore_signature([movie_id, row["id"]])
         if signature in ignored_sigs:
@@ -9285,7 +9433,23 @@ def auto_merge_movie_by_tmdb(movie_id: int) -> None:
             "[auto_merge_movie_by_tmdb] tmdb_id=%s year_status=%s -- id=%s (%r, year=%s) auto-merging into id=%s (%r, year=%s)",
             tmdb_id, year_status, row["id"], row["name"], other_year, movie_id, movie.get("name"), this_year,
         )
+        merge_events.append({
+            "content_type": "movie",
+            "content_id": movie_id,
+            "title": movie.get("name") or "Movie",
+            "year": this_year,
+            "action": "merged",
+            "detail": {
+                "tmdb_id": tmdb_id,
+                "merged_title": row["name"],
+                "merged_id": row["id"],
+                "survivor_title": movie.get("name"),
+                "survivor_id": movie_id,
+                "year_status": year_status,
+            },
+        })
         merge_movie(row["id"], movie_id)
+    return merge_events
 
 
 def _merge_series_row(conn: sqlite3.Connection, from_id: int, into_id: int) -> None:
@@ -9357,7 +9521,7 @@ def merge_series(from_id: int, into_id: int) -> None:
         conn.close()
 
 
-def auto_merge_series_by_tmdb(series_id: int) -> None:
+def auto_merge_series_by_tmdb(series_id: int) -> list[dict]:
     """Called right after enrichment confirms/refreshes `series_id`'s tmdb_id
     (see vod_importer.enrich_series) -- every OTHER series row sharing that
     same non-null tmdb_id gets merged into a single survivor automatically,
@@ -9397,12 +9561,12 @@ def auto_merge_series_by_tmdb(series_id: int) -> None:
     which is why every call site here logs the year-agreement status and the
     chosen survivor on top of it."""
     if not get_duplicate_finder_auto_merge_tmdb():
-        return
+        return []
 
     series = get_series(series_id)
     tmdb_id = series.get("tmdb_id") if series else None
     if not tmdb_id:
-        return
+        return []
 
     conn = _connect()
     other_rows = conn.execute(
@@ -9410,9 +9574,10 @@ def auto_merge_series_by_tmdb(series_id: int) -> None:
     ).fetchall()
     conn.close()
     if not other_rows:
-        return
+        return []
 
     ignored_sigs = set(list_ignored_duplicate_signatures("series"))
+    merge_events = []
     for row in other_rows:
         signature = _duplicate_ignore_signature([series_id, row["id"]])
         if signature in ignored_sigs:
@@ -9488,6 +9653,21 @@ def auto_merge_series_by_tmdb(series_id: int) -> None:
             keep_id,
             (current_name if keep_id == series_id else other_name),
         )
+        merge_events.append({
+            "content_type": "series",
+            "content_id": keep_id,
+            "title": current_name if keep_id == series_id else other_name,
+            "year": current.get("year") if keep_id == series_id else other.get("year"),
+            "action": "merged",
+            "detail": {
+                "tmdb_id": tmdb_id,
+                "merged_title": current_name if drop_id == series_id else other_name,
+                "merged_id": drop_id,
+                "survivor_title": current_name if keep_id == series_id else other_name,
+                "survivor_id": keep_id,
+                "year_status": year_status,
+            },
+        })
         merge_series(drop_id, keep_id)
 
         # If series_id itself was the row that got merged away, there's
@@ -9495,9 +9675,10 @@ def auto_merge_series_by_tmdb(series_id: int) -> None:
         # other_rows -- keep_id is now the live survivor going forward.
         if drop_id == series_id:
             series_id = keep_id
+    return merge_events
 
 
-def auto_merge_movies_by_tmdb_batch(movie_ids) -> None:
+def auto_merge_movies_by_tmdb_batch(movie_ids) -> list[dict]:
     """Bulk-enrich's end-of-run merge sweep (see vod_importer.bulk_enrich_all)
     used to fan out one asyncio.to_thread(auto_merge_movie_by_tmdb, id) task
     per affected id via asyncio.gather -- against a full-catalog run that's
@@ -9509,70 +9690,90 @@ def auto_merge_movies_by_tmdb_batch(movie_ids) -> None:
     the plan doc's "Follow-up: final SQLite contention work"). Looping
     sequentially in one thread does the identical merges in the identical
     order with none of that overhead."""
+    events = []
     for movie_id in movie_ids:
-        auto_merge_movie_by_tmdb(movie_id)
+        events.extend(auto_merge_movie_by_tmdb(movie_id) or [])
+    return events
 
 
-def auto_merge_series_by_tmdb_batch(series_ids) -> None:
+def auto_merge_series_by_tmdb_batch(series_ids) -> list[dict]:
     """Series counterpart to auto_merge_movies_by_tmdb_batch -- same
     single-thread-sequential fix for the same per-id asyncio.gather fan-out
     problem, see that function's docstring."""
+    events = []
     for series_id in series_ids:
-        auto_merge_series_by_tmdb(series_id)
+        events.extend(auto_merge_series_by_tmdb(series_id) or [])
+    return events
 
 
-def auto_merge_movie_tmdb_collisions() -> None:
+def auto_merge_movie_tmdb_collisions(movie_ids: set[int] | list[int] | None = None) -> list[dict]:
     """Merge every *current* movie TMDB-ID collision safely.
 
-    A post-import run normally only sweeps the movie IDs that needed detail
-    enrichment. A newly imported movie that already carries a valid TMDB ID
-    does not need that detail work, but can still be an exact-ID sibling of a
-    pre-existing card. Discover collision groups directly so that inexpensive
-    path is never stranded for manual Duplicate Finder review. The existing
-    per-item merge retains the language-overlap and explicit-ignore gates.
+    Supplying IDs limits automatic reconciliation to the changed/new frontier.
+    Omitting IDs is reserved for an explicit maintenance action and retains the
+    full-catalog fallback.
     """
     if not get_duplicate_finder_auto_merge_tmdb():
-        return
+        return []
     conn = _connect()
-    rows = conn.execute("""
-        SELECT id FROM movies
-        WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> ''
-          AND tmdb_id IN (
-              SELECT tmdb_id FROM movies
-              WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> ''
-              GROUP BY tmdb_id HAVING COUNT(*) > 1
-          )
-        ORDER BY tmdb_id, id
-    """).fetchall()
+    if movie_ids is None:
+        rows = conn.execute("""
+            SELECT id FROM movies
+            WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> ''
+              AND tmdb_id IN (
+                  SELECT tmdb_id FROM movies
+                  WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> ''
+                  GROUP BY tmdb_id HAVING COUNT(*) > 1
+              )
+            ORDER BY tmdb_id, id
+        """).fetchall()
+    else:
+        ids = sorted({int(item_id) for item_id in movie_ids})
+        if not ids:
+            conn.close()
+            return []
+        rows = conn.execute(
+            f"SELECT id FROM movies WHERE id IN ({','.join('?' * len(ids))}) "
+            "AND tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> '' ORDER BY id",
+            ids,
+        ).fetchall()
     conn.close()
-    auto_merge_movies_by_tmdb_batch([row["id"] for row in rows])
+    return auto_merge_movies_by_tmdb_batch([row["id"] for row in rows])
 
 
-def auto_merge_series_tmdb_collisions() -> None:
+def auto_merge_series_tmdb_collisions(series_ids: set[int] | list[int] | None = None) -> list[dict]:
     """Merge every *current* series TMDB-ID collision safely.
 
-    Normal bulk enrichment supplies the IDs it worked on to the batch helper.
-    A queued import can be coalesced with an already-running enrichment task,
-    though, leaving a newly-created exact-ID sibling outside that captured
-    list.  Discovering only groups that actually collide makes the final
-    reconciliation inexpensive while preserving auto_merge_series_by_tmdb's
-    language-overlap and explicit-ignore safeguards.
+    Supplying IDs limits automatic reconciliation to the changed/new frontier.
+    Omitting IDs is reserved for an explicit maintenance action and retains the
+    full-catalog fallback.
     """
     if not get_duplicate_finder_auto_merge_tmdb():
-        return
+        return []
     conn = _connect()
-    rows = conn.execute("""
-        SELECT id FROM series
-        WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> ''
-          AND tmdb_id IN (
-              SELECT tmdb_id FROM series
-              WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> ''
-              GROUP BY tmdb_id HAVING COUNT(*) > 1
-          )
-        ORDER BY tmdb_id, id
-    """).fetchall()
+    if series_ids is None:
+        rows = conn.execute("""
+            SELECT id FROM series
+            WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> ''
+              AND tmdb_id IN (
+                  SELECT tmdb_id FROM series
+                  WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> ''
+                  GROUP BY tmdb_id HAVING COUNT(*) > 1
+              )
+            ORDER BY tmdb_id, id
+        """).fetchall()
+    else:
+        ids = sorted({int(item_id) for item_id in series_ids})
+        if not ids:
+            conn.close()
+            return []
+        rows = conn.execute(
+            f"SELECT id FROM series WHERE id IN ({','.join('?' * len(ids))}) "
+            "AND tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> '' ORDER BY id",
+            ids,
+        ).fetchall()
     conn.close()
-    auto_merge_series_by_tmdb_batch([row["id"] for row in rows])
+    return auto_merge_series_by_tmdb_batch([row["id"] for row in rows])
 
 
 def list_needs_year_review(content_type: str | None = None) -> dict:

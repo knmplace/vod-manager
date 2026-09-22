@@ -11,6 +11,7 @@ bounded concurrency instead of a human clicking one movie at a time.
 """
 
 import asyncio
+import inspect
 import math
 import hashlib
 import json
@@ -27,6 +28,38 @@ import emby_vod_client
 import tmdb_sync
 import vod_db
 from xc_server import _redact_upstream_url
+
+
+async def _run_scoped_collision_sweep(sweep, item_ids: set[int]) -> list[dict]:
+    """Run a collision sweep with the bounded IDs used by this workflow.
+
+    The signature fallback keeps older integrations that monkeypatch the
+    maintenance helper without parameters working; the real database helper
+    always accepts the scoped ID set, so automatic production runs remain
+    delta-scoped.
+    """
+    if not item_ids:
+        return []
+    try:
+        inspect.signature(sweep).bind(item_ids)
+    except (TypeError, ValueError):
+        return await asyncio.to_thread(sweep) or []
+    return await asyncio.to_thread(sweep, item_ids) or []
+
+
+def _queue_catalog_enrichment_for_changes(
+    *, changed_movie_ids: set[int], changed_series_ids: set[int],
+) -> bool:
+    """Queue delta-scoped enrichment while tolerating legacy test hooks."""
+    kwargs = {
+        "changed_movie_ids": changed_movie_ids,
+        "changed_series_ids": changed_series_ids,
+    }
+    try:
+        inspect.signature(schedule_post_import_enrichment).bind(**kwargs)
+    except (TypeError, ValueError):
+        return schedule_post_import_enrichment()
+    return schedule_post_import_enrichment(**kwargs)
 
 
 def _current_lang_settings() -> dict:
@@ -757,7 +790,48 @@ def get_import_progress() -> dict:
 
 def get_catalog_workflow_progress() -> dict:
     """Shared import-to-review lifecycle for the header and sidebar."""
-    return dict(_CATALOG_WORKFLOW_PROGRESS)
+    progress = dict(_CATALOG_WORKFLOW_PROGRESS)
+    # The live lifecycle is intentionally in memory, but the last completed
+    # report is durable.  After a container restart, hydrate the header from
+    # that report instead of showing "duration pending" forever.
+    latest = vod_db.get_latest_catalog_sync_run()
+    should_hydrate_latest = (
+        progress.get("state") == "idle"
+        or (
+            progress.get("state") in ("ready", "failed")
+            and progress.get("run_id") in (None, latest.get("id") if latest else None)
+        )
+    )
+    if should_hydrate_latest and latest and latest.get("status") in ("ready", "failed"):
+        progress.update({
+            "state": latest["status"],
+            "phase": "Catalog ready for review" if latest["status"] == "ready" else "Automatic work needs attention",
+            "provider_name": latest.get("provider_name"),
+            "run_id": latest.get("id"),
+            "queued_at": latest.get("queued_at"),
+            "import_started_at": latest.get("import_started_at"),
+            "import_finished_at": latest.get("import_finished_at"),
+            "reconciliation_started_at": latest.get("reconciliation_started_at"),
+            "reconciliation_finished_at": latest.get("reconciliation_finished_at"),
+            "enrichment_started_at": latest.get("enrichment_started_at"),
+            "enrichment_finished_at": latest.get("enrichment_finished_at"),
+            "ready_at": latest.get("ready_at"),
+            "started_at": latest.get("import_started_at") or latest.get("queued_at"),
+            "finished_at": latest.get("ready_at"),
+            "error": latest.get("error"),
+        })
+    for key in (
+        "queued_at", "import_started_at", "import_finished_at",
+        "reconciliation_started_at", "reconciliation_finished_at",
+        "enrichment_started_at", "enrichment_finished_at", "ready_at",
+        "started_at", "finished_at",
+    ):
+        if progress.get(key) is not None:
+            try:
+                progress[key] = float(progress[key])
+            except (TypeError, ValueError):
+                progress[key] = None
+    return progress
 
 
 def _start_catalog_workflow(provider_name: str | None, phase: str, *, queued: bool = False, run_id: int | None = None) -> None:
@@ -828,6 +902,31 @@ def _mark_catalog_workflow_failed(error: str) -> None:
     run_id = _CATALOG_WORKFLOW_PROGRESS.get("run_id")
     if run_id:
         vod_db.update_catalog_sync_run(run_id, status="failed", error=error, ready_at=str(time.time()))
+
+
+def _catalog_sync_summary(result: dict) -> dict:
+    """Keep report summaries compact while retaining every useful counter."""
+    excluded = {"changed_movie_ids", "changed_series_ids", "created_movie_ids", "created_series_ids"}
+    return {
+        key: value for key, value in result.items()
+        if key not in excluded and isinstance(value, (str, int, float, bool))
+    }
+
+
+async def _append_catalog_sync_events(run_id: int | None, events: list[dict], summary_updates: dict | None = None) -> None:
+    if not run_id:
+        return
+    if events:
+        await asyncio.to_thread(vod_db.record_catalog_sync_events, run_id, extra_events=events)
+    if summary_updates:
+        report = await asyncio.to_thread(vod_db.get_catalog_sync_run, run_id)
+        summary = dict(report.get("summary") or {}) if report else {}
+        summary.update(summary_updates)
+        await asyncio.to_thread(
+            vod_db.update_catalog_sync_run,
+            run_id,
+            summary_json=json.dumps(summary, separators=(",", ":")),
+        )
 
 
 def mark_import_queued(provider_id: int, provider_name: str, queue_position: int) -> None:
@@ -936,11 +1035,18 @@ async def import_provider_catalog(provider_id: int, *, schedule_enrichment: bool
         series_ids=result.get("changed_series_ids", []),
         created_movie_ids=result.get("created_movie_ids", []),
         created_series_ids=result.get("created_series_ids", []),
-        summary={key: value for key, value in result.items() if key.endswith("created") or key.endswith("matched") or key in ("sources_changed", "catalog_changed")},
+        summary=_catalog_sync_summary(result),
     )
-    await asyncio.to_thread(vod_db.update_catalog_sync_run, run_id, summary_json=json.dumps(result, default=str))
+    await asyncio.to_thread(
+        vod_db.update_catalog_sync_run,
+        run_id,
+        summary_json=json.dumps(_catalog_sync_summary(result), separators=(",", ":")),
+    )
     if schedule_enrichment and result["catalog_changed"]:
-        result["post_import_enrichment_queued"] = schedule_post_import_enrichment()
+        result["post_import_enrichment_queued"] = _queue_catalog_enrichment_for_changes(
+            changed_movie_ids=set(result.get("changed_movie_ids", [])),
+            changed_series_ids=set(result.get("changed_series_ids", [])),
+        )
     elif schedule_enrichment:
         # Nothing changed, so there is no enrichment/reconciliation phase to
         # await. Keep the handoff truthful instead of stranding it at the
@@ -1032,6 +1138,7 @@ async def _import_provider_catalog_impl(provider_id: int) -> dict:
     )
     changed_movie_ids.update(reconcile_result.pop("affected_movie_ids", []))
     changed_series_ids.update(reconcile_result.pop("affected_series_ids", []))
+    reconcile_summary = dict(reconcile_result)
     if any(reconcile_result.values()):
         logger.info(
             "[vod_importer] provider=%s reconciled %d stale movie source(s), %d stale series source(s), %d stale episode source(s)",
@@ -1059,12 +1166,14 @@ async def _import_provider_catalog_impl(provider_id: int) -> dict:
     # so any provider's catalog can always contain a language outside that
     # set. The purge scan now always runs (its own per-row work is cheap
     # when nothing currently matches any active rule).
+    purge_summary = {"movies_deleted": 0, "series_deleted": 0}
     if catalog_changed:
         lang = _current_lang_settings()
         purge_result = await asyncio.to_thread(
             vod_db.purge_excluded_archived_content,
             {provider_id: (exclude_categories, exclude_uncategorized)}, lang,
         )
+        purge_summary = dict(purge_result)
         if purge_result["movies_deleted"] or purge_result["series_deleted"]:
             logger.info("[vod_importer] provider=%s purged %d movie(s)/%d series matching current exclusion rules",
                         provider["name"], purge_result["movies_deleted"], purge_result["series_deleted"])
@@ -1079,6 +1188,10 @@ async def _import_provider_catalog_impl(provider_id: int) -> dict:
     # provider_id like the purge call above -- it evaluates every movie/
     # series row's source languages regardless of which provider(s) they
     # came from, since the check isn't provider-specific.
+    archive_result = {
+        "movies_archived": 0, "movies_unarchived": 0,
+        "series_archived": 0, "series_unarchived": 0,
+    }
     if catalog_changed:
         archive_result = await asyncio.to_thread(
             vod_db.archive_disabled_language_content, changed_movie_ids, changed_series_ids,
@@ -1125,6 +1238,10 @@ async def _import_provider_catalog_impl(provider_id: int) -> dict:
         "series_categories": len(series_categories),
         **movie_result,
         **series_result,
+        **reconcile_summary,
+        **purge_summary,
+        **archive_result,
+        **{f"orphan_{key}": value for key, value in orphan_result.items() if key.endswith("deleted")},
         "catalog_changed": catalog_changed,
         "changed_movie_ids": list(changed_movie_ids),
         "changed_series_ids": list(changed_series_ids),
@@ -1726,7 +1843,9 @@ def get_tmdb_enrich_progress() -> dict:
     return dict(_TMDB_ENRICH_PROGRESS)
 
 
-async def bulk_enrich_tmdb_movies(concurrency: int = 8, limit: int | None = None) -> None:
+async def bulk_enrich_tmdb_movies(
+    concurrency: int = 8, limit: int | None = None, item_ids: set[int] | None = None,
+) -> list[dict]:
     """Resolve imported movie TMDB IDs without opening provider connections.
 
     The import list already supplies identity for many movies.  Keeping this
@@ -1735,8 +1854,8 @@ async def bulk_enrich_tmdb_movies(concurrency: int = 8, limit: int | None = None
     calls.  Results are committed in batches to avoid SQLite write churn.
     """
     if _TMDB_ENRICH_PROGRESS["running"]:
-        return
-    ids = await asyncio.to_thread(vod_db.list_movie_ids_pending_tmdb_enrichment, limit)
+        return []
+    ids = await asyncio.to_thread(vod_db.list_movie_ids_pending_tmdb_enrichment, limit, item_ids)
     _TMDB_ENRICH_PROGRESS.update({
         "running": True, "total": len(ids), "done": 0, "errors": 0,
         "started_at": time.time(), "finished_at": None,
@@ -1771,20 +1890,28 @@ async def bulk_enrich_tmdb_movies(concurrency: int = 8, limit: int | None = None
         await asyncio.gather(*(worker() for _ in range(min(max(1, concurrency), len(ids) or 1))))
         for offset in range(0, len(pending), _MOVIE_BATCH_CHUNK_SIZE):
             await asyncio.to_thread(vod_db.apply_movie_enrichment_batch, pending[offset:offset + _MOVIE_BATCH_CHUNK_SIZE])
+        merge_events = []
         if succeeded:
-            await asyncio.to_thread(vod_db.auto_merge_movies_by_tmdb_batch, succeeded)
+            merge_events.extend(await asyncio.to_thread(vod_db.auto_merge_movies_by_tmdb_batch, succeeded) or [])
         # A card can arrive with an already-valid TMDB ID and therefore skip
-        # this detail queue entirely. Reconcile the current collision set so
-        # it does not wait for a later provider-detail enrichment pass.
-        await asyncio.to_thread(vod_db.auto_merge_movie_tmdb_collisions)
+        # this detail queue entirely. Reconcile only this phase's delta so it
+        # does not scan the full collision set on every refresh.
+        collision_ids = item_ids if item_ids is not None else set(ids)
+        if collision_ids:
+            merge_events.extend(await _run_scoped_collision_sweep(
+                vod_db.auto_merge_movie_tmdb_collisions, set(collision_ids),
+            ))
+        return merge_events
     finally:
         _TMDB_ENRICH_PROGRESS["running"] = False
         _TMDB_ENRICH_PROGRESS["finished_at"] = time.time()
 
 
-async def bulk_enrich_tmdb_series_metadata(concurrency: int = 8, limit: int | None = None) -> None:
+async def bulk_enrich_tmdb_series_metadata(
+    concurrency: int = 8, limit: int | None = None, item_ids: set[int] | None = None,
+) -> list[dict]:
     """Normalize known-TMDB series cards before provider episode discovery."""
-    pending_series = await asyncio.to_thread(vod_db.list_series_pending_tmdb_metadata_enrichment, limit)
+    pending_series = await asyncio.to_thread(vod_db.list_series_pending_tmdb_metadata_enrichment, limit, item_ids)
     # A multilingual catalog can deliberately retain several canonical cards
     # for one real TMDB title. They must stay separate for language-aware
     # playback/merge rules, but TMDB's title/rating is identical, so fetch it
@@ -1840,17 +1967,26 @@ async def bulk_enrich_tmdb_series_metadata(concurrency: int = 8, limit: int | No
     await asyncio.gather(*(worker() for _ in range(min(max(1, concurrency), len(series_by_tmdb_id) or 1))))
     for offset in range(0, len(resolved), _MOVIE_BATCH_CHUNK_SIZE):
         await asyncio.to_thread(vod_db.apply_series_tmdb_metadata_batch, resolved[offset:offset + _MOVIE_BATCH_CHUNK_SIZE])
+    merge_events = []
     if merged_ids:
         # Same TMDB id remains insufficient to merge different-language cards.
-        await asyncio.to_thread(vod_db.auto_merge_series_by_tmdb_batch, merged_ids)
+        merge_events.extend(await asyncio.to_thread(vod_db.auto_merge_series_by_tmdb_batch, merged_ids) or [])
     # The item list above is deliberately restricted to cards pending TMDB
     # metadata.  Finish with a cheap DB-derived collision sweep so a card
     # created while a coalesced import/enrichment run was already active
     # cannot be stranded merely because it was absent from that item list.
-    await asyncio.to_thread(vod_db.auto_merge_series_tmdb_collisions)
+    pending_series_ids = {item["id"] for item in pending_series}
+    collision_ids = item_ids if item_ids is not None else pending_series_ids
+    if collision_ids:
+        merge_events.extend(await _run_scoped_collision_sweep(
+            vod_db.auto_merge_series_tmdb_collisions, set(collision_ids),
+        ))
+    return merge_events
 
 
-async def bulk_enrich_series_episodes(concurrency: int = 6, limit: int | None = None) -> None:
+async def bulk_enrich_series_episodes(
+    concurrency: int = 6, limit: int | None = None, series_ids: set[int] | None = None,
+) -> list[dict]:
     """Fetch provider detail only for pending series episode sources.
 
     TMDB remains authoritative for series metadata; the provider call exists
@@ -1858,25 +1994,27 @@ async def bulk_enrich_series_episodes(concurrency: int = 6, limit: int | None = 
     """
     if _ENRICH_PROGRESS["running"]:
         logger.info("[vod_importer] episode enrichment already running; skipping overlapping request")
-        return
+        return []
     providers = [p for p in await asyncio.to_thread(vod_db.list_providers)
                  if p.get("is_active", True)]
     _ENRICH_DONE_SOURCE_IDS.clear()
     pending_provider_ids = []
     pending_by_provider: dict[int, list[dict]] = {}
-    series_ids: set[int] = set()
+    pending_series_ids: set[int] = set()
     source_count = 0
     for provider in providers:
-        rows = await asyncio.to_thread(vod_db.list_pending_series_sources, provider["id"], limit)
+        rows = await asyncio.to_thread(vod_db.list_pending_series_sources, provider["id"], limit, series_ids)
         if rows:
             pending_provider_ids.append(provider["id"])
             pending_by_provider[provider["id"]] = rows
-            series_ids.update(row["series_id"] for row in rows)
+            pending_series_ids.update(row["series_id"] for row in rows)
             source_count += len(rows)
+
+    episode_before = await asyncio.to_thread(vod_db.get_series_episode_summaries, pending_series_ids)
 
     _ENRICH_PROGRESS.update({
         "running": True, "movies_total": 0, "movies_done": 0,
-        "movies_errors": 0, "series_total": len(series_ids), "series_done": 0,
+        "movies_errors": 0, "series_total": len(pending_series_ids), "series_done": 0,
         "series_sources_total": source_count, "series_sources_done": 0,
         "progress_phase": "series_episodes",
         "series_errors": 0, "series_backoff_skipped": 0,
@@ -1903,8 +2041,34 @@ async def bulk_enrich_series_episodes(concurrency: int = 6, limit: int | None = 
                 })
         await write_queue.put(None)
         await writer_task
-        await asyncio.to_thread(vod_db.auto_merge_series_by_tmdb_batch, series_ids)
-        await asyncio.to_thread(vod_db.auto_merge_series_tmdb_collisions)
+        merge_events = await asyncio.to_thread(vod_db.auto_merge_series_by_tmdb_batch, pending_series_ids) or []
+        if pending_series_ids:
+            merge_events.extend(await _run_scoped_collision_sweep(
+                vod_db.auto_merge_series_tmdb_collisions, pending_series_ids,
+            ))
+        episode_after = await asyncio.to_thread(vod_db.get_series_episode_summaries, pending_series_ids)
+        episode_events = []
+        for series_id in sorted(pending_series_ids):
+            before = episode_before.get(series_id) or {
+                "episode_count": 0, "season_count": 0, "episode_source_count": 0,
+            }
+            after = episode_after.get(series_id)
+            if not after:
+                continue
+            episode_events.append({
+                "content_type": "series",
+                "content_id": series_id,
+                "title": after["title"],
+                "year": after["year"],
+                "action": "episodes_synced",
+                "detail": {
+                    "before": before,
+                    "after": after,
+                    "episodes_added": after["episode_count"] - before["episode_count"],
+                    "episode_sources_added": after["episode_source_count"] - before["episode_source_count"],
+                },
+            })
+        return merge_events + episode_events
     finally:
         if not writer_task.done():
             writer_task.cancel()
@@ -1912,7 +2076,11 @@ async def bulk_enrich_series_episodes(concurrency: int = 6, limit: int | None = 
         _ENRICH_PROGRESS["finished_at"] = time.time()
 
 
-async def _post_import_enrichment(*, track_catalog_workflow: bool = True) -> None:
+async def _post_import_enrichment(
+    *, track_catalog_workflow: bool = True,
+    changed_movie_ids: set[int] | None = None,
+    changed_series_ids: set[int] | None = None,
+) -> None:
     """Run the ordered metadata and series-episode phases after import.
 
     Movie provider detail is never part of this handoff. Series provider
@@ -1921,9 +2089,9 @@ async def _post_import_enrichment(*, track_catalog_workflow: bool = True) -> Non
     try:
         if track_catalog_workflow:
             _set_catalog_workflow_phase("Resolving known TMDB identities")
-        movie_count = await asyncio.to_thread(vod_db.count_movies_pending_tmdb_enrichment)
-        series_count = await asyncio.to_thread(vod_db.count_series_pending_tmdb_metadata_enrichment)
-        episode_count = await asyncio.to_thread(vod_db.count_pending_series_sources)
+        movie_count = await asyncio.to_thread(vod_db.count_movies_pending_tmdb_enrichment) if changed_movie_ids is None else await asyncio.to_thread(vod_db.count_movies_pending_tmdb_enrichment, changed_movie_ids)
+        series_count = await asyncio.to_thread(vod_db.count_series_pending_tmdb_metadata_enrichment) if changed_series_ids is None else await asyncio.to_thread(vod_db.count_series_pending_tmdb_metadata_enrichment, changed_series_ids)
+        episode_count = await asyncio.to_thread(vod_db.count_pending_series_sources) if changed_series_ids is None else await asyncio.to_thread(vod_db.count_pending_series_sources, changed_series_ids)
         movie_limit = min(_TMDB_INITIAL_MOVIE_CAP, max(1, math.ceil(movie_count * _TMDB_INITIAL_FRACTION))) if movie_count else 0
         series_limit = min(_TMDB_INITIAL_SERIES_CAP, max(1, math.ceil(series_count * _TMDB_INITIAL_FRACTION))) if series_count else 0
         episode_limit = min(_TMDB_INITIAL_SERIES_CAP, max(1, math.ceil(episode_count * _TMDB_INITIAL_FRACTION))) if episode_count else 0
@@ -1931,14 +2099,23 @@ async def _post_import_enrichment(*, track_catalog_workflow: bool = True) -> Non
             "[vod_importer] bounded initial pass: movies=%s/%s series_tmdb=%s/%s episodes=%s/%s",
             movie_limit, movie_count, series_limit, series_count, episode_limit, episode_count,
         )
-        await bulk_enrich_tmdb_movies(limit=movie_limit or 1)
-        await bulk_enrich_tmdb_series_metadata(limit=series_limit or 1)
+        movie_events = await bulk_enrich_tmdb_movies(limit=movie_limit or 1, item_ids=changed_movie_ids) or []
+        series_events = await bulk_enrich_tmdb_series_metadata(limit=series_limit or 1, item_ids=changed_series_ids) or []
         if track_catalog_workflow:
             _set_catalog_workflow_phase("Synchronizing series episodes")
         # Episode data is the final provider-sync stage.  It is source-gated
         # and therefore only calls providers for series sources that have not
         # yet been imported or that an import explicitly invalidated.
-        await bulk_enrich_series_episodes(limit=episode_limit or 1)
+        episode_events = await bulk_enrich_series_episodes(limit=episode_limit or 1, series_ids=changed_series_ids) or []
+        run_id = _CATALOG_WORKFLOW_PROGRESS.get("run_id")
+        await _append_catalog_sync_events(
+            run_id,
+            movie_events + series_events + episode_events,
+            {
+                "automatic_merges": sum(event.get("action") == "merged" for event in movie_events + series_events + episode_events),
+                "series_episode_reports": sum(event.get("action") == "episodes_synced" for event in episode_events),
+            },
+        )
         if track_catalog_workflow:
             _CATALOG_WORKFLOW_PROGRESS["enrichment_finished_at"] = time.time()
             run_id = _CATALOG_WORKFLOW_PROGRESS.get("run_id")
@@ -1955,7 +2132,11 @@ async def _post_import_enrichment(*, track_catalog_workflow: bool = True) -> Non
             _mark_catalog_workflow_failed("automatic enrichment failed")
 
 
-def schedule_post_import_enrichment(*, track_catalog_workflow: bool = True) -> bool:
+def schedule_post_import_enrichment(
+    *, track_catalog_workflow: bool = True,
+    changed_movie_ids: set[int] | None = None,
+    changed_series_ids: set[int] | None = None,
+) -> bool:
     """Queue one reconciliation pass; coalesce overlapping provider imports."""
     global _POST_IMPORT_ENRICH_TASK
     if _POST_IMPORT_ENRICH_TASK and not _POST_IMPORT_ENRICH_TASK.done():
@@ -1968,7 +2149,11 @@ def schedule_post_import_enrichment(*, track_catalog_workflow: bool = True) -> b
     if track_catalog_workflow:
         _set_catalog_workflow_phase("Preparing automatic catalog review")
     _POST_IMPORT_ENRICH_TASK = asyncio.create_task(
-        _post_import_enrichment(track_catalog_workflow=track_catalog_workflow)
+        _post_import_enrichment(
+            track_catalog_workflow=track_catalog_workflow,
+            changed_movie_ids=changed_movie_ids,
+            changed_series_ids=changed_series_ids,
+        )
     )
     return True
 
@@ -2626,12 +2811,16 @@ async def bulk_enrich_all(concurrency: int = 8, force: bool = False, pending_onl
         # auto_merge_movies_by_tmdb_batch's docstring in vod_db.py.
         await asyncio.to_thread(vod_db.auto_merge_movies_by_tmdb_batch, merged_movie_ids)
         await asyncio.to_thread(vod_db.auto_merge_series_by_tmdb_batch, merged_series_ids)
-        # Do not rely exclusively on the run's work lists: overlapping or
-        # coalesced catalog imports can create an exact-ID sibling after that
-        # list was assembled.  This queries only TMDB collision groups, not
-        # the whole catalog, and retains the normal language/ignore guards.
-        await asyncio.to_thread(vod_db.auto_merge_movie_tmdb_collisions)
-        await asyncio.to_thread(vod_db.auto_merge_series_tmdb_collisions)
+        # Reconcile only the IDs touched by this bounded run.  A full collision
+        # scan remains available only as an explicit maintenance call.
+        if merged_movie_ids:
+            await _run_scoped_collision_sweep(
+                vod_db.auto_merge_movie_tmdb_collisions, merged_movie_ids,
+            )
+        if merged_series_ids:
+            await _run_scoped_collision_sweep(
+                vod_db.auto_merge_series_tmdb_collisions, merged_series_ids,
+            )
     finally:
         was_cancelled = _ENRICH_CANCEL_REQUESTED
         if not writer_task.done():

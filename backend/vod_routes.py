@@ -1674,18 +1674,25 @@ async def _manual_import_worker() -> None:
     """Drain user-requested imports one at a time, then enrich once."""
     global _MANUAL_IMPORT_TASK
     catalog_changed = False
+    changed_movie_ids: set[int] = set()
+    changed_series_ids: set[int] = set()
     try:
         while _MANUAL_IMPORT_QUEUE:
             provider_id = _MANUAL_IMPORT_QUEUE.pop(0)
             try:
                 result = await _run_provider_catalog_import(provider_id)
                 catalog_changed = catalog_changed or result.get("catalog_changed", True)
+                changed_movie_ids.update(result.get("changed_movie_ids", []))
+                changed_series_ids.update(result.get("changed_series_ids", []))
             except Exception:
                 # The import module records XC status for the sidebar; retain
                 # a traceback for the non-XC importer paths as well.
                 logger.exception("[vod_routes] queued provider import %s failed", provider_id)
         if catalog_changed:
-            if vod_importer.schedule_post_import_enrichment():
+            if vod_importer.schedule_post_import_enrichment(
+                changed_movie_ids=changed_movie_ids,
+                changed_series_ids=changed_series_ids,
+            ):
                 logger.info("[vod_routes] queued post-import enrichment after manual import queue drained")
         else:
             # An unchanged catalog has no automatic reconciliation work to

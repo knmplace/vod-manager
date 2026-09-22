@@ -172,7 +172,10 @@ async def _vod_catalog_refresher() -> None:
                         await vod_importer.resweep_smart_categories()
                     else:
                         await vod_importer.resweep_smart_categories(changed_movie_ids, changed_series_ids)
-                    vod_importer.schedule_post_import_enrichment()
+                    vod_importer.schedule_post_import_enrichment(
+                        changed_movie_ids=changed_movie_ids,
+                        changed_series_ids=changed_series_ids,
+                    )
         except Exception as exc:
             logger.warning("[vod_catalog_refresher] cycle failed: %s", exc)
 
