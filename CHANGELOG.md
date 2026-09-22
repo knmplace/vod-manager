@@ -41,6 +41,10 @@ instead of opening a duplicate request.
   follow-up durations separately so a long-lived workflow timer cannot be
   mistaken for a slow provider import.
 
+- ✅ Header readability improved: the application version and commit are now
+  brighter and slightly larger, and the catalog-status banner uses a larger,
+  brighter title/detail treatment with a slightly larger status bar.
+
 ## 2026-09-19
 
 - ✅🔀 Post-import catalog processing now completes the intended staged
