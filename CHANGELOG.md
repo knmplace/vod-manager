@@ -46,9 +46,10 @@ instead of opening a duplicate request.
   candidates remain available for review, and the report records the merge
   action. Proposed upstream in [#35](https://github.com/jstevenscl/vod-manager/pull/35).
 
-- ✅ Header readability improved: the application version and commit are now
+- ✅🔀 Header readability improved: the application version and commit are now
   brighter and slightly larger, and the catalog-status banner uses a larger,
   brighter title/detail treatment with a slightly larger status bar.
+  Proposed upstream in [#36](https://github.com/jstevenscl/vod-manager/pull/36).
 
 ## 2026-09-19
 
