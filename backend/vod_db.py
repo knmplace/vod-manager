@@ -619,6 +619,40 @@ def init_db() -> None:
             PRIMARY KEY(content_type, item_id)
         );
 
+        -- User-visible provider/import history.  This is an audit report only:
+        -- deleting these rows never deletes catalog content.
+        CREATE TABLE IF NOT EXISTS catalog_sync_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider_id INTEGER,
+            provider_name TEXT NOT NULL,
+            run_type TEXT NOT NULL DEFAULT 'provider_import',
+            queued_at TEXT NOT NULL,
+            import_started_at TEXT,
+            import_finished_at TEXT,
+            reconciliation_started_at TEXT,
+            reconciliation_finished_at TEXT,
+            enrichment_started_at TEXT,
+            enrichment_finished_at TEXT,
+            ready_at TEXT,
+            status TEXT NOT NULL DEFAULT 'running',
+            summary_json TEXT NOT NULL DEFAULT '{}',
+            error TEXT,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS catalog_sync_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER NOT NULL REFERENCES catalog_sync_runs(id) ON DELETE CASCADE,
+            content_type TEXT NOT NULL CHECK(content_type IN ('movie','series')),
+            content_id INTEGER,
+            provider_source_id TEXT,
+            title TEXT NOT NULL,
+            year INTEGER,
+            action TEXT NOT NULL,
+            detail_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_movies_name_year ON movies(name, year);
         CREATE INDEX IF NOT EXISTS idx_series_name_year ON series(name, year);
         CREATE INDEX IF NOT EXISTS idx_episodes_series_season_ep ON episodes(series_id, season_number, episode_number);
@@ -642,6 +676,8 @@ def init_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_dvr_recording_failures_provider_id ON dvr_recording_failures(provider_id);
         CREATE INDEX IF NOT EXISTS idx_vod_stream_failures_created_at ON vod_stream_failures(created_at);
         CREATE INDEX IF NOT EXISTS idx_tmdb_lookup_failures_type_time ON tmdb_lookup_failures(content_type, last_failed_at);
+        CREATE INDEX IF NOT EXISTS idx_catalog_sync_runs_created_at ON catalog_sync_runs(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_catalog_sync_events_run_id ON catalog_sync_events(run_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_provider_sub_accounts_provider_id ON provider_sub_accounts(provider_id);
         CREATE INDEX IF NOT EXISTS idx_provider_sub_account_live_accounts_sub_account_id ON provider_sub_account_live_accounts(sub_account_id);
         CREATE INDEX IF NOT EXISTS idx_movie_source_owners_source_id ON movie_source_owners(movie_source_id);
@@ -1240,6 +1276,136 @@ def _backfill_source_owners(conn: sqlite3.Connection) -> None:
 
 def _now() -> str:
     return str(time.time())
+
+
+def create_catalog_sync_run(provider_id: int | None, provider_name: str, run_type: str = "provider_import") -> int:
+    """Create the durable user-facing report before a provider import starts."""
+    now = _now()
+    conn = _connect()
+    cur = conn.execute(
+        """INSERT INTO catalog_sync_runs
+           (provider_id, provider_name, run_type, queued_at, status, created_at)
+           VALUES (?,?,?,?,?,?)""",
+        (provider_id, provider_name, run_type, now, "running", now),
+    )
+    _commit_with_retry(conn)
+    run_id = int(cur.lastrowid)
+    conn.close()
+    return run_id
+
+
+def update_catalog_sync_run(run_id: int, **fields) -> None:
+    """Update only known lifecycle/summary fields on a sync report."""
+    allowed = {
+        "import_started_at", "import_finished_at", "reconciliation_started_at",
+        "reconciliation_finished_at", "enrichment_started_at", "enrichment_finished_at",
+        "ready_at", "status", "summary_json", "error",
+    }
+    values = {key: value for key, value in fields.items() if key in allowed}
+    if not values:
+        return
+    conn = _connect()
+    assignments = ", ".join(f"{key}=?" for key in values)
+    conn.execute(f"UPDATE catalog_sync_runs SET {assignments} WHERE id=?", (*values.values(), run_id))
+    _commit_with_retry(conn)
+    conn.close()
+
+
+def record_catalog_sync_events(run_id: int, *, movie_ids=(), series_ids=(), created_movie_ids=(), created_series_ids=(), summary: dict | None = None) -> int:
+    """Snapshot meaningful changed catalog cards into a report.
+
+    Episode-level changes are intentionally summarized on the series event;
+    this table is not an episode review queue.
+    """
+    conn = _connect()
+    now = _now()
+    inserted = 0
+    created_by_type = {
+        "movie": {int(item_id) for item_id in created_movie_ids if item_id is not None},
+        "series": {int(item_id) for item_id in created_series_ids if item_id is not None},
+    }
+    for content_type, ids, table in (("movie", movie_ids, "movies"), ("series", series_ids, "series")):
+        ids = sorted({int(item_id) for item_id in ids if item_id is not None})
+        for offset in range(0, len(ids), 900):
+            batch = ids[offset:offset + 900]
+            if not batch:
+                continue
+            placeholders = ",".join("?" * len(batch))
+            rows = conn.execute(
+                f"SELECT id, name, year, tmdb_id FROM {table} WHERE id IN ({placeholders})", batch,
+            ).fetchall()
+            for row in rows:
+                detail = {"tmdb_id": row["tmdb_id"], "summary": summary or {}}
+                conn.execute(
+                    """INSERT INTO catalog_sync_events
+                       (run_id, content_type, content_id, title, year, action, detail_json, created_at)
+                       VALUES (?,?,?,?,?,?,?,?)""",
+                    (run_id, content_type, row["id"], row["name"], row["year"],
+                     "added" if row["id"] in created_by_type[content_type] else "changed",
+                     json.dumps(detail, separators=(",", ":")), now),
+                )
+                inserted += 1
+    if inserted:
+        _commit_with_retry(conn)
+    conn.close()
+    return inserted
+
+
+def list_catalog_sync_runs(limit: int = 100, offset: int = 0) -> list[dict]:
+    conn = _connect()
+    rows = conn.execute(
+        """SELECT r.*, (SELECT COUNT(*) FROM catalog_sync_events e WHERE e.run_id=r.id) AS event_count
+           FROM catalog_sync_runs r ORDER BY r.id DESC LIMIT ? OFFSET ?""",
+        (max(1, min(limit, 500)), max(0, offset)),
+    ).fetchall()
+    conn.close()
+    result = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["summary"] = json.loads(item.pop("summary_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            item["summary"] = {}
+        result.append(item)
+    return result
+
+
+def get_catalog_sync_run(run_id: int) -> dict | None:
+    conn = _connect()
+    run = conn.execute("SELECT * FROM catalog_sync_runs WHERE id=?", (run_id,)).fetchone()
+    if not run:
+        conn.close()
+        return None
+    events = conn.execute(
+        "SELECT * FROM catalog_sync_events WHERE run_id=? ORDER BY id", (run_id,)
+    ).fetchall()
+    conn.close()
+    result = dict(run)
+    try:
+        result["summary"] = json.loads(result.pop("summary_json") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        result["summary"] = {}
+    result["events"] = []
+    for event in events:
+        item = dict(event)
+        try:
+            item["detail"] = json.loads(item.pop("detail_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            item["detail"] = {}
+        result["events"].append(item)
+    return result
+
+
+def delete_catalog_sync_runs(run_ids: list[int]) -> int:
+    ids = sorted({int(run_id) for run_id in run_ids})
+    if not ids:
+        return 0
+    conn = _connect()
+    placeholders = ",".join("?" * len(ids))
+    cur = conn.execute(f"DELETE FROM catalog_sync_runs WHERE id IN ({placeholders})", ids)
+    _commit_with_retry(conn)
+    conn.close()
+    return cur.rowcount
 
 
 def _commit_with_retry(conn: sqlite3.Connection, retries: int = 5) -> None:
@@ -7396,6 +7562,7 @@ def bulk_import_movies(provider_id: int, items: list[dict], _retry_depth: int = 
         unarchived = 0
         sources_changed = 0
         changed_movie_ids: set[int] = set()
+        created_movie_ids: set[int] = set()
         lock_retry_items = []
         # Chunked at 1000 items/round-trip instead of the old one-SELECT-plus-
         # one-or-more-writes-PER-ITEM loop (up to 5 individual statements x
@@ -7715,6 +7882,8 @@ def bulk_import_movies(provider_id: int, items: list[dict], _retry_depth: int = 
                             entry["movie_id"] = _resolve(entry["movie_id"])
                         if entry["source_changed"] or entry["did_archive"] or entry["did_unarchive"]:
                             changed_movie_ids.add(entry["movie_id"])
+                        if entry["did_create"]:
+                            created_movie_ids.add(entry["movie_id"])
                     movie_updates_adult = [(_resolve(mid),) for (mid,) in movie_updates_adult]
                     movie_updates_archive = [(_resolve(mid),) for (mid,) in movie_updates_archive]
                     movie_updates_unarchive = [(_resolve(mid),) for (mid,) in movie_updates_unarchive]
@@ -7801,10 +7970,11 @@ def bulk_import_movies(provider_id: int, items: list[dict], _retry_depth: int = 
         unarchived += retry_result["movies_unarchived"]
         sources_changed += retry_result["sources_changed"]
         changed_movie_ids.update(retry_result["changed_movie_ids"])
+        created_movie_ids.update(retry_result.get("created_movie_ids", []))
         flagged += retry_result["flagged_for_review"]
         errors += retry_result["errors"]
 
-    return {"movies_created": created, "movies_matched": matched, "movies_archived": archived, "movies_unarchived": unarchived, "sources_changed": sources_changed, "changed_movie_ids": list(changed_movie_ids), "total": len(items), "flagged_for_review": flagged, "errors": errors}
+    return {"movies_created": created, "movies_matched": matched, "movies_archived": archived, "movies_unarchived": unarchived, "sources_changed": sources_changed, "changed_movie_ids": list(changed_movie_ids), "created_movie_ids": list(created_movie_ids), "total": len(items), "flagged_for_review": flagged, "errors": errors}
 
 
 def bulk_import_series(provider_id: int, items: list[dict], _retry_depth: int = 0) -> dict:
@@ -7854,6 +8024,7 @@ def bulk_import_series(provider_id: int, items: list[dict], _retry_depth: int = 
         unarchived = 0
         sources_changed = 0
         changed_series_ids: set[int] = set()
+        created_series_ids: set[int] = set()
         lock_retry_items = []
         # See bulk_import_movies's identical comment -- same fix, same reason.
         chunk_size = 1000
@@ -8106,6 +8277,8 @@ def bulk_import_series(provider_id: int, items: list[dict], _retry_depth: int = 
                             entry["series_id"] = _resolve(entry["series_id"])
                         if entry["source_changed"] or entry["did_archive"] or entry["did_unarchive"]:
                             changed_series_ids.add(entry["series_id"])
+                        if entry["did_create"]:
+                            created_series_ids.add(entry["series_id"])
                     series_updates_adult = [(_resolve(sid),) for (sid,) in series_updates_adult]
                     series_updates_archive = [(_resolve(sid),) for (sid,) in series_updates_archive]
                     series_updates_unarchive = [(_resolve(sid),) for (sid,) in series_updates_unarchive]
@@ -8211,10 +8384,11 @@ def bulk_import_series(provider_id: int, items: list[dict], _retry_depth: int = 
         unarchived += retry_result["series_unarchived"]
         sources_changed += retry_result["sources_changed"]
         changed_series_ids.update(retry_result["changed_series_ids"])
+        created_series_ids.update(retry_result.get("created_series_ids", []))
         flagged += retry_result["flagged_for_review"]
         errors += retry_result["errors"]
 
-    return {"series_created": created, "series_matched": matched, "series_archived": archived, "series_unarchived": unarchived, "sources_changed": sources_changed, "changed_series_ids": list(changed_series_ids), "total": len(items), "flagged_for_review": flagged, "errors": errors}
+    return {"series_created": created, "series_matched": matched, "series_archived": archived, "series_unarchived": unarchived, "sources_changed": sources_changed, "changed_series_ids": list(changed_series_ids), "created_series_ids": list(created_series_ids), "total": len(items), "flagged_for_review": flagged, "errors": errors}
 
 
 _PLEX_DETAIL_FIELDS = ("genre", "description", "director", "cast_list", "poster_url", "last_enriched_at", "rating", "release_date")

@@ -734,6 +734,15 @@ _CATALOG_WORKFLOW_PROGRESS: dict = {
     "state": "idle",  # idle | queued | running | ready | failed
     "phase": None,
     "provider_name": None,
+    "run_id": None,
+    "queued_at": None,
+    "import_started_at": None,
+    "import_finished_at": None,
+    "reconciliation_started_at": None,
+    "reconciliation_finished_at": None,
+    "enrichment_started_at": None,
+    "enrichment_finished_at": None,
+    "ready_at": None,
     "started_at": None,
     "finished_at": None,
     "error": None,
@@ -751,12 +760,22 @@ def get_catalog_workflow_progress() -> dict:
     return dict(_CATALOG_WORKFLOW_PROGRESS)
 
 
-def _start_catalog_workflow(provider_name: str | None, phase: str, *, queued: bool = False) -> None:
+def _start_catalog_workflow(provider_name: str | None, phase: str, *, queued: bool = False, run_id: int | None = None) -> None:
+    now = time.time()
     _CATALOG_WORKFLOW_PROGRESS.update({
         "state": "queued" if queued else "running",
         "phase": phase,
         "provider_name": provider_name,
-        "started_at": time.time(),
+        "run_id": run_id,
+        "queued_at": now,
+        "import_started_at": None,
+        "import_finished_at": None,
+        "reconciliation_started_at": None,
+        "reconciliation_finished_at": None,
+        "enrichment_started_at": None,
+        "enrichment_finished_at": None,
+        "ready_at": None,
+        "started_at": None if queued else now,
         "finished_at": None,
         "error": None,
     })
@@ -769,15 +788,36 @@ def _set_catalog_workflow_phase(phase: str) -> None:
     if _CATALOG_WORKFLOW_PROGRESS["started_at"] is None:
         _CATALOG_WORKFLOW_PROGRESS["started_at"] = time.time()
     _CATALOG_WORKFLOW_PROGRESS.update({"state": "running", "phase": phase, "finished_at": None, "error": None})
+    run_id = _CATALOG_WORKFLOW_PROGRESS.get("run_id")
+    now = str(time.time())
+    if phase in ("Preparing automatic catalog review", "Preparing catalog review") and not _CATALOG_WORKFLOW_PROGRESS.get("reconciliation_started_at"):
+        _CATALOG_WORKFLOW_PROGRESS["reconciliation_started_at"] = time.time()
+        if run_id:
+            vod_db.update_catalog_sync_run(run_id, reconciliation_started_at=now)
+    elif phase == "Resolving known TMDB identities" and not _CATALOG_WORKFLOW_PROGRESS.get("enrichment_started_at"):
+        _CATALOG_WORKFLOW_PROGRESS["enrichment_started_at"] = time.time()
+        if run_id:
+            vod_db.update_catalog_sync_run(run_id, enrichment_started_at=now)
 
 
 def mark_catalog_workflow_ready() -> None:
     if _CATALOG_WORKFLOW_PROGRESS["started_at"] is None:
         _CATALOG_WORKFLOW_PROGRESS["started_at"] = time.time()
+    ready_at = time.time()
+    if _CATALOG_WORKFLOW_PROGRESS.get("reconciliation_started_at") and not _CATALOG_WORKFLOW_PROGRESS.get("reconciliation_finished_at"):
+        _CATALOG_WORKFLOW_PROGRESS["reconciliation_finished_at"] = ready_at
     _CATALOG_WORKFLOW_PROGRESS.update({
         "state": "ready", "phase": "Catalog ready for review",
-        "finished_at": time.time(), "error": None,
+        "finished_at": ready_at, "ready_at": ready_at, "error": None,
     })
+    run_id = _CATALOG_WORKFLOW_PROGRESS.get("run_id")
+    if run_id:
+        fields = {"ready_at": str(ready_at), "status": "ready"}
+        if _CATALOG_WORKFLOW_PROGRESS.get("reconciliation_finished_at"):
+            fields["reconciliation_finished_at"] = str(_CATALOG_WORKFLOW_PROGRESS["reconciliation_finished_at"])
+        if _CATALOG_WORKFLOW_PROGRESS.get("enrichment_finished_at"):
+            fields["enrichment_finished_at"] = str(_CATALOG_WORKFLOW_PROGRESS["enrichment_finished_at"])
+        vod_db.update_catalog_sync_run(run_id, **fields)
 
 
 def _mark_catalog_workflow_failed(error: str) -> None:
@@ -785,6 +825,9 @@ def _mark_catalog_workflow_failed(error: str) -> None:
         "state": "failed", "phase": "Automatic work needs attention",
         "finished_at": time.time(), "error": error,
     })
+    run_id = _CATALOG_WORKFLOW_PROGRESS.get("run_id")
+    if run_id:
+        vod_db.update_catalog_sync_run(run_id, status="failed", error=error, ready_at=str(time.time()))
 
 
 def mark_import_queued(provider_id: int, provider_name: str, queue_position: int) -> None:
@@ -810,7 +853,11 @@ def mark_import_running(provider_id: int, provider_name: str) -> None:
         "provider_id": provider_id, "provider_name": provider_name,
         "started_at": time.time(), "finished_at": None, "error": None,
     })
-    _start_catalog_workflow(provider_name, "Importing provider catalog")
+    run_id = vod_db.create_catalog_sync_run(provider_id, provider_name)
+    _start_catalog_workflow(provider_name, "Importing provider catalog", run_id=run_id)
+    now = str(time.time())
+    _CATALOG_WORKFLOW_PROGRESS["import_started_at"] = time.time()
+    vod_db.update_catalog_sync_run(run_id, import_started_at=now)
 
 
 def mark_import_finished(provider_id: int, error: str | None = None) -> None:
@@ -821,6 +868,14 @@ def mark_import_finished(provider_id: int, error: str | None = None) -> None:
         "running": False, "queued": False, "queue_position": None,
         "finished_at": time.time(), "error": error,
     })
+    run_id = _CATALOG_WORKFLOW_PROGRESS.get("run_id")
+    if run_id:
+        vod_db.update_catalog_sync_run(
+            run_id,
+            import_finished_at=str(time.time()),
+            status="failed" if error else "running",
+            error=error,
+        )
     if error:
         _mark_catalog_workflow_failed(error)
 
@@ -849,11 +904,15 @@ def get_process_cpu_percent() -> float | None:
 async def import_provider_catalog(provider_id: int, *, schedule_enrichment: bool = True) -> dict:
     """Run one XC catalog import and expose its lifecycle to the UI."""
     provider = await asyncio.to_thread(vod_db.get_provider, provider_id)
+    provider_name = provider.get("name") if provider else f"provider {provider_id}"
+    run_id = await asyncio.to_thread(vod_db.create_catalog_sync_run, provider_id, provider_name)
     # SQLite has a single writer and catalog preparation itself is expensive.
     # This lock makes periodic and manual XC imports wait their turn rather
     # than competing for the writer and starving normal API reads.
     async with _XC_IMPORT_LOCK:
-        _start_catalog_workflow(provider.get("name") if provider else f"provider {provider_id}", "Importing provider catalog")
+        _start_catalog_workflow(provider_name, "Importing provider catalog", run_id=run_id)
+        _CATALOG_WORKFLOW_PROGRESS["import_started_at"] = time.time()
+        await asyncio.to_thread(vod_db.update_catalog_sync_run, run_id, import_started_at=str(time.time()))
         _IMPORT_PROGRESS.update({
             "running": True, "queued": False, "queue_position": None,
             "provider_id": provider_id,
@@ -864,9 +923,22 @@ async def import_provider_catalog(provider_id: int, *, schedule_enrichment: bool
             result = await _import_provider_catalog_impl(provider_id)
         except Exception as exc:
             _IMPORT_PROGRESS.update({"running": False, "finished_at": time.time(), "error": type(exc).__name__})
+            await asyncio.to_thread(vod_db.update_catalog_sync_run, run_id, status="failed", error=type(exc).__name__)
             _mark_catalog_workflow_failed(type(exc).__name__)
             raise
         _IMPORT_PROGRESS.update({"running": False, "finished_at": time.time()})
+        _CATALOG_WORKFLOW_PROGRESS["import_finished_at"] = time.time()
+        await asyncio.to_thread(vod_db.update_catalog_sync_run, run_id, import_finished_at=str(time.time()))
+    result["catalog_sync_run_id"] = run_id
+    await asyncio.to_thread(
+        vod_db.record_catalog_sync_events, run_id,
+        movie_ids=result.get("changed_movie_ids", []),
+        series_ids=result.get("changed_series_ids", []),
+        created_movie_ids=result.get("created_movie_ids", []),
+        created_series_ids=result.get("created_series_ids", []),
+        summary={key: value for key, value in result.items() if key.endswith("created") or key.endswith("matched") or key in ("sources_changed", "catalog_changed")},
+    )
+    await asyncio.to_thread(vod_db.update_catalog_sync_run, run_id, summary_json=json.dumps(result, default=str))
     if schedule_enrichment and result["catalog_changed"]:
         result["post_import_enrichment_queued"] = schedule_post_import_enrichment()
     elif schedule_enrichment:
@@ -874,6 +946,7 @@ async def import_provider_catalog(provider_id: int, *, schedule_enrichment: bool
         # await. Keep the handoff truthful instead of stranding it at the
         # completed provider-import phase.
         mark_catalog_workflow_ready()
+        await asyncio.to_thread(vod_db.update_catalog_sync_run, run_id, status="ready", ready_at=str(time.time()))
     return result
 
 
@@ -942,6 +1015,8 @@ async def _import_provider_catalog_impl(provider_id: int) -> dict:
     await asyncio.to_thread(vod_db.set_provider_import_totals, provider_id, streams_total, series_total)
     changed_movie_ids = set(movie_result.pop("changed_movie_ids", []))
     changed_series_ids = set(series_result.pop("changed_series_ids", []))
+    created_movie_ids = set(movie_result.get("created_movie_ids", []))
+    created_series_ids = set(series_result.get("created_series_ids", []))
 
     # Both list calls completed successfully, so these are authoritative full
     # catalog snapshots.  Remove only this provider's source rows that are no
@@ -1053,6 +1128,8 @@ async def _import_provider_catalog_impl(provider_id: int) -> dict:
         "catalog_changed": catalog_changed,
         "changed_movie_ids": list(changed_movie_ids),
         "changed_series_ids": list(changed_series_ids),
+        "created_movie_ids": list(created_movie_ids),
+        "created_series_ids": list(created_series_ids),
         "post_import_enrichment_queued": False,
     }
 
@@ -1862,6 +1939,11 @@ async def _post_import_enrichment(*, track_catalog_workflow: bool = True) -> Non
         # and therefore only calls providers for series sources that have not
         # yet been imported or that an import explicitly invalidated.
         await bulk_enrich_series_episodes(limit=episode_limit or 1)
+        if track_catalog_workflow:
+            _CATALOG_WORKFLOW_PROGRESS["enrichment_finished_at"] = time.time()
+            run_id = _CATALOG_WORKFLOW_PROGRESS.get("run_id")
+            if run_id:
+                vod_db.update_catalog_sync_run(run_id, enrichment_finished_at=str(_CATALOG_WORKFLOW_PROGRESS["enrichment_finished_at"]))
         if track_catalog_workflow:
             _set_catalog_workflow_phase("Preparing catalog review")
         if track_catalog_workflow:

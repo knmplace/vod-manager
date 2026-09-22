@@ -48,6 +48,12 @@ interface RuntimeStatus {
     state: 'idle' | 'queued' | 'running' | 'ready' | 'failed'
     phase: string | null
     provider_name: string | null
+    import_started_at: number | null
+    import_finished_at: number | null
+    reconciliation_started_at: number | null
+    reconciliation_finished_at: number | null
+    enrichment_started_at: number | null
+    enrichment_finished_at: number | null
     started_at: number | null
     finished_at: number | null
     error: string | null
@@ -159,8 +165,14 @@ export default function App() {
   const workflowIsActive = workflow?.state === 'queued' || workflow?.state === 'running'
   const workflowIsReady = workflow?.state === 'ready'
   const workflowHasFailed = workflow?.state === 'failed'
-  const workflowDurationSeconds = workflow?.started_at && workflow?.finished_at
-    ? Math.max(0, Math.round(workflow.finished_at - workflow.started_at))
+  const workflowDurationSeconds = workflow?.import_started_at && workflow?.import_finished_at
+    ? Math.max(0, Math.round(workflow.import_finished_at - workflow.import_started_at))
+    : null
+  const reconciliationDurationSeconds = workflow?.reconciliation_started_at && workflow?.reconciliation_finished_at
+    ? Math.max(0, Math.round(workflow.reconciliation_finished_at - workflow.reconciliation_started_at))
+    : null
+  const enrichmentDurationSeconds = workflow?.enrichment_started_at && workflow?.enrichment_finished_at
+    ? Math.max(0, Math.round(workflow.enrichment_finished_at - workflow.enrichment_started_at))
     : null
   const missingIdentitySummary = reviewSummary
     ? `${reviewSummary.missing_identity.movies} movie${reviewSummary.missing_identity.movies === 1 ? '' : 's'} · ${reviewSummary.missing_identity.series} TV show${reviewSummary.missing_identity.series === 1 ? '' : 's'} need identity review`
@@ -350,7 +362,9 @@ export default function App() {
               </div>
               {workflowIsReady && (
                 <div className="mt-0.5 text-center text-[10px] text-muted-foreground">
-                  {workflowDurationSeconds != null ? `Completed in ${workflowDurationSeconds}s · ` : ''}
+                  {workflowDurationSeconds != null ? `Import ${workflowDurationSeconds}s` : 'Import duration pending'}
+                  {enrichmentDurationSeconds != null ? ` · Enrichment ${enrichmentDurationSeconds}s` : ''}
+                  {reconciliationDurationSeconds != null ? ` · Reconciliation ${reconciliationDurationSeconds}s` : ''} ·
                   Review: {missingIdentitySummary}{invalidTmdbTotal ? ` · ${invalidTmdbTotal} incorrect TMDB ID${invalidTmdbTotal === 1 ? '' : 's'}` : ''}
                 </div>
               )}

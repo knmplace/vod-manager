@@ -39,6 +39,35 @@ interface Provider {
   archive_new_categories: number
 }
 
+interface CatalogSyncEvent {
+  id: number
+  content_type: 'movie' | 'series'
+  content_id: number | null
+  title: string
+  year: number | null
+  action: string
+  detail: { tmdb_id?: string | null; summary?: Record<string, unknown> }
+  created_at: string
+}
+
+interface CatalogSyncRun {
+  id: number
+  provider_name: string
+  run_type: string
+  queued_at: string
+  import_started_at: string | null
+  import_finished_at: string | null
+  reconciliation_started_at: string | null
+  reconciliation_finished_at: string | null
+  enrichment_started_at: string | null
+  enrichment_finished_at: string | null
+  ready_at: string | null
+  status: string
+  summary: Record<string, unknown>
+  event_count: number
+  events?: CatalogSyncEvent[]
+}
+
 interface RecordingProfile {
   id: number
   provider_id: number
@@ -4672,6 +4701,26 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
     // order to notice work that was not launched by this browser tab.
     refetchInterval: (query) => (query.state.data?.running ? 2000 : 10000),
   })
+  const syncHistoryQuery = useQuery<CatalogSyncRun[]>({
+    queryKey: ['vod-sync-history'],
+    queryFn: () => api.get('/vod/sync-history/').then((r) => r.data),
+    refetchInterval: 10000,
+  })
+  const [syncHistorySelected, setSyncHistorySelected] = useState<Set<number>>(new Set())
+  const [syncHistoryOpen, setSyncHistoryOpen] = useState<number | null>(null)
+  const syncHistoryDetailQuery = useQuery<CatalogSyncRun>({
+    queryKey: ['vod-sync-history-detail', syncHistoryOpen],
+    queryFn: () => api.get(`/vod/sync-history/${syncHistoryOpen}/`).then((r) => r.data),
+    enabled: syncHistoryOpen != null,
+  })
+  const deleteSyncHistory = useMutation({
+    mutationFn: (runIds: number[]) => api.delete('/vod/sync-history/', { data: { run_ids: runIds } }),
+    onSuccess: () => {
+      setSyncHistorySelected(new Set())
+      setSyncHistoryOpen(null)
+      qc.invalidateQueries({ queryKey: ['vod-sync-history'] })
+    },
+  })
   const xcCredentialsQuery = useQuery<XcCredentials>({
     queryKey: ['vod-xc-credentials'],
     queryFn:  () => api.get('/vod/xc-credentials/').then((r) => r.data),
@@ -7722,6 +7771,32 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
             })()}
           </div>
         )}
+      </SectionCard>
+      <SectionCard title="Sync History" icon={<List size={14} />}>
+        <p className="text-xs text-muted-foreground">Persistent provider-run reports for catalog changes and automatic merges. Deleting reports never deletes catalog content.</p>
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="outline" disabled={!syncHistorySelected.size || deleteSyncHistory.isPending} onClick={() => askConfirm(`Delete ${syncHistorySelected.size} sync report${syncHistorySelected.size === 1 ? '' : 's'}? Catalog content will not be changed.`, () => deleteSyncHistory.mutate(Array.from(syncHistorySelected)))}>
+            {deleteSyncHistory.isPending ? <Loader2 size={12} className="animate-spin mr-1" /> : <Trash2 size={12} className="mr-1" />}Delete selected reports
+          </Button>
+          <span className="text-xs text-muted-foreground">{syncHistorySelected.size} selected</span>
+        </div>
+        <div className="overflow-x-auto rounded border border-border/60">
+          <table className="w-full text-xs"><thead className="text-left text-muted-foreground bg-muted/20"><tr><th className="p-2 w-8" /><th className="p-2">Run</th><th className="p-2">Provider</th><th className="p-2">Status</th><th className="p-2">Changes</th><th className="p-2">Duration</th></tr></thead>
+            <tbody>{(syncHistoryQuery.data ?? []).map((run) => {
+              const started = run.import_started_at ? Number(run.import_started_at) : NaN
+              const finished = run.ready_at ? Number(run.ready_at) : NaN
+              const duration = Number.isFinite(started) && Number.isFinite(finished) ? `${Math.max(0, Math.round(finished - started))}s` : '—'
+              const phaseDurations = [
+                run.import_started_at && run.import_finished_at ? `import ${Math.max(0, Math.round(Number(run.import_finished_at) - Number(run.import_started_at)))}s` : null,
+                run.enrichment_started_at && run.enrichment_finished_at ? `enrich ${Math.max(0, Math.round(Number(run.enrichment_finished_at) - Number(run.enrichment_started_at)))}s` : null,
+                run.reconciliation_started_at && run.reconciliation_finished_at ? `review ${Math.max(0, Math.round(Number(run.reconciliation_finished_at) - Number(run.reconciliation_started_at)))}s` : null,
+              ].filter(Boolean).join(' · ')
+              return <Fragment key={run.id}><tr className="border-t border-border/40 hover:bg-muted/10"><td className="p-2"><input type="checkbox" checked={syncHistorySelected.has(run.id)} onChange={() => setSyncHistorySelected((current) => { const next = new Set(current); if (next.has(run.id)) next.delete(run.id); else next.add(run.id); return next })} /></td><td className="p-2"><button className="text-primary hover:underline" onClick={() => setSyncHistoryOpen(syncHistoryOpen === run.id ? null : run.id)}>{new Date(Number(run.queued_at) * 1000).toLocaleString()}</button></td><td className="p-2">{run.provider_name}</td><td className="p-2">{run.status}</td><td className="p-2">{run.event_count}</td><td className="p-2 tabular-nums"><span>{duration}</span>{phaseDurations && <span className="block text-[10px] text-muted-foreground">{phaseDurations}</span>}</td></tr>
+                {syncHistoryOpen === run.id && <tr className="border-t border-border/20 bg-muted/5"><td colSpan={6} className="p-2">{syncHistoryDetailQuery.isLoading ? <span className="text-muted-foreground">Loading report…</span> : <ul className="space-y-1 max-h-64 overflow-y-auto">{(syncHistoryDetailQuery.data?.events ?? []).map((event) => <li key={event.id} className="flex items-center gap-2"><span className="text-muted-foreground">{event.content_type}</span><span>{event.title}{event.year ? ` (${event.year})` : ''}</span><span className="text-cyan-300">{event.action.split('_').join(' ')}</span>{event.detail?.tmdb_id && <span className="text-muted-foreground">TMDB {event.detail.tmdb_id}</span>}</li>)}</ul>}</td></tr>}
+              </Fragment>
+            })}{!syncHistoryQuery.data?.length && <tr><td colSpan={6} className="p-3 text-muted-foreground">No sync reports yet.</td></tr>}</tbody>
+          </table>
+        </div>
       </SectionCard>
       </>
       )}

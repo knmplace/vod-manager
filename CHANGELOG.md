@@ -31,6 +31,16 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-09-22
+
+- ✅ Provider imports now retain a deleteable, per-run catalog report. Each
+  report records movie/series cards that were added or changed, preserves the
+  provider-import, metadata/episode enrichment, and review-preparation timings,
+  and can be opened or multi-selected from Curation & Maintenance without
+  deleting catalog content. The completion banner reports import and automatic
+  follow-up durations separately so a long-lived workflow timer cannot be
+  mistaken for a slow provider import.
+
 ## 2026-09-19
 
 - ✅🔀 Post-import catalog processing now completes the intended staged

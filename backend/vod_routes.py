@@ -201,6 +201,10 @@ class ProviderRequest(BaseModel):
     provider_type: str = "xc"
 
 
+class CatalogSyncDeleteRequest(BaseModel):
+    run_ids: list[int]
+
+
 class EnableDvrRequest(BaseModel):
     dvr_local_path: Optional[str] = None
     dvr_movie_category_id: Optional[int] = None
@@ -3813,6 +3817,27 @@ async def runtime_status():
         "review_summary": await asyncio.to_thread(vod_db.get_review_summary),
         "process_cpu_percent": vod_importer.get_process_cpu_percent(),
     }
+
+
+@router.get("/sync-history/", dependencies=_GUARDS)
+async def sync_history(limit: int = 100, offset: int = 0):
+    return await asyncio.to_thread(vod_db.list_catalog_sync_runs, limit, offset)
+
+
+@router.get("/sync-history/{run_id}/", dependencies=_GUARDS)
+async def sync_history_detail(run_id: int):
+    report = await asyncio.to_thread(vod_db.get_catalog_sync_run, run_id)
+    if not report:
+        raise HTTPException(404, detail="sync report not found")
+    return report
+
+
+@router.delete("/sync-history/", dependencies=_GUARDS)
+async def delete_sync_history(body: CatalogSyncDeleteRequest):
+    if not body.run_ids:
+        raise HTTPException(400, detail="run_ids must not be empty")
+    deleted = await asyncio.to_thread(vod_db.delete_catalog_sync_runs, body.run_ids)
+    return {"deleted": deleted}
 
 
 # ── Metadata rewrite rules ───────────────────────────────────────────────────
