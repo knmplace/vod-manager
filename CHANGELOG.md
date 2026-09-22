@@ -40,6 +40,11 @@ instead of opening a duplicate request.
   deleting catalog content. The completion banner reports import and automatic
   follow-up durations separately so a long-lived workflow timer cannot be
   mistaken for a slow provider import.
+  The same import pass also automatically merges an existing movie or series
+  with the same normalized title and exact year into its sole TMDB-backed card
+  when the duplicate is missing a TMDB ID. Year mismatches and competing TMDB
+  candidates remain available for review, and the report records the merge
+  action.
 
 - ✅ Header readability improved: the application version and commit are now
   brighter and slightly larger, and the catalog-status banner uses a larger,
