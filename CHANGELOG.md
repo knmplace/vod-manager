@@ -33,13 +33,18 @@ instead of opening a duplicate request.
 
 ## 2026-09-22
 
-- ✅ Provider imports now retain a deleteable, per-run catalog report. Each
+- ✅🔀 Provider imports now retain a deleteable, per-run catalog report. Each
   report records movie/series cards that were added or changed, preserves the
   provider-import, metadata/episode enrichment, and review-preparation timings,
   and can be opened or multi-selected from Curation & Maintenance without
   deleting catalog content. The completion banner reports import and automatic
   follow-up durations separately so a long-lived workflow timer cannot be
   mistaken for a slow provider import.
+  The same import pass automatically merges an existing movie or series with
+  the same normalized title and exact year into its sole TMDB-backed card when
+  the duplicate is missing a TMDB ID. Year mismatches and competing TMDB
+  candidates remain available for review, and the report records the merge
+  action. Proposed upstream in [#35](https://github.com/jstevenscl/vod-manager/pull/35).
 
 - ✅ Header readability improved: the application version and commit are now
   brighter and slightly larger, and the catalog-status banner uses a larger,
