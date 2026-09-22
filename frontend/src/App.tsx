@@ -265,8 +265,8 @@ export default function App() {
           <div className="min-w-0">
             <div className="text-sm font-bold tracking-tight leading-tight">VOD & DVR Manager - KNM</div>
             {versionQuery.data && (
-              <div className="text-[10px] text-muted-foreground font-mono truncate" title={`ref: ${versionQuery.data.ref}`}>
-                v{versionQuery.data.version} · {versionQuery.data.commit}
+              <div className="text-[11px] text-foreground/80 font-mono font-medium truncate" title={`ref: ${versionQuery.data.ref}`}>
+                <span className="text-foreground">v{versionQuery.data.version}</span> <span className="text-primary/80">· {versionQuery.data.commit}</span>
               </div>
             )}
           </div>
@@ -353,15 +353,15 @@ export default function App() {
             Search coming soon…
           </div>
           {workflow && workflow.state !== 'idle' && (
-            <div className={`pointer-events-none absolute left-1/2 top-1/2 w-[min(42rem,46vw)] -translate-x-1/2 -translate-y-1/2 rounded-md border px-3 py-1 ${
+            <div className={`pointer-events-none absolute left-1/2 top-1/2 w-[min(46rem,52vw)] -translate-x-1/2 -translate-y-1/2 rounded-md border px-4 py-1.5 ${
               workflowIsReady ? 'border-emerald-500/35 bg-emerald-500/10' : workflowHasFailed ? 'border-destructive/40 bg-destructive/10' : 'border-primary/35 bg-primary/10'
             }`}>
-              <div className="flex items-center justify-center gap-1.5 text-[11px] font-semibold">
+              <div className="flex items-center justify-center gap-1.5 text-[12px] font-semibold">
                 {workflowIsReady ? <CheckCircle2 size={14} className="text-emerald-400" /> : workflowHasFailed ? <CircleAlert size={14} className="text-destructive" /> : <Loader2 size={14} className="animate-spin text-primary" />}
                 <span>{workflowIsReady ? 'Import complete · Catalog ready for review' : workflowHasFailed ? 'Automatic catalog work needs attention' : activeWorkflowDetail}</span>
               </div>
               {workflowIsReady && (
-                <div className="mt-0.5 text-center text-[10px] text-muted-foreground">
+                <div className="mt-0.5 text-center text-[11px] text-foreground/75">
                   {workflowDurationSeconds != null ? `Import ${workflowDurationSeconds}s` : 'Import duration pending'}
                   {enrichmentDurationSeconds != null ? ` · Enrichment ${enrichmentDurationSeconds}s` : ''}
                   {reconciliationDurationSeconds != null ? ` · Reconciliation ${reconciliationDurationSeconds}s` : ''} ·
