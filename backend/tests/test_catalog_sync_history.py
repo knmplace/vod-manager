@@ -90,3 +90,27 @@ def test_workflow_header_hydrates_duration_from_latest_report(db):
     finally:
         vod_importer._CATALOG_WORKFLOW_PROGRESS.clear()
         vod_importer._CATALOG_WORKFLOW_PROGRESS.update(previous)
+
+
+def test_workflow_header_retains_hydrated_duration_after_report_delete(db):
+    run_id = db.create_catalog_sync_run(7, "Provider 7")
+    db.update_catalog_sync_run(
+        run_id,
+        import_started_at="200.0",
+        import_finished_at="232.0",
+        ready_at="232.0",
+        status="ready",
+    )
+    previous = dict(vod_importer._CATALOG_WORKFLOW_PROGRESS)
+    try:
+        vod_importer._CATALOG_WORKFLOW_PROGRESS.clear()
+        vod_importer._CATALOG_WORKFLOW_PROGRESS.update({"state": "idle"})
+        hydrated = vod_importer.get_catalog_workflow_progress()
+        assert hydrated["import_finished_at"] - hydrated["import_started_at"] == 32
+        assert db.delete_catalog_sync_runs([run_id]) == 1
+        after_delete = vod_importer.get_catalog_workflow_progress()
+        assert after_delete["state"] == "ready"
+        assert after_delete["import_finished_at"] - after_delete["import_started_at"] == 32
+    finally:
+        vod_importer._CATALOG_WORKFLOW_PROGRESS.clear()
+        vod_importer._CATALOG_WORKFLOW_PROGRESS.update(previous)

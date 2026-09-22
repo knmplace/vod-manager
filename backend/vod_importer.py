@@ -803,7 +803,7 @@ def get_catalog_workflow_progress() -> dict:
         )
     )
     if should_hydrate_latest and latest and latest.get("status") in ("ready", "failed"):
-        progress.update({
+        hydrated = {
             "state": latest["status"],
             "phase": "Catalog ready for review" if latest["status"] == "ready" else "Automatic work needs attention",
             "provider_name": latest.get("provider_name"),
@@ -819,7 +819,12 @@ def get_catalog_workflow_progress() -> dict:
             "started_at": latest.get("import_started_at") or latest.get("queued_at"),
             "finished_at": latest.get("ready_at"),
             "error": latest.get("error"),
-        })
+        }
+        progress.update(hydrated)
+        # Keep the current header authoritative even if the user deletes the
+        # audit row that supplied this hydration.  A later import replaces it;
+        # deleting history must not erase the live status of the last run.
+        _CATALOG_WORKFLOW_PROGRESS.update(hydrated)
     for key in (
         "queued_at", "import_started_at", "import_finished_at",
         "reconciliation_started_at", "reconciliation_finished_at",
