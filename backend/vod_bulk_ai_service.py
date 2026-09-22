@@ -86,8 +86,12 @@ async def _resolve_one_needs_review(content_type: str, item_id: int) -> dict:
     item = vod_db.get_movie(item_id) if content_type == "movie" else vod_db.get_series(item_id)
     if not item:
         return {"id": item_id, "status": "error", "detail": "not found"}
-    if not item.get("needs_year_review"):
-        return {"id": item_id, "name": item["name"], "status": "skipped", "detail": "no longer needs review"}
+    # KNM: added 2026-09-14 -- Metadata Review also contains provider rows with no usable identity at
+    # all (both TMDB ID and year absent). They never passed through the older
+    # ambiguous-year detector, but a user-selected bulk AI run should be able
+    # to resolve them with the exact same high-confidence-only safeguards.
+    if not item.get("needs_year_review") and not (item.get("tmdb_id") is None and item.get("year") is None):
+        return {"id": item_id, "name": item["name"], "status": "skipped", "detail": "no longer needs identity review"}
 
     try:
         candidates = await tmdb_sync.search_title(item["name"], content_type)
@@ -109,6 +113,8 @@ async def _resolve_one_needs_review(content_type: str, item_id: int) -> dict:
         }
 
     pick = candidates[idx]
+    if pick.get("year") is None or not pick.get("tmdb_id"):
+        return {"id": item_id, "name": item["name"], "status": "skipped", "detail": "confident TMDB result has no usable ID/year"}
     try:
         result = vod_db.resolve_year_review(content_type, item_id, pick.get("year"), pick.get("tmdb_id"))
     except ValueError as exc:
@@ -140,9 +146,7 @@ async def start_needs_review_bulk_resolve(content_type: str, ids: list[int]) -> 
 
 
 # ---------------------------------------------------------------------------
-# Incorrect TMDB IDs (see vod_db.list_tmdb_lookup_failures / tmdb_sync.
-# TmdbNotFoundError) -- an id that WAS confirmed-valid but TMDB now 404s on,
-# distinct from _resolve_one_needs_review's no-id-at-all case above.
+# Incorrect TMDB IDs
 # ---------------------------------------------------------------------------
 
 async def _resolve_one_tmdb_lookup_failure(content_type: str, item_id: int) -> dict:
@@ -171,9 +175,7 @@ async def _resolve_one_tmdb_lookup_failure(content_type: str, item_id: int) -> d
         result = vod_db.set_tmdb_id(content_type, item_id, int(pick["tmdb_id"]))
     except ValueError as exc:
         return {"id": item_id, "name": item["name"], "status": "error", "detail": str(exc)}
-    if result.get("merged_into"):
-        return {"id": item_id, "name": item["name"], "status": "resolved", "detail": f"merged into #{result['merged_into']}"}
-    return {"id": item_id, "name": item["name"], "status": "resolved", "detail": f"set TMDB ID {pick['tmdb_id']}"}
+    return {"id": item_id, "name": item["name"], "status": "resolved", "detail": f"set TMDB ID {pick['tmdb_id']}" if not result.get("merged_into") else f"merged into #{result['merged_into']}"}
 
 
 async def _run_tmdb_lookup_failure_job(job_id: str, content_type: str, ids: list[int]) -> None:
@@ -184,9 +186,6 @@ async def _run_tmdb_lookup_failure_job(job_id: str, content_type: str, ids: list
             except Exception as exc:
                 result = {"id": item_id, "status": "error", "detail": str(exc)}
             _record(job_id, result)
-    except Exception as exc:
-        _jobs[job_id]["error"] = str(exc)
-        logger.exception("[vod_bulk_ai] tmdb-lookup-failure job %s failed: %s", job_id, exc)
     finally:
         _finish_job(job_id)
 

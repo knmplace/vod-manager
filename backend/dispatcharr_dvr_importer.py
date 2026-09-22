@@ -937,20 +937,18 @@ async def _try_backfill(program: dict, profile: dict) -> bool:
             await _apply_pointer_backfill(match)
         else:
             return False
-        # Checked before calling placement, not caught via the ValueError
-        # place_movie_in_category/place_series_in_category now raise for an
-        # archived row (see their docstrings) -- the backfill transfer above
-        # already succeeded, so an archived pool match should still count as
-        # handled (return True below), not fall through to the except and
-        # schedule a real duplicate DVR recording just because its category
-        # placement was skipped.
+        # beads-4o6: skip category placement for an archived (review_excluded)
+        # match rather than letting place_*_in_category's guard raise into
+        # the except below -- the backfill itself already succeeded, so this
+        # airing is still "handled" and must not fall through to a real
+        # duplicate DVR recording just because the pool copy is archived.
         if match["type"] == "movie" and profile.get("target_movie_category_id"):
-            movie_row = vod_db.get_movie(match["movie_id"])
-            if movie_row and not movie_row.get("review_excluded"):
+            movie = vod_db.get_movie(match["movie_id"])
+            if movie and not movie.get("review_excluded"):
                 vod_db.place_movie_in_category(match["movie_id"], profile["target_movie_category_id"])
         elif match["type"] == "series" and profile.get("target_series_category_id"):
-            series_row = vod_db.get_series(match["series_id"])
-            if series_row and not series_row.get("review_excluded"):
+            series = vod_db.get_series(match["series_id"])
+            if series and not series.get("review_excluded"):
                 vod_db.place_series_in_category(match["series_id"], profile["target_series_category_id"])
     except Exception as exc:
         logger.warning("[dispatcharr_dvr_importer] backfill (%s) failed for %r, falling back to a normal "

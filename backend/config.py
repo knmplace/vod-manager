@@ -25,19 +25,10 @@ LOG_FILE        = LOG_DIR / "vod_manager.log"
 LOG_BACKUP_COUNT = 5
 
 
-# In-memory cache of config.json -- every one of this file's ~40 getters
-# (including require_auth's has_credentials() check, run synchronously on
-# the event loop for nearly every API request via _GUARDS) used to call
-# _read_raw() straight through to a blocking disk read, every single call,
-# uncached. Invisible on a fast local disk, but the moment the underlying
-# volume is under heavy I/O pressure from something else on the same mount
-# (a large SQLite write -- e.g. a slow provider import, or a backfill/scan
-# touching the whole catalog), those blocking reads, being on the event
-# loop and not wrapped in asyncio.to_thread, stall every concurrent
-# request in the whole app, not just the slow one. Caching removes the
-# disk read from the hot path entirely for every call after the first.
-# Nothing else writes this file (single-process, single-container app), so
-# there's no external-invalidation case to handle.
+# Configuration is read from the synchronous request path by many getters,
+# including the authentication guard. Keep the parsed document in memory so
+# large SQLite/import operations cannot turn every request into a blocking
+# config.json disk read. Writes refresh the cache immediately.
 _raw_cache: dict | None = None
 
 
@@ -59,6 +50,16 @@ def _write_raw(data: dict) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_FILE.write_text(json.dumps(data, indent=2))
     _raw_cache = data
+
+
+def invalidate_cache() -> None:
+    """Force the next getter to reread config.json from disk.
+
+    Backup/restore can replace the file without going through _write_raw.
+    Tests also use this when switching CONFIG_FILE to an isolated path.
+    """
+    global _raw_cache
+    _raw_cache = None
 
 
 # ── Dispatcharr connection ───────────────────────────────────────────────────
@@ -281,6 +282,19 @@ def save_duplicate_finder_quality_prefix_matching(enabled: bool) -> None:
     _write_raw(data)
 
 
+# ── Duplicate Finder: auto-merge on tmdb_id match ────────────────────────────
+# User request 2026-09-10: enrichment can confirm a tmdb_id on a movie row
+# that turns out to match an existing row's tmdb_id exactly -- a signal that
+# comes from TMDB itself, not from our own name-normalization heuristics, so
+# it's trusted enough to merge without a human click (see
+# vod_db.auto_merge_movie_by_tmdb). Default ON, unlike the quality-prefix
+# flag above -- that flag changes what gets SUGGESTED for manual review
+# (low stakes to leave on), this flag changes what gets MERGED automatically
+# (an irreversible delete, see _merge_movie_row), so the two defaults look
+# inconsistent but are deliberately opposite: this one is gated on an
+# independently-corroborated exact-id match, which is a strong enough signal
+# to default-enable even though the action itself is destructive.
+
 def get_duplicate_finder_auto_merge_tmdb() -> bool:
     return bool(_read_raw().get("duplicate_finder_auto_merge_tmdb", True))
 
@@ -328,7 +342,7 @@ def save_ai_provider(provider: str, model: str | None = None) -> None:
 def get_import_language_exclusion() -> dict:
     """Global (not per-provider) since the same admin almost always wants the
     same languages excluded everywhere -- unlike categories, which genuinely
-    differ provider to provider. See vod_importer._should_auto_archive."""
+    differ provider to provider. See vod_importer._should_exclude_from_import."""
     data = _read_raw()
     return {
         "exclude_prefixes": data.get("import_exclude_language_prefixes") or [],
@@ -340,24 +354,6 @@ def save_import_language_exclusion(exclude_prefixes: list[str], exclude_non_lati
     data = _read_raw()
     data["import_exclude_language_prefixes"] = [p.strip().upper() for p in exclude_prefixes if p.strip()]
     data["import_exclude_non_latin"] = bool(exclude_non_latin)
-    _write_raw(data)
-
-
-def get_import_country_exclusion() -> list[str]:
-    """Global (not per-provider) sibling to get_import_language_exclusion
-    above, same reasoning -- keyed on a title's trailing "(<country code>)"
-    tag (vod_db._country_suffix_code) instead of its leading language
-    prefix. A separate provider convention from the language prefix (e.g.
-    "Married at First Sight (NZ)" vs "EN| Married at First Sight"), so this
-    is its own setting rather than folded into the language one. See
-    vod_importer._should_auto_archive."""
-    data = _read_raw()
-    return [c.strip().upper() for c in (data.get("import_exclude_country_codes") or []) if c.strip()]
-
-
-def save_import_country_exclusion(exclude_country_codes: list[str]) -> None:
-    data = _read_raw()
-    data["import_exclude_country_codes"] = [c.strip().upper() for c in exclude_country_codes if c.strip()]
     _write_raw(data)
 
 

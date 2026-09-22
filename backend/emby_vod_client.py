@@ -71,17 +71,8 @@ class EmbyVodClient:
         self.base_url = provider["base_url"].rstrip("/")
         self.api_key = provider["password"]
         self._client: httpx.AsyncClient | None = None
-        # GH#27: the module docstring's claim that Jellyfin "kept the
-        # /emby/* path aliases for client compatibility" isn't true across
-        # every Jellyfin install/version -- a real user's server 404'd on
-        # /emby/Library/VirtualFolders while the server itself was reachable
-        # and the native (unprefixed) Jellyfin API worked fine. Rather than
-        # branch on provider_type (which the class deliberately avoids,
-        # since Emby and Jellyfin share almost the entire surface), _get
-        # retries once without the /emby prefix on a 404 and remembers the
-        # result for the rest of this client's lifetime, so a whole
-        # multi-call import pass against a no-alias Jellyfin server pays the
-        # extra round-trip only on its first request, not every single one.
+        # Some Jellyfin installations do not expose the /emby/* aliases.
+        # Remember a successful native-path fallback for this client session.
         self._emby_prefix_unsupported = False
 
     async def __aenter__(self) -> "EmbyVodClient":
@@ -94,19 +85,12 @@ class EmbyVodClient:
             self._client = None
 
     def _auth_headers(self) -> dict:
-        """GH#27 (second report): a real Jellyfin server 401'd on its native
-        (non-/emby/-prefixed) paths using query-string `api_key=` auth alone
-        -- the /emby/* compatibility routes may be more lenient about this,
-        but Jellyfin's own documented server-to-server auth is the
-        `X-Emby-Token` header (kept from Emby, still honored by Jellyfin
-        today), which every request now sends in addition to the query
-        param rather than instead of it -- redundant-but-harmless on a
-        server that only needed the query param, and the fix for one that
-        needs the header. Sent on every request, not just the Sessions/
-        Playing session-identification ones _SESSION_HEADERS originally
-        covered, since VirtualFolders (an admin-level library-management
-        endpoint, unlike ordinary content browsing) is exactly the kind of
-        call more likely to enforce stricter auth."""
+        """Send Jellyfin/Emby's documented token header on every request.
+
+        Keep the query parameter too for compatibility with servers that only
+        accept that form. Some deployments reject query-string-only auth on
+        native (non-/emby/) paths.
+        """
         return {**_SESSION_HEADERS, "X-Emby-Token": self.api_key}
 
     async def _get(self, path: str, params: dict | None = None, timeout: float = _REQUEST_TIMEOUT) -> dict:
@@ -122,43 +106,27 @@ class EmbyVodClient:
         t0 = time.monotonic()
         try:
             r = await asyncio.wait_for(
-                client.get(f"{self.base_url}{effective_path}", params=query, headers=self._auth_headers(), timeout=timeout),
+                client.get(
+                    f"{self.base_url}{effective_path}", params=query,
+                    headers=self._auth_headers(), timeout=timeout,
+                ),
                 timeout=timeout + 5.0,
             )
             if r.status_code == 404 and effective_path == path and path.startswith("/emby/"):
-                # See __init__'s note (GH#27) -- this server doesn't alias
-                # /emby/* at all; retry once against the native path and, if
-                # that's what actually works, stop paying the failed-request
-                # round-trip on every later call this client makes.
-                #
-                # Real bug found live (GH#27, second report): this used to
-                # check `r2.status_code != 404` -- true for ANY non-404
-                # response, including a 401. That both mislabeled a genuine
-                # auth failure as "worked" in the log, AND latched
-                # _emby_prefix_unsupported=True on an unverified path,
-                # committing every later call on this client to a path that
-                # was never actually confirmed to work. Must be an actual
-                # success (2xx) before believing the fallback "worked".
                 native_path = path[len("/emby"):]
                 r2 = await asyncio.wait_for(
-                    client.get(f"{self.base_url}{native_path}", params=query, headers=self._auth_headers(), timeout=timeout),
+                    client.get(
+                        f"{self.base_url}{native_path}", params=query,
+                        headers=self._auth_headers(), timeout=timeout,
+                    ),
                     timeout=timeout + 5.0,
                 )
+                # A non-404 response is not proof that the native path works:
+                # a 401 must not permanently latch the fallback path.
                 if r2.is_success:
                     self._emby_prefix_unsupported = True
-                    logger.info(
-                        "[emby_vod_client] %s 404'd, %s worked -- this server doesn't alias /emby/*, "
-                        "using native Jellyfin paths for the rest of this session",
-                        path, native_path,
-                    )
                     r = r2
                 else:
-                    logger.warning(
-                        "[emby_vod_client] %s 404'd; native fallback %s also failed (HTTP %s) -- "
-                        "not switching to native paths, surfacing the native failure since it's "
-                        "the more specific/recent error",
-                        path, native_path, r2.status_code,
-                    )
                     r = r2
             r.raise_for_status()
             return r.json() if r.content else {}
@@ -172,8 +140,7 @@ class EmbyVodClient:
     async def _post_session(self, path: str, body: dict) -> None:
         """Best-effort: a failed session report shouldn't interrupt the
         actual video relay in xc_server.py, so this swallows its own
-        errors (same contract as plex_client.report_timeline). See _get's
-        identical note (GH#27) for why effective_path can differ from path."""
+        errors (same contract as plex_client.report_timeline)."""
         effective_path = path
         if self._emby_prefix_unsupported and path.startswith("/emby/"):
             effective_path = path[len("/emby"):]

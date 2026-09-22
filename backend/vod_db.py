@@ -14,6 +14,8 @@ resolving back to the same real provider source.
 
 from contextlib import contextmanager
 import datetime
+import hashlib
+import json
 import logging
 import re
 import secrets
@@ -23,8 +25,9 @@ import time
 from pathlib import Path
 
 from config import (
-    DATA_DIR, get_config, get_duplicate_finder_auto_merge_tmdb, get_duplicate_finder_quality_prefix_matching,
-    get_enabled_languages, get_refresh_settings, get_stream_priority_mode, get_vod_xc_account_id,
+    DATA_DIR, get_config, get_duplicate_finder_auto_merge_tmdb,
+    get_duplicate_finder_quality_prefix_matching, get_enabled_languages,
+    get_refresh_settings, get_stream_priority_mode, get_vod_xc_account_id,
 )
 from secrets_util import decrypt_value, encrypt_value, is_encrypted
 
@@ -45,15 +48,9 @@ def _connect() -> sqlite3.Connection:
     # needed once something (e.g. a Plex library import) writes a real batch
     # while the background enrichment scheduler is also writing continuously;
     # under the default rollback-journal mode that contention raised "database
-    # is locked". timeout=60 (raised from 30 2026-09-15, live-tested against a
-    # real ~750MB/160k-row catalog under worst-case concurrent load -- full
-    # multi-provider bulk import+enrich running at once plus manual /enrich/
-    # calls) gives brief contention more room to retry instead of failing
-    # immediately; this is a mitigation, not a fix -- see the _WRITE_LOCK
-    # audit note near that lock's definition for the actual remaining gap
-    # (many write functions, including the highest-frequency ones --
-    # upsert_movie/upsert_series -- still don't participate in it).
-    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False, timeout=60.0)
+    # is locked". timeout=30 gives any remaining brief contention room to
+    # retry instead of failing immediately.
+    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False, timeout=30.0)
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
     conn.row_factory = sqlite3.Row
@@ -101,6 +98,12 @@ def init_db() -> None:
             created_at TEXT NOT NULL,
             updated_at TEXT,
             last_enriched_at TEXT,
+            trailer_key TEXT,
+            trailer_site TEXT,
+            trailer_status TEXT NOT NULL DEFAULT 'unknown',
+            trailer_attempts INTEGER NOT NULL DEFAULT 0,
+            trailer_checked_at TEXT,
+            trailer_last_error TEXT,
             stream_blocked INTEGER NOT NULL DEFAULT 0,
             stream_blocked_at TEXT
         );
@@ -115,6 +118,8 @@ def init_db() -> None:
             plex_rating_key TEXT,
             bitrate INTEGER,
             raw_name TEXT,
+            catalog_fingerprint TEXT,
+            provider_detail_deferred INTEGER NOT NULL DEFAULT 0,
             added_at TEXT NOT NULL,
             last_seen_at TEXT NOT NULL,
             UNIQUE(provider_id, provider_stream_id)
@@ -141,7 +146,48 @@ def init_db() -> None:
             provider_category_name TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT,
-            last_enriched_at TEXT
+            last_enriched_at TEXT,
+            -- Separate from provider episode/detail enrichment: this marks
+            -- that the canonical TMDB record has supplied the visible title.
+            tmdb_metadata_enriched_at TEXT,
+            trailer_key TEXT,
+            trailer_site TEXT,
+            trailer_status TEXT NOT NULL DEFAULT 'unknown',
+            trailer_attempts INTEGER NOT NULL DEFAULT 0,
+            trailer_checked_at TEXT,
+            trailer_last_error TEXT
+        );
+
+        -- Multi-provider support for series, mirroring movie_sources --
+        -- series.import_provider_id/import_provider_series_id (below) stay
+        -- as the "primary"/originally-matched provider for backward compat
+        -- (existing code, existing UI), but a second (or third...) provider
+        -- matching the same series now gets its own row here instead of
+        -- being silently discarded (vod_manager series/episode failover
+        -- work, 2026-09-09) -- enrich_series loops over every row here to
+        -- pull episodes from every matching provider, and
+        -- find_duplicate_groups("series") already reads through
+        -- episode_sources/providers to attribute multiple sources per
+        -- series, so no changes were needed there once this table is
+        -- actually populated with real multi-provider data.
+        -- consecutive_failures/last_failed_at mirror movie_sources/
+        -- episode_sources' identically-named columns -- same per-source
+        -- backoff purpose, just present from creation instead of migrated
+        -- in later since this table has no pre-existing rows to migrate.
+        CREATE TABLE IF NOT EXISTS series_sources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            series_id INTEGER NOT NULL REFERENCES series(id) ON DELETE CASCADE,
+            provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+            provider_series_id TEXT NOT NULL,
+            provider_category_name TEXT,
+            raw_name TEXT,
+            catalog_fingerprint TEXT,
+            provider_detail_deferred INTEGER NOT NULL DEFAULT 0,
+            consecutive_failures INTEGER NOT NULL DEFAULT 0,
+            last_failed_at TEXT,
+            added_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            UNIQUE(provider_id, provider_series_id)
         );
 
         CREATE TABLE IF NOT EXISTS episodes (
@@ -169,27 +215,6 @@ def init_db() -> None:
             added_at TEXT NOT NULL,
             last_seen_at TEXT NOT NULL,
             UNIQUE(provider_id, provider_stream_id)
-        );
-
-        -- Multi-provider support for series, mirroring movie_sources --
-        -- series.import_provider_id/import_provider_series_id (above) stay
-        -- as the "primary"/originally-matched provider for backward compat
-        -- (existing code, existing UI), but a second (or third...) provider
-        -- matching the same series now gets its own row here instead of
-        -- being silently discarded -- enrich_series loops over every row
-        -- here to pull episodes from every matching provider.
-        CREATE TABLE IF NOT EXISTS series_sources (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            series_id INTEGER NOT NULL REFERENCES series(id) ON DELETE CASCADE,
-            provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
-            provider_series_id TEXT NOT NULL,
-            provider_category_name TEXT,
-            raw_name TEXT,
-            consecutive_failures INTEGER NOT NULL DEFAULT 0,
-            last_failed_at TEXT,
-            added_at TEXT NOT NULL,
-            last_seen_at TEXT NOT NULL,
-            UNIQUE(provider_id, provider_series_id)
         );
 
         CREATE TABLE IF NOT EXISTS categories (
@@ -580,9 +605,9 @@ def init_db() -> None:
         );
 
         -- TMDB returned 404 for an identity already stored on a pool item.
-        -- Intentionally distinct from the no-id/ambiguous-id review queue
-        -- (Metadata Review): the item has an explicit identity, but it's no
-        -- longer valid upstream and needs a reviewer to correct or clear it.
+        -- This is intentionally distinct from the no-id/ambiguous-id review
+        -- queue: the item has an explicit identity, but it is no longer valid
+        -- upstream and must be corrected or cleared by a reviewer.
         CREATE TABLE IF NOT EXISTS tmdb_lookup_failures (
             content_type TEXT NOT NULL CHECK(content_type IN ('movie','series')),
             item_id INTEGER NOT NULL,
@@ -592,6 +617,40 @@ def init_db() -> None:
             last_failed_at TEXT NOT NULL,
             attempts INTEGER NOT NULL DEFAULT 1,
             PRIMARY KEY(content_type, item_id)
+        );
+
+        -- User-visible provider/import history.  This is an audit report only:
+        -- deleting these rows never deletes catalog content.
+        CREATE TABLE IF NOT EXISTS catalog_sync_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider_id INTEGER,
+            provider_name TEXT NOT NULL,
+            run_type TEXT NOT NULL DEFAULT 'provider_import',
+            queued_at TEXT NOT NULL,
+            import_started_at TEXT,
+            import_finished_at TEXT,
+            reconciliation_started_at TEXT,
+            reconciliation_finished_at TEXT,
+            enrichment_started_at TEXT,
+            enrichment_finished_at TEXT,
+            ready_at TEXT,
+            status TEXT NOT NULL DEFAULT 'running',
+            summary_json TEXT NOT NULL DEFAULT '{}',
+            error TEXT,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS catalog_sync_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER NOT NULL REFERENCES catalog_sync_runs(id) ON DELETE CASCADE,
+            content_type TEXT NOT NULL CHECK(content_type IN ('movie','series')),
+            content_id INTEGER,
+            provider_source_id TEXT,
+            title TEXT NOT NULL,
+            year INTEGER,
+            action TEXT NOT NULL,
+            detail_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
         );
 
         CREATE INDEX IF NOT EXISTS idx_movies_name_year ON movies(name, year);
@@ -617,6 +676,8 @@ def init_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_dvr_recording_failures_provider_id ON dvr_recording_failures(provider_id);
         CREATE INDEX IF NOT EXISTS idx_vod_stream_failures_created_at ON vod_stream_failures(created_at);
         CREATE INDEX IF NOT EXISTS idx_tmdb_lookup_failures_type_time ON tmdb_lookup_failures(content_type, last_failed_at);
+        CREATE INDEX IF NOT EXISTS idx_catalog_sync_runs_created_at ON catalog_sync_runs(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_catalog_sync_events_run_id ON catalog_sync_events(run_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_provider_sub_accounts_provider_id ON provider_sub_accounts(provider_id);
         CREATE INDEX IF NOT EXISTS idx_provider_sub_account_live_accounts_sub_account_id ON provider_sub_account_live_accounts(sub_account_id);
         CREATE INDEX IF NOT EXISTS idx_movie_source_owners_source_id ON movie_source_owners(movie_source_id);
@@ -632,7 +693,6 @@ def init_db() -> None:
     _migrate(conn)
     _migrate_category_name_uniqueness(conn)
     _backfill_source_owners(conn)
-    backfill_series_sources()
     # dispatcharr_connection_id only exists on `providers` from here on (it's
     # an ALTER TABLE in _migrate, not a base column -- providers predates
     # DVR support) -- this index has to wait until after that call on a
@@ -674,6 +734,11 @@ def init_db() -> None:
     _migrate_encrypt_plaintext_credentials(conn)
     _migrate_legacy_catchall_categories(conn)
     _seed_default_categories(conn)
+    # KNM: added 2026-09-17 -- apply the all-fallbacks-failed rule to rows
+    # recorded before stream_blocked existed, so deployment cleans up the
+    # existing failed-stream backlog without waiting for one more request.
+    _block_existing_exhausted_movies(conn)
+    _commit_with_retry(conn)
     conn.close()
 
 
@@ -919,16 +984,30 @@ def _migrate(conn: sqlite3.Connection) -> None:
     NOT EXISTS above only helps fresh databases."""
     migrations = [
         ("movies", "last_enriched_at", "TEXT"),
+        ("movies", "trailer_key", "TEXT"),
+        ("movies", "trailer_site", "TEXT"),
+        ("movies", "trailer_status", "TEXT NOT NULL DEFAULT 'unknown'"),
+        ("movies", "trailer_attempts", "INTEGER NOT NULL DEFAULT 0"),
+        ("movies", "trailer_checked_at", "TEXT"),
+        ("movies", "trailer_last_error", "TEXT"),
         ("movies", "cast_list", "TEXT"),
         ("movies", "director", "TEXT"),
         ("movies", "country", "TEXT"),
         ("series", "last_enriched_at", "TEXT"),
+        ("series", "trailer_key", "TEXT"),
+        ("series", "trailer_site", "TEXT"),
+        ("series", "trailer_status", "TEXT NOT NULL DEFAULT 'unknown'"),
+        ("series", "trailer_attempts", "INTEGER NOT NULL DEFAULT 0"),
+        ("series", "trailer_checked_at", "TEXT"),
+        ("series", "trailer_last_error", "TEXT"),
         ("series", "cast_list", "TEXT"),
         ("series", "director", "TEXT"),
         ("series", "country", "TEXT"),
         ("series", "import_provider_id", "INTEGER"),
         ("series", "import_provider_series_id", "TEXT"),
         ("movie_sources", "provider_category_name", "TEXT"),
+        ("movie_sources", "provider_detail_deferred", "INTEGER NOT NULL DEFAULT 0"),
+        ("series_sources", "provider_detail_deferred", "INTEGER NOT NULL DEFAULT 0"),
         ("episode_sources", "provider_category_name", "TEXT"),
         ("providers", "priority", "INTEGER NOT NULL DEFAULT 0"),
         ("movies", "is_adult", "INTEGER NOT NULL DEFAULT 0"),
@@ -1026,7 +1105,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # all -- import_exclude_categories can never match those (it only
         # ever compares an actual category NAME against the exclude list),
         # so this is a separate on/off switch, not another entry in that
-        # list. See vod_importer._should_auto_archive.
+        # list. See vod_importer._should_exclude_from_import.
         ("providers", "import_exclude_uncategorized", "INTEGER NOT NULL DEFAULT 0"),
         # The provider's own "last_modified" for this series, as reported by
         # the cheap bulk get_series list call (refreshed on every catalog
@@ -1104,70 +1183,60 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # (optionally) remove logic.
         ("categories", "sync_sources", "TEXT"),
         ("categories", "sync_mode", "TEXT NOT NULL DEFAULT 'add_only'"),
-        # Per-source detected language (see _source_language), backing the
-        # query-time Enabled Playback Languages filter (_enabled_languages_
-        # clause) -- independent of the import-time exclusion above, which
-        # only gates what gets imported and can't retroactively hide
-        # already-imported foreign-tagged rows.
+        # Per-source language, computed from raw_name at import time via
+        # _name_prefix_code (e.g. "NL - Title" -> "NL"), defaulting to "EN"
+        # when no foreign prefix is detected. Exists because auto-merge-by-
+        # tmdb_id (see auto_merge_movie_by_tmdb) correctly combines same-film
+        # rows regardless of dub/sub language, but nothing downstream gated
+        # playback/export per source -- a foreign-tagged row merged into an
+        # English card surfaced its sources with zero language check
+        # anywhere (list_movie_sources_for_streaming, _best_source_cte). See
+        # beads-974.
         ("movie_sources", "language", "TEXT"),
-        ("episode_sources", "language", "TEXT"),
         ("series_sources", "language", "TEXT"),
+        ("episode_sources", "language", "TEXT"),
         # series_source_needs_enrichment used to read last_seen_at, but that
         # column is ALSO stamped by bulk_import_series's cheap catalog-list
         # upsert (no episode data at all) on every provider refresh -- which
         # runs far more often than a full bulk enrich. That made a source
         # look "recently enriched" and get skipped even when its episodes
-        # had never once been successfully fetched. This column is written
-        # ONLY by set_series_source_enrichment on a genuine successful
-        # episode fetch, never by the catalog import, so the two meanings
-        # ("source still exists in the catalog" vs "episodes were actually
-        # fetched") can't collide. Starts NULL for every existing row --
-        # _is_stale(None) is True, so the next enrichment pass naturally
-        # re-attempts every series source once; no backfill needed.
+        # had never once been successfully fetched (all-XC-provider 0-episode
+        # bug, reported 2026-09-12; confirmed live across WOBO and AMBER
+        # BABY). This column is written ONLY by set_series_source_enrichment
+        # on a genuine successful episode fetch, never by the catalog
+        # import, so the two meanings ("source still exists in the catalog"
+        # vs "episodes were actually fetched") can't collide again. Starts
+        # NULL for every existing row -- _is_stale(None) is True, so the
+        # very next enrichment pass naturally re-attempts every series
+        # source once; no backfill needed.
         ("series_sources", "episodes_last_enriched_at", "TEXT"),
-        # Provider-supplied trailer (see apply_provider_trailers) -- a bulk
-        # XC catalog list commonly includes a "trailer"/"youtube_trailer"
-        # field already, so this is captured for free at import time, same
-        # spirit as poster_url above. trailer_status/attempts/checked_at/
-        # last_error exist for a future TMDB-lookup fallback pass (not yet
-        # implemented here -- @Knm's own fork has the schema for one but no
-        # wired caller either, confirmed by reading their current main), so
-        # they just sit at their defaults until that lands.
-        ("movies", "trailer_key", "TEXT"),
-        ("movies", "trailer_site", "TEXT"),
-        ("movies", "trailer_status", "TEXT NOT NULL DEFAULT 'unknown'"),
-        ("movies", "trailer_attempts", "INTEGER NOT NULL DEFAULT 0"),
-        ("movies", "trailer_checked_at", "TEXT"),
-        ("movies", "trailer_last_error", "TEXT"),
-        ("series", "trailer_key", "TEXT"),
-        ("series", "trailer_site", "TEXT"),
-        ("series", "trailer_status", "TEXT NOT NULL DEFAULT 'unknown'"),
-        ("series", "trailer_attempts", "INTEGER NOT NULL DEFAULT 0"),
-        ("series", "trailer_checked_at", "TEXT"),
-        ("series", "trailer_last_error", "TEXT"),
+        # A stable fingerprint of the cheap provider-list fields used during
+        # catalog refresh. Once populated, an unchanged source needs no
+        # canonical/source rewrite merely to prove it is still advertised.
+        ("movie_sources", "catalog_fingerprint", "TEXT"),
+        ("series_sources", "catalog_fingerprint", "TEXT"),
+        # Do not conflate provider episode/detail enrichment with canonical
+        # TMDB identity/title enrichment.
+        ("series", "tmdb_metadata_enriched_at", "TEXT"),
     ]
     for table, column, coltype in migrations:
         existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
         if column not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
-
-    # Found live 2026-09-15: list_metadata_review's WHERE clause
-    # (review_excluded=0 AND (needs_year_review=1 OR (tmdb_id IS NULL AND
-    # year IS NULL))) had zero index support, so it fell back to a full
-    # table scan -- 8s+ against a real ~115k-row movies table under
-    # concurrent bulk-enrichment load. AND distributes over OR here, so
-    # `review_excluded=0 AND (A OR B)` == `(review_excluded=0 AND A) OR
-    # (review_excluded=0 AND B)` -- these two partial indexes match each
-    # side exactly, letting SQLite's OR-optimization use both via an index
-    # union instead of scanning every row. Placed after the ALTER TABLE loop
-    # above (not in the CREATE TABLE block near the top of init_db) since
-    # needs_year_review/review_excluded/tmdb_id are migration-added columns
-    # that don't exist yet on a brand-new DB at that earlier point.
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_movies_metadata_review_flag ON movies(id) WHERE review_excluded=0 AND needs_year_review=1")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_movies_metadata_review_missing ON movies(id) WHERE review_excluded=0 AND tmdb_id IS NULL AND year IS NULL")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_series_metadata_review_flag ON series(id) WHERE review_excluded=0 AND needs_year_review=1")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_series_metadata_review_missing ON series(id) WHERE review_excluded=0 AND tmdb_id IS NULL AND year IS NULL")
-
+    # Seed the durable decision for pre-existing sources.  Rows whose
+    # canonical item still has no TMDB identity are exactly the sources that
+    # the import-first workflow leaves for review; future imports maintain the
+    # flag per source as identities arrive.
+    conn.execute(
+        "UPDATE movie_sources SET provider_detail_deferred=1 "
+        "WHERE provider_detail_deferred=0 AND movie_id IN "
+        "(SELECT id FROM movies WHERE tmdb_id IS NULL OR TRIM(tmdb_id)='')"
+    )
+    conn.execute(
+        "UPDATE series_sources SET provider_detail_deferred=1 "
+        "WHERE provider_detail_deferred=0 AND series_id IN "
+        "(SELECT id FROM series WHERE tmdb_id IS NULL OR TRIM(tmdb_id)='')"
+    )
     _commit_with_retry(conn)
 
 
@@ -1207,6 +1276,190 @@ def _backfill_source_owners(conn: sqlite3.Connection) -> None:
 
 def _now() -> str:
     return str(time.time())
+
+
+def create_catalog_sync_run(provider_id: int | None, provider_name: str, run_type: str = "provider_import") -> int:
+    """Create the durable user-facing report before a provider import starts."""
+    now = _now()
+    conn = _connect()
+    cur = conn.execute(
+        """INSERT INTO catalog_sync_runs
+           (provider_id, provider_name, run_type, queued_at, status, created_at)
+           VALUES (?,?,?,?,?,?)""",
+        (provider_id, provider_name, run_type, now, "running", now),
+    )
+    _commit_with_retry(conn)
+    run_id = int(cur.lastrowid)
+    conn.close()
+    return run_id
+
+
+def update_catalog_sync_run(run_id: int, **fields) -> None:
+    """Update only known lifecycle/summary fields on a sync report."""
+    allowed = {
+        "import_started_at", "import_finished_at", "reconciliation_started_at",
+        "reconciliation_finished_at", "enrichment_started_at", "enrichment_finished_at",
+        "ready_at", "status", "summary_json", "error",
+    }
+    values = {key: value for key, value in fields.items() if key in allowed}
+    if not values:
+        return
+    conn = _connect()
+    assignments = ", ".join(f"{key}=?" for key in values)
+    conn.execute(f"UPDATE catalog_sync_runs SET {assignments} WHERE id=?", (*values.values(), run_id))
+    _commit_with_retry(conn)
+    conn.close()
+
+
+def _catalog_sync_row_detail(conn: sqlite3.Connection, content_type: str, row: sqlite3.Row, summary: dict | None) -> dict:
+    """Build durable, user-facing context for one catalog card event."""
+    if content_type == "movie":
+        source_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM movie_sources WHERE movie_id=?", (row["id"],)
+        ).fetchone()["c"]
+        detail = {"source_count": int(source_count)}
+    else:
+        episode_counts = conn.execute(
+            """SELECT COUNT(DISTINCT e.id) AS episodes,
+                      COUNT(DISTINCT e.season_number) AS seasons,
+                      COUNT(DISTINCT es.id) AS episode_sources
+                 FROM episodes e
+                 LEFT JOIN episode_sources es ON es.episode_id=e.id
+                WHERE e.series_id=?""",
+            (row["id"],),
+        ).fetchone()
+        source_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM series_sources WHERE series_id=?", (row["id"],)
+        ).fetchone()["c"]
+        detail = {
+            "source_count": int(source_count),
+            "episode_count": int(episode_counts["episodes"]),
+            "season_count": int(episode_counts["seasons"]),
+            "episode_source_count": int(episode_counts["episode_sources"]),
+        }
+    detail.update({"tmdb_id": row["tmdb_id"], "summary": summary or {}})
+    return detail
+
+
+def record_catalog_sync_events(
+    run_id: int, *, movie_ids=(), series_ids=(), created_movie_ids=(), created_series_ids=(),
+    summary: dict | None = None, extra_events: list[dict] | None = None,
+) -> int:
+    """Snapshot meaningful changed catalog cards into a report.
+
+    Episode-level changes are intentionally summarized on the series event;
+    this table is not an episode review queue.
+    """
+    conn = _connect()
+    now = _now()
+    inserted = 0
+    created_by_type = {
+        "movie": {int(item_id) for item_id in created_movie_ids if item_id is not None},
+        "series": {int(item_id) for item_id in created_series_ids if item_id is not None},
+    }
+    for content_type, ids, table in (("movie", movie_ids, "movies"), ("series", series_ids, "series")):
+        ids = sorted({int(item_id) for item_id in ids if item_id is not None})
+        for offset in range(0, len(ids), 900):
+            batch = ids[offset:offset + 900]
+            if not batch:
+                continue
+            placeholders = ",".join("?" * len(batch))
+            rows = conn.execute(
+                f"SELECT id, name, year, tmdb_id FROM {table} WHERE id IN ({placeholders})", batch,
+            ).fetchall()
+            for row in rows:
+                detail = _catalog_sync_row_detail(conn, content_type, row, summary)
+                conn.execute(
+                    """INSERT INTO catalog_sync_events
+                       (run_id, content_type, content_id, title, year, action, detail_json, created_at)
+                       VALUES (?,?,?,?,?,?,?,?)""",
+                    (run_id, content_type, row["id"], row["name"], row["year"],
+                     "added" if row["id"] in created_by_type[content_type] else "changed",
+                     json.dumps(detail, separators=(",", ":")), now),
+                )
+                inserted += 1
+    for event in extra_events or []:
+        content_type = event.get("content_type")
+        if content_type not in ("movie", "series"):
+            continue
+        conn.execute(
+            """INSERT INTO catalog_sync_events
+               (run_id, content_type, content_id, provider_source_id, title, year, action, detail_json, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (
+                run_id, content_type, event.get("content_id"), event.get("provider_source_id"),
+                str(event.get("title") or "Untitled"), event.get("year"),
+                str(event.get("action") or "changed"),
+                json.dumps(event.get("detail") or {}, separators=(",", ":")), now,
+            ),
+        )
+        inserted += 1
+    if inserted:
+        _commit_with_retry(conn)
+    conn.close()
+    return inserted
+
+
+def list_catalog_sync_runs(limit: int = 100, offset: int = 0) -> list[dict]:
+    conn = _connect()
+    rows = conn.execute(
+        """SELECT r.*, (SELECT COUNT(*) FROM catalog_sync_events e WHERE e.run_id=r.id) AS event_count
+           FROM catalog_sync_runs r ORDER BY r.id DESC LIMIT ? OFFSET ?""",
+        (max(1, min(limit, 500)), max(0, offset)),
+    ).fetchall()
+    conn.close()
+    result = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["summary"] = json.loads(item.pop("summary_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            item["summary"] = {}
+        result.append(item)
+    return result
+
+
+def get_catalog_sync_run(run_id: int) -> dict | None:
+    conn = _connect()
+    run = conn.execute("SELECT * FROM catalog_sync_runs WHERE id=?", (run_id,)).fetchone()
+    if not run:
+        conn.close()
+        return None
+    events = conn.execute(
+        "SELECT * FROM catalog_sync_events WHERE run_id=? ORDER BY id", (run_id,)
+    ).fetchall()
+    conn.close()
+    result = dict(run)
+    try:
+        result["summary"] = json.loads(result.pop("summary_json") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        result["summary"] = {}
+    result["events"] = []
+    for event in events:
+        item = dict(event)
+        try:
+            item["detail"] = json.loads(item.pop("detail_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            item["detail"] = {}
+        result["events"].append(item)
+    return result
+
+
+def get_latest_catalog_sync_run() -> dict | None:
+    runs = list_catalog_sync_runs(limit=1)
+    return runs[0] if runs else None
+
+
+def delete_catalog_sync_runs(run_ids: list[int]) -> int:
+    ids = sorted({int(run_id) for run_id in run_ids})
+    if not ids:
+        return 0
+    conn = _connect()
+    placeholders = ",".join("?" * len(ids))
+    cur = conn.execute(f"DELETE FROM catalog_sync_runs WHERE id IN ({placeholders})", ids)
+    _commit_with_retry(conn)
+    conn.close()
+    return cur.rowcount
 
 
 def _commit_with_retry(conn: sqlite3.Connection, retries: int = 5) -> None:
@@ -1402,26 +1655,25 @@ def set_movie_source_local_paths(provider_id: int, path_by_stream_id: dict[str, 
     category routing needs to trace a specific recording back to the movie
     row it became, not just know which movies were touched in aggregate;
     callers that only need the touched set can take set(result.values())."""
-    with _WRITE_LOCK:
-        if not path_by_stream_id:
-            return {}
-        conn = _connect()
-        movie_id_by_stream_id: dict[str, int] = {}
-        for stream_id, local_path in path_by_stream_id.items():
-            row = conn.execute(
-                "SELECT movie_id FROM movie_sources WHERE provider_id=? AND provider_stream_id=?",
-                (provider_id, stream_id),
-            ).fetchone()
-            if not row:
-                continue
-            conn.execute(
-                "UPDATE movie_sources SET local_file_path=? WHERE provider_id=? AND provider_stream_id=?",
-                (local_path, provider_id, stream_id),
-            )
-            movie_id_by_stream_id[stream_id] = row["movie_id"]
-        _commit_with_retry(conn)
-        conn.close()
-        return movie_id_by_stream_id
+    if not path_by_stream_id:
+        return {}
+    conn = _connect()
+    movie_id_by_stream_id: dict[str, int] = {}
+    for stream_id, local_path in path_by_stream_id.items():
+        row = conn.execute(
+            "SELECT movie_id FROM movie_sources WHERE provider_id=? AND provider_stream_id=?",
+            (provider_id, stream_id),
+        ).fetchone()
+        if not row:
+            continue
+        conn.execute(
+            "UPDATE movie_sources SET local_file_path=? WHERE provider_id=? AND provider_stream_id=?",
+            (local_path, provider_id, stream_id),
+        )
+        movie_id_by_stream_id[stream_id] = row["movie_id"]
+    _commit_with_retry(conn)
+    conn.close()
+    return movie_id_by_stream_id
 
 
 def set_episode_source_local_paths(provider_id: int, path_by_stream_id: dict[str, str]) -> dict[str, int]:
@@ -1431,28 +1683,27 @@ def set_episode_source_local_paths(provider_id: int, path_by_stream_id: dict[str
     the same as every other series import path in this codebase; see
     set_movie_source_local_paths's docstring for why this is a dict now
     rather than a bare list."""
-    with _WRITE_LOCK:
-        if not path_by_stream_id:
-            return {}
-        conn = _connect()
-        series_id_by_stream_id: dict[str, int] = {}
-        for stream_id, local_path in path_by_stream_id.items():
-            row = conn.execute(
-                """SELECT episodes.series_id AS series_id FROM episode_sources
-                   JOIN episodes ON episodes.id = episode_sources.episode_id
-                   WHERE episode_sources.provider_id=? AND episode_sources.provider_stream_id=?""",
-                (provider_id, stream_id),
-            ).fetchone()
-            if not row:
-                continue
-            conn.execute(
-                "UPDATE episode_sources SET local_file_path=? WHERE provider_id=? AND provider_stream_id=?",
-                (local_path, provider_id, stream_id),
-            )
-            series_id_by_stream_id[stream_id] = row["series_id"]
-        _commit_with_retry(conn)
-        conn.close()
-        return series_id_by_stream_id
+    if not path_by_stream_id:
+        return {}
+    conn = _connect()
+    series_id_by_stream_id: dict[str, int] = {}
+    for stream_id, local_path in path_by_stream_id.items():
+        row = conn.execute(
+            """SELECT episodes.series_id AS series_id FROM episode_sources
+               JOIN episodes ON episodes.id = episode_sources.episode_id
+               WHERE episode_sources.provider_id=? AND episode_sources.provider_stream_id=?""",
+            (provider_id, stream_id),
+        ).fetchone()
+        if not row:
+            continue
+        conn.execute(
+            "UPDATE episode_sources SET local_file_path=? WHERE provider_id=? AND provider_stream_id=?",
+            (local_path, provider_id, stream_id),
+        )
+        series_id_by_stream_id[stream_id] = row["series_id"]
+    _commit_with_retry(conn)
+    conn.close()
+    return series_id_by_stream_id
 
 
 def set_movie_source_recording_profile(provider_id: int, stream_id: str, recording_profile_id: int) -> None:
@@ -1468,27 +1719,25 @@ def set_movie_source_recording_profile(provider_id: int, stream_id: str, recordi
     enough for "whose portal library does this show up in" without a join
     table, at the cost of a shared recording only ever being attributed to
     one of its matching people."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute(
-            "UPDATE movie_sources SET recording_profile_id=? WHERE provider_id=? AND provider_stream_id=?",
-            (recording_profile_id, provider_id, stream_id),
-        )
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute(
+        "UPDATE movie_sources SET recording_profile_id=? WHERE provider_id=? AND provider_stream_id=?",
+        (recording_profile_id, provider_id, stream_id),
+    )
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def set_episode_source_recording_profile(provider_id: int, stream_id: str, recording_profile_id: int) -> None:
     """Episode counterpart to set_movie_source_recording_profile -- same
     single-owner caveat applies."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute(
-            "UPDATE episode_sources SET recording_profile_id=? WHERE provider_id=? AND provider_stream_id=?",
-            (recording_profile_id, provider_id, stream_id),
-        )
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute(
+        "UPDATE episode_sources SET recording_profile_id=? WHERE provider_id=? AND provider_stream_id=?",
+        (recording_profile_id, provider_id, stream_id),
+    )
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def set_movie_source_dispatcharr_user_id(provider_id: int, stream_id: str, dispatcharr_user_id: int) -> None:
@@ -1502,26 +1751,24 @@ def set_movie_source_dispatcharr_user_id(provider_id: int, stream_id: str, dispa
     profile. Only called when dispatcharr_dvr_importer's attribution pass
     found no profile match for this stream_id at all -- a profile-owned
     recording keeps using that path instead, unchanged."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute(
-            "UPDATE movie_sources SET dispatcharr_user_id=? WHERE provider_id=? AND provider_stream_id=?",
-            (dispatcharr_user_id, provider_id, stream_id),
-        )
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute(
+        "UPDATE movie_sources SET dispatcharr_user_id=? WHERE provider_id=? AND provider_stream_id=?",
+        (dispatcharr_user_id, provider_id, stream_id),
+    )
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def set_episode_source_dispatcharr_user_id(provider_id: int, stream_id: str, dispatcharr_user_id: int) -> None:
     """Episode counterpart to set_movie_source_dispatcharr_user_id."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute(
-            "UPDATE episode_sources SET dispatcharr_user_id=? WHERE provider_id=? AND provider_stream_id=?",
-            (dispatcharr_user_id, provider_id, stream_id),
-        )
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute(
+        "UPDATE episode_sources SET dispatcharr_user_id=? WHERE provider_id=? AND provider_stream_id=?",
+        (dispatcharr_user_id, provider_id, stream_id),
+    )
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def add_movie_source_owner(provider_id: int, stream_id: str, dispatcharr_user_id: int) -> None:
@@ -1568,32 +1815,31 @@ def attach_portal_user_to_existing_recording(provider_id: int, stream_id: str, d
     -- there's no source row to attach ownership to yet; the caller falls
     back to add_pending_recording_claim in that case, so the person still
     gets attached once it does import."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        movie_source = conn.execute(
-            "SELECT id FROM movie_sources WHERE provider_id=? AND provider_stream_id=?", (provider_id, stream_id)
-        ).fetchone()
-        if movie_source:
-            conn.execute(
-                "INSERT OR IGNORE INTO movie_source_owners (movie_source_id, dispatcharr_user_id, added_at) VALUES (?,?,?)",
-                (movie_source["id"], dispatcharr_user_id, _now()),
-            )
-            _commit_with_retry(conn)
-            conn.close()
-            return True
-        episode_source = conn.execute(
-            "SELECT id FROM episode_sources WHERE provider_id=? AND provider_stream_id=?", (provider_id, stream_id)
-        ).fetchone()
-        if episode_source:
-            conn.execute(
-                "INSERT OR IGNORE INTO episode_source_owners (episode_source_id, dispatcharr_user_id, added_at) VALUES (?,?,?)",
-                (episode_source["id"], dispatcharr_user_id, _now()),
-            )
-            _commit_with_retry(conn)
-            conn.close()
-            return True
+    conn = _connect()
+    movie_source = conn.execute(
+        "SELECT id FROM movie_sources WHERE provider_id=? AND provider_stream_id=?", (provider_id, stream_id)
+    ).fetchone()
+    if movie_source:
+        conn.execute(
+            "INSERT OR IGNORE INTO movie_source_owners (movie_source_id, dispatcharr_user_id, added_at) VALUES (?,?,?)",
+            (movie_source["id"], dispatcharr_user_id, _now()),
+        )
+        _commit_with_retry(conn)
         conn.close()
-        return False
+        return True
+    episode_source = conn.execute(
+        "SELECT id FROM episode_sources WHERE provider_id=? AND provider_stream_id=?", (provider_id, stream_id)
+    ).fetchone()
+    if episode_source:
+        conn.execute(
+            "INSERT OR IGNORE INTO episode_source_owners (episode_source_id, dispatcharr_user_id, added_at) VALUES (?,?,?)",
+            (episode_source["id"], dispatcharr_user_id, _now()),
+        )
+        _commit_with_retry(conn)
+        conn.close()
+        return True
+    conn.close()
+    return False
 
 
 def add_pending_recording_claim(provider_id: int, channel_id: int, identity_key: str, dispatcharr_user_id: int) -> None:
@@ -1602,14 +1848,13 @@ def add_pending_recording_claim(provider_id: int, channel_id: int, identity_key:
     pending_recording_claims' own table comment. consume_pending_recording_
     claims (called from dispatcharr_dvr_importer once that recording
     actually imports) is what turns this into a real ownership row."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute(
-            "INSERT INTO pending_recording_claims (provider_id, channel_id, identity_key, dispatcharr_user_id, created_at) VALUES (?,?,?,?,?)",
-            (provider_id, channel_id, identity_key, dispatcharr_user_id, _now()),
-        )
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute(
+        "INSERT INTO pending_recording_claims (provider_id, channel_id, identity_key, dispatcharr_user_id, created_at) VALUES (?,?,?,?,?)",
+        (provider_id, channel_id, identity_key, dispatcharr_user_id, _now()),
+    )
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def consume_pending_recording_claims(provider_id: int, channel_id: int, identity_key: str) -> list[int]:
@@ -1619,17 +1864,16 @@ def consume_pending_recording_claims(provider_id: int, channel_id: int, identity
     and deletes those claim rows in the same call (single-use: once
     consumed here, the caller is about to add each of these as a real
     owner, so the claim has done its job)."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        rows = conn.execute(
-            "SELECT id, dispatcharr_user_id FROM pending_recording_claims WHERE provider_id=? AND channel_id=? AND identity_key=?",
-            (provider_id, channel_id, identity_key),
-        ).fetchall()
-        if rows:
-            conn.executemany("DELETE FROM pending_recording_claims WHERE id=?", [(r["id"],) for r in rows])
-            _commit_with_retry(conn)
-        conn.close()
-        return [r["dispatcharr_user_id"] for r in rows]
+    conn = _connect()
+    rows = conn.execute(
+        "SELECT id, dispatcharr_user_id FROM pending_recording_claims WHERE provider_id=? AND channel_id=? AND identity_key=?",
+        (provider_id, channel_id, identity_key),
+    ).fetchall()
+    if rows:
+        conn.executemany("DELETE FROM pending_recording_claims WHERE id=?", [(r["id"],) for r in rows])
+        _commit_with_retry(conn)
+    conn.close()
+    return [r["dispatcharr_user_id"] for r in rows]
 
 
 def cleanup_stale_recording_claims(max_age_days: int = 7) -> int:
@@ -1637,13 +1881,12 @@ def cleanup_stale_recording_claims(max_age_days: int = 7) -> int:
     (cancelled, failed, or the person just gave up and never checked back)
     would otherwise sit here forever -- called once per dispatcharr_dvr_
     importer run, cheap (this table stays tiny in practice) and bounded."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        cutoff = str(time.time() - max_age_days * 86400)
-        cur = conn.execute("DELETE FROM pending_recording_claims WHERE created_at < ?", (cutoff,))
-        _commit_with_retry(conn)
-        conn.close()
-        return cur.rowcount
+    conn = _connect()
+    cutoff = str(time.time() - max_age_days * 86400)
+    cur = conn.execute("DELETE FROM pending_recording_claims WHERE created_at < ?", (cutoff,))
+    _commit_with_retry(conn)
+    conn.close()
+    return cur.rowcount
 
 
 def list_owned_movies_oldest_first(provider_id: int, dispatcharr_user_id: int) -> list[dict]:
@@ -1689,26 +1932,25 @@ def sync_quota_warnings_sent(provider_id: int, dispatcharr_user_id: int, current
     threshold. Returns only the NEWLY crossed thresholds from this call;
     the caller (dispatcharr_dvr_importer) only sends a notification for
     those, not ones already warned about in an earlier pass."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        already = {r["threshold_pct"] for r in conn.execute(
-            "SELECT threshold_pct FROM quota_warnings_sent WHERE provider_id=? AND dispatcharr_user_id=?",
-            (provider_id, dispatcharr_user_id),
-        ).fetchall()}
-        for t in already - currently_met_thresholds:
-            conn.execute(
-                "DELETE FROM quota_warnings_sent WHERE provider_id=? AND dispatcharr_user_id=? AND threshold_pct=?",
-                (provider_id, dispatcharr_user_id, t),
-            )
-        newly_crossed = currently_met_thresholds - already
-        for t in newly_crossed:
-            conn.execute(
-                "INSERT OR IGNORE INTO quota_warnings_sent (provider_id, dispatcharr_user_id, threshold_pct, sent_at) VALUES (?,?,?,?)",
-                (provider_id, dispatcharr_user_id, t, _now()),
-            )
-        _commit_with_retry(conn)
-        conn.close()
-        return newly_crossed
+    conn = _connect()
+    already = {r["threshold_pct"] for r in conn.execute(
+        "SELECT threshold_pct FROM quota_warnings_sent WHERE provider_id=? AND dispatcharr_user_id=?",
+        (provider_id, dispatcharr_user_id),
+    ).fetchall()}
+    for t in already - currently_met_thresholds:
+        conn.execute(
+            "DELETE FROM quota_warnings_sent WHERE provider_id=? AND dispatcharr_user_id=? AND threshold_pct=?",
+            (provider_id, dispatcharr_user_id, t),
+        )
+    newly_crossed = currently_met_thresholds - already
+    for t in newly_crossed:
+        conn.execute(
+            "INSERT OR IGNORE INTO quota_warnings_sent (provider_id, dispatcharr_user_id, threshold_pct, sent_at) VALUES (?,?,?,?)",
+            (provider_id, dispatcharr_user_id, t, _now()),
+        )
+    _commit_with_retry(conn)
+    conn.close()
+    return newly_crossed
 
 
 def remove_movie_library_owner(movie_id: int, provider_id: int, dispatcharr_user_id: int) -> dict:
@@ -1726,85 +1968,83 @@ def remove_movie_library_owner(movie_id: int, provider_id: int, dispatcharr_user
     where two different source rows ended up pointing at the same file; far
     better to leak a file than to delete one a different, unrelated row
     still depends on."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        source = conn.execute(
-            "SELECT id, local_file_path FROM movie_sources WHERE movie_id=? AND provider_id=?",
-            (movie_id, provider_id),
-        ).fetchone()
-        if not source:
-            conn.close()
-            return {"removed": False, "fully_deleted": False}
-        source_id = source["id"]
-        conn.execute(
-            "DELETE FROM movie_source_owners WHERE movie_source_id=? AND dispatcharr_user_id=?",
-            (source_id, dispatcharr_user_id),
-        )
-        remaining = conn.execute(
-            "SELECT COUNT(*) c FROM movie_source_owners WHERE movie_source_id=?", (source_id,)
-        ).fetchone()["c"]
-        file_path = None
-        fully_deleted = False
-        if remaining == 0:
-            fully_deleted = True
-            if source["local_file_path"]:
-                other_ref = conn.execute(
-                    """SELECT 1 FROM movie_sources WHERE local_file_path=? AND id!=?
-                       UNION SELECT 1 FROM episode_sources WHERE local_file_path=? LIMIT 1""",
-                    (source["local_file_path"], source_id, source["local_file_path"]),
-                ).fetchone()
-                if not other_ref:
-                    file_path = source["local_file_path"]
-            conn.execute("DELETE FROM movie_sources WHERE id=?", (source_id,))
-            _purge_if_sourceless_movie(conn, movie_id)
-        _commit_with_retry(conn)
+    conn = _connect()
+    source = conn.execute(
+        "SELECT id, local_file_path FROM movie_sources WHERE movie_id=? AND provider_id=?",
+        (movie_id, provider_id),
+    ).fetchone()
+    if not source:
         conn.close()
-        if fully_deleted:
-            _delete_file_if_present(file_path)
-        return {"removed": True, "fully_deleted": fully_deleted}
+        return {"removed": False, "fully_deleted": False}
+    source_id = source["id"]
+    conn.execute(
+        "DELETE FROM movie_source_owners WHERE movie_source_id=? AND dispatcharr_user_id=?",
+        (source_id, dispatcharr_user_id),
+    )
+    remaining = conn.execute(
+        "SELECT COUNT(*) c FROM movie_source_owners WHERE movie_source_id=?", (source_id,)
+    ).fetchone()["c"]
+    file_path = None
+    fully_deleted = False
+    if remaining == 0:
+        fully_deleted = True
+        if source["local_file_path"]:
+            other_ref = conn.execute(
+                """SELECT 1 FROM movie_sources WHERE local_file_path=? AND id!=?
+                   UNION SELECT 1 FROM episode_sources WHERE local_file_path=? LIMIT 1""",
+                (source["local_file_path"], source_id, source["local_file_path"]),
+            ).fetchone()
+            if not other_ref:
+                file_path = source["local_file_path"]
+        conn.execute("DELETE FROM movie_sources WHERE id=?", (source_id,))
+        _purge_if_sourceless_movie(conn, movie_id)
+    _commit_with_retry(conn)
+    conn.close()
+    if fully_deleted:
+        _delete_file_if_present(file_path)
+    return {"removed": True, "fully_deleted": fully_deleted}
 
 
 def remove_episode_library_owner(episode_id: int, provider_id: int, dispatcharr_user_id: int) -> dict:
     """Episode counterpart to remove_movie_library_owner."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        source = conn.execute(
-            "SELECT id, local_file_path FROM episode_sources WHERE episode_id=? AND provider_id=?",
-            (episode_id, provider_id),
-        ).fetchone()
-        if not source:
-            conn.close()
-            return {"removed": False, "fully_deleted": False}
-        source_id = source["id"]
-        conn.execute(
-            "DELETE FROM episode_source_owners WHERE episode_source_id=? AND dispatcharr_user_id=?",
-            (source_id, dispatcharr_user_id),
-        )
-        remaining = conn.execute(
-            "SELECT COUNT(*) c FROM episode_source_owners WHERE episode_source_id=?", (source_id,)
-        ).fetchone()["c"]
-        file_path = None
-        fully_deleted = False
-        episode_row = conn.execute("SELECT series_id FROM episodes WHERE id=?", (episode_id,)).fetchone()
-        if remaining == 0:
-            fully_deleted = True
-            if source["local_file_path"]:
-                other_ref = conn.execute(
-                    """SELECT 1 FROM episode_sources WHERE local_file_path=? AND id!=?
-                       UNION SELECT 1 FROM movie_sources WHERE local_file_path=? LIMIT 1""",
-                    (source["local_file_path"], source_id, source["local_file_path"]),
-                ).fetchone()
-                if not other_ref:
-                    file_path = source["local_file_path"]
-            conn.execute("DELETE FROM episode_sources WHERE id=?", (source_id,))
-            _purge_if_sourceless_episode(conn, episode_id)
-            if episode_row:
-                _purge_if_sourceless_series(conn, episode_row["series_id"])
-        _commit_with_retry(conn)
+    conn = _connect()
+    source = conn.execute(
+        "SELECT id, local_file_path FROM episode_sources WHERE episode_id=? AND provider_id=?",
+        (episode_id, provider_id),
+    ).fetchone()
+    if not source:
         conn.close()
-        if fully_deleted:
-            _delete_file_if_present(file_path)
-        return {"removed": True, "fully_deleted": fully_deleted}
+        return {"removed": False, "fully_deleted": False}
+    source_id = source["id"]
+    conn.execute(
+        "DELETE FROM episode_source_owners WHERE episode_source_id=? AND dispatcharr_user_id=?",
+        (source_id, dispatcharr_user_id),
+    )
+    remaining = conn.execute(
+        "SELECT COUNT(*) c FROM episode_source_owners WHERE episode_source_id=?", (source_id,)
+    ).fetchone()["c"]
+    file_path = None
+    fully_deleted = False
+    episode_row = conn.execute("SELECT series_id FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    if remaining == 0:
+        fully_deleted = True
+        if source["local_file_path"]:
+            other_ref = conn.execute(
+                """SELECT 1 FROM episode_sources WHERE local_file_path=? AND id!=?
+                   UNION SELECT 1 FROM movie_sources WHERE local_file_path=? LIMIT 1""",
+                (source["local_file_path"], source_id, source["local_file_path"]),
+            ).fetchone()
+            if not other_ref:
+                file_path = source["local_file_path"]
+        conn.execute("DELETE FROM episode_sources WHERE id=?", (source_id,))
+        _purge_if_sourceless_episode(conn, episode_id)
+        if episode_row:
+            _purge_if_sourceless_series(conn, episode_row["series_id"])
+    _commit_with_retry(conn)
+    conn.close()
+    if fully_deleted:
+        _delete_file_if_present(file_path)
+    return {"removed": True, "fully_deleted": fully_deleted}
 
 
 # ── DVR recording profiles (Phase 2) ────────────────────────────────────────
@@ -1866,11 +2106,10 @@ def get_recording_profile(profile_id: int) -> dict | None:
 
 
 def delete_recording_profile(profile_id: int) -> None:
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("DELETE FROM dvr_recording_profiles WHERE id=?", (profile_id,))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("DELETE FROM dvr_recording_profiles WHERE id=?", (profile_id,))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def set_recording_profile_monitored(profile_id: int, monitored: bool) -> None:
@@ -1879,11 +2118,10 @@ def set_recording_profile_monitored(profile_id: int, monitored: bool) -> None:
     dedicated Missing Episodes page. Unmonitoring a rule is how an admin
     opts a show out of that page's clutter without deleting (and thereby
     cancelling) the rule's own real Dispatcharr recordings."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("UPDATE dvr_recording_profiles SET monitored=? WHERE id=?", (1 if monitored else 0, profile_id))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("UPDATE dvr_recording_profiles SET monitored=? WHERE id=?", (1 if monitored else 0, profile_id))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def match_recording_profiles(provider_id: int, title: str, tvg_id: str | None) -> list[dict]:
@@ -2086,14 +2324,13 @@ def record_unresolved_missing_episode(series_id: int, season_number: int, episod
 
 
 def clear_unresolved_missing_episode(series_id: int, season_number: int, episode_number: int) -> None:
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute(
-            "DELETE FROM dvr_unresolved_missing_episodes WHERE series_id=? AND season_number=? AND episode_number=?",
-            (series_id, season_number, episode_number),
-        )
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute(
+        "DELETE FROM dvr_unresolved_missing_episodes WHERE series_id=? AND season_number=? AND episode_number=?",
+        (series_id, season_number, episode_number),
+    )
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def list_unresolved_missing_episodes(series_id: int | None = None) -> list[dict]:
@@ -2175,6 +2412,26 @@ def get_recording_failure(provider_id: int, dispatcharr_recording_id: int) -> di
 _MAX_STORED_STREAM_FAILURES = 500
 
 
+def _block_existing_exhausted_movies(conn: sqlite3.Connection) -> int:
+    """Hide movies whose every currently playable source is already over the
+    failure threshold. Shared by startup migration and the per-failure path."""
+    lang_clause, lang_params = _enabled_languages_clause("ms.language")
+    cur = conn.execute(f"""
+        UPDATE movies SET stream_blocked=1, stream_blocked_at=COALESCE(stream_blocked_at, ?)
+        WHERE stream_blocked=0
+          AND EXISTS (
+              SELECT 1 FROM movie_sources ms JOIN providers p ON p.id=ms.provider_id
+              WHERE ms.movie_id=movies.id AND p.is_active=1 AND {lang_clause}
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM movie_sources ms JOIN providers p ON p.id=ms.provider_id
+              WHERE ms.movie_id=movies.id AND p.is_active=1 AND {lang_clause}
+                AND ms.consecutive_failures < {_FAILING_SOURCE_THRESHOLD}
+          )
+    """, (_now(), *lang_params, *lang_params))
+    return cur.rowcount
+
+
 def log_stream_failure(
     kind: str, title: str, username: str | None, attempts: list[dict], final_reason: str,
     movie_id: int | None = None, episode_id: int | None = None,
@@ -2188,21 +2445,64 @@ def log_stream_failure(
     deliberately not a DB-level FK, same "always a snapshot" contract as
     title/kind/attempts already have -- resolved back to a label via an
     app-level join in list_stream_failures_grouped."""
-    with _WRITE_LOCK:
-        import json
-        conn = _connect()
-        conn.execute(
-            "INSERT INTO vod_stream_failures (kind, title, username, attempts, final_reason, created_at, movie_id, episode_id, client_ip, xc_client_id) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (kind, title, username, json.dumps(attempts), final_reason, _now(), movie_id, episode_id, client_ip, xc_client_id),
-        )
-        conn.execute(
-            "DELETE FROM vod_stream_failures WHERE id NOT IN "
-            "(SELECT id FROM vod_stream_failures ORDER BY created_at DESC, id DESC LIMIT ?)",
-            (_MAX_STORED_STREAM_FAILURES,),
-        )
-        _commit_with_retry(conn)
-        conn.close()
+    import json
+    conn = _connect()
+    conn.execute(
+        "INSERT INTO vod_stream_failures (kind, title, username, attempts, final_reason, created_at, movie_id, episode_id, client_ip, xc_client_id) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (kind, title, username, json.dumps(attempts), final_reason, _now(), movie_id, episode_id, client_ip, xc_client_id),
+    )
+    conn.execute(
+        "DELETE FROM vod_stream_failures WHERE id NOT IN "
+        "(SELECT id FROM vod_stream_failures ORDER BY created_at DESC, id DESC LIMIT ?)",
+        (_MAX_STORED_STREAM_FAILURES,),
+    )
+    _commit_with_retry(conn)
+    conn.close()
+
+
+def clear_recovered_stream_failures(
+    kind: str, title: str, username: str | None,
+    movie_id: int | None = None, episode_id: int | None = None,
+    client_ip: str | None = None, xc_client_id: int | None = None,
+    window_seconds: int = 120,
+) -> int:
+    """Remove recent terminal rows superseded by a successful range request.
+
+    Dispatcharr normally opens the next byte-range request before the prior
+    request has fully unwound.  A provider disconnect can therefore create a
+    failure row for an obsolete request even while the logical playback
+    session continues.  Failed Streams is intended for terminal playback
+    failures, so a successful successor in a short window clears that stale
+    row.  Older history is left untouched.
+    """
+    if movie_id is None and episode_id is None:
+        return 0
+    cutoff = str(time.time() - max(0, window_seconds))
+    conn = _connect()
+    clauses = ["kind = ?", "title = ?", "created_at >= ?"]
+    params: list = [kind, title, cutoff]
+    if movie_id is not None:
+        clauses.append("movie_id = ?")
+        params.append(movie_id)
+    else:
+        clauses.append("episode_id = ?")
+        params.append(episode_id)
+    clauses.append("(username = ? OR (username IS NULL AND ? IS NULL))")
+    params.extend([username, username])
+    if client_ip is not None:
+        clauses.append("(client_ip = ? OR client_ip IS NULL)")
+        params.append(client_ip)
+    if xc_client_id is not None:
+        clauses.append("(xc_client_id = ? OR xc_client_id IS NULL)")
+        params.append(xc_client_id)
+    cur = conn.execute(
+        f"DELETE FROM vod_stream_failures WHERE {' AND '.join(clauses)}", params
+    )
+    deleted = cur.rowcount
+    _commit_with_retry(conn)
+    conn.close()
+    return deleted
 
 
 def record_source_failure(kind: str, source_id: int) -> None:
@@ -2234,18 +2534,15 @@ def record_source_failure(kind: str, source_id: int) -> None:
             (_now(), source_id),
         )
         if kind == "movie":
-            # Hide a movie from client listings the moment every one of its
-            # active, enabled-language sources has crossed the failure
-            # threshold (ported from knmplace's fork) -- otherwise a movie
-            # whose every provider copy is dead still gets advertised as
-            # playable, and a client just gets a dead stream with no signal
-            # anything is wrong. list_blocked_movies surfaces these for an
-            # admin to test/fix; record_source_success below clears the
-            # block the moment any source actually works again.
             row = conn.execute("SELECT movie_id FROM movie_sources WHERE id=?", (source_id,)).fetchone()
             if row:
+                # KNM: added 2026-09-17 -- a title whose every playable
+                # fallback has repeatedly failed should not remain advertised
+                # to clients. Keep its source history for diagnostics and a
+                # manual retry, but suppress it from the exported catalog.
                 lang_clause, lang_params = _enabled_languages_clause("ms.language")
-                conn.execute(f"""
+                now = _now()
+                cur = conn.execute(f"""
                     UPDATE movies SET stream_blocked=1, stream_blocked_at=?
                     WHERE id=? AND stream_blocked=0
                       AND EXISTS (
@@ -2257,8 +2554,10 @@ def record_source_failure(kind: str, source_id: int) -> None:
                           WHERE ms.movie_id=? AND p.is_active=1 AND {lang_clause}
                             AND ms.consecutive_failures < {_FAILING_SOURCE_THRESHOLD}
                       )
-                """, (_now(), row["movie_id"], row["movie_id"], *lang_params,
-                      row["movie_id"], *lang_params))
+                """, (now, row["movie_id"], row["movie_id"], *lang_params,
+                       row["movie_id"], *lang_params))
+                if cur.rowcount:
+                    logger.warning("[vod_db] blocked movie id=%s after all playable sources failed", row["movie_id"])
         _commit_with_retry(conn)
         conn.close()
 
@@ -2279,6 +2578,8 @@ def record_source_success(kind: str, source_id: int) -> None:
             (source_id,),
         )
         if kind == "movie":
+            # A successful explicit retry is authoritative evidence that the
+            # title is playable again, so return it to the exported catalog.
             conn.execute("""
                 UPDATE movies SET stream_blocked=0, stream_blocked_at=NULL
                 WHERE id=(SELECT movie_id FROM movie_sources WHERE id=?) AND stream_blocked=1
@@ -2367,27 +2668,23 @@ def list_stream_failures(limit: int = 200) -> list[dict]:
 
 
 def delete_stream_failure(failure_id: int) -> None:
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("DELETE FROM vod_stream_failures WHERE id=?", (failure_id,))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("DELETE FROM vod_stream_failures WHERE id=?", (failure_id,))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def clear_stream_failures() -> None:
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("DELETE FROM vod_stream_failures")
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("DELETE FROM vod_stream_failures")
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def list_blocked_movies() -> list[dict]:
     """Actionable recovery queue for movies hidden after every playable
-    fallback repeatedly failed (see record_source_failure's stream_blocked
-    logic). Sources remain intact so an admin can test a specific provider
-    copy from the Stream Recovery page; record_source_success clears the
-    block automatically the moment any source actually works."""
+    fallback repeatedly failed. Sources remain intact so an admin can test a
+    specific provider copy; record_source_success clears the block."""
     conn = _connect()
     movies = conn.execute("""
         SELECT id, name, year, poster_url, stream_blocked_at
@@ -2497,11 +2794,10 @@ def update_dvr_user_limit(
 
 
 def delete_dvr_user_limit(limit_id: int) -> None:
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("DELETE FROM dvr_user_limits WHERE id=?", (limit_id,))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("DELETE FROM dvr_user_limits WHERE id=?", (limit_id,))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 # ── Portal accounts (end-user self-service DVR login) ──────────────────────
@@ -2533,11 +2829,10 @@ def set_portal_account_email(account_id: int, email: str | None) -> None:
     field, only used for notifications.notify_quota_threshold today
     (see the user's 'Both' call, 2026-07-28: admin always gets warned,
     the person themselves also does if they've set an email here)."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("UPDATE portal_accounts SET email=? WHERE id=?", (email, account_id))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("UPDATE portal_accounts SET email=? WHERE id=?", (email, account_id))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def list_portal_accounts(provider_id: int | None = None) -> list[dict]:
@@ -2567,14 +2862,13 @@ def get_portal_account_by_username(username: str) -> dict | None:
 
 
 def set_portal_account_password(account_id: int, password_salt: str, password_hash: str) -> None:
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute(
-            "UPDATE portal_accounts SET password_salt=?, password_hash=? WHERE id=?",
-            (password_salt, password_hash, account_id),
-        )
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute(
+        "UPDATE portal_accounts SET password_salt=?, password_hash=? WHERE id=?",
+        (password_salt, password_hash, account_id),
+    )
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def set_portal_account_totp(account_id: int, totp_secret: str | None, totp_enabled: bool) -> None:
@@ -2586,14 +2880,13 @@ def set_portal_account_totp(account_id: int, totp_secret: str | None, totp_enabl
     verified (portal_routes.portal_confirm_mfa) -- that path must NOT wipe
     the counter that same verification just recorded, or the code that
     confirmed enrollment becomes replayable again immediately after."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute(
-            "UPDATE portal_accounts SET totp_secret=?, totp_enabled=?, totp_last_counter=NULL WHERE id=?",
-            (encrypt_value(totp_secret) if totp_secret else None, int(totp_enabled), account_id),
-        )
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute(
+        "UPDATE portal_accounts SET totp_secret=?, totp_enabled=?, totp_last_counter=NULL WHERE id=?",
+        (encrypt_value(totp_secret) if totp_secret else None, int(totp_enabled), account_id),
+    )
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def enable_confirmed_portal_totp(account_id: int) -> None:
@@ -2601,11 +2894,10 @@ def enable_confirmed_portal_totp(account_id: int) -> None:
     set_portal_account_totp during enrollment) and already passed
     verification -- deliberately leaves totp_secret and totp_last_counter
     untouched, unlike set_portal_account_totp."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("UPDATE portal_accounts SET totp_enabled=1 WHERE id=?", (account_id,))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("UPDATE portal_accounts SET totp_enabled=1 WHERE id=?", (account_id,))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def set_portal_account_totp_counter(account_id: int, counter: int) -> None:
@@ -2614,19 +2906,17 @@ def set_portal_account_totp_counter(account_id: int, counter: int) -> None:
     exact code (or an earlier one) being submitted a second time within its
     own still-valid window -- otherwise a shoulder-surfed/intercepted code
     is usable twice, not just once, for up to ~30s."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("UPDATE portal_accounts SET totp_last_counter=? WHERE id=?", (counter, account_id))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("UPDATE portal_accounts SET totp_last_counter=? WHERE id=?", (counter, account_id))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def delete_portal_account(account_id: int) -> None:
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("DELETE FROM portal_accounts WHERE id=?", (account_id,))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("DELETE FROM portal_accounts WHERE id=?", (account_id,))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 # ── Portal library (completed recordings, scoped to one person) ────────────
@@ -2917,35 +3207,31 @@ def apply_retention_deletions(movies: list[dict], episodes: list[dict]) -> dict:
 
 
 def set_provider_priority(provider_id: int, priority: int) -> None:
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("UPDATE providers SET priority=?, updated_at=? WHERE id=?", (priority, _now(), provider_id))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("UPDATE providers SET priority=?, updated_at=? WHERE id=?", (priority, _now(), provider_id))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def set_provider_name(provider_id: int, name: str) -> None:
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("UPDATE providers SET name=?, updated_at=? WHERE id=?", (name, _now(), provider_id))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("UPDATE providers SET name=?, updated_at=? WHERE id=?", (name, _now(), provider_id))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def set_provider_base_url(provider_id: int, base_url: str) -> None:
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("UPDATE providers SET base_url=?, updated_at=? WHERE id=?", (base_url, _now(), provider_id))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("UPDATE providers SET base_url=?, updated_at=? WHERE id=?", (base_url, _now(), provider_id))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def set_provider_max_streams(provider_id: int, max_streams: int) -> None:
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("UPDATE providers SET max_streams=?, updated_at=? WHERE id=?", (max_streams, _now(), provider_id))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("UPDATE providers SET max_streams=?, updated_at=? WHERE id=?", (max_streams, _now(), provider_id))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def set_provider_shared_limit(provider_id: int, shared_connection_limit: int | None) -> None:
@@ -2954,14 +3240,13 @@ def set_provider_shared_limit(provider_id: int, shared_connection_limit: int | N
     -- see xc_server.py's _try_reserve_capacity(). Which specific live-TV accounts
     count toward it is managed separately (provider_live_accounts, since a
     provider can have one on more than one Dispatcharr instance)."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute(
-            "UPDATE providers SET shared_connection_limit=?, updated_at=? WHERE id=?",
-            (shared_connection_limit, _now(), provider_id),
-        )
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute(
+        "UPDATE providers SET shared_connection_limit=?, updated_at=? WHERE id=?",
+        (shared_connection_limit, _now(), provider_id),
+    )
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def set_provider_custom_user_agent(provider_id: int, custom_user_agent: str | None) -> None:
@@ -2970,50 +3255,47 @@ def set_provider_custom_user_agent(provider_id: int, custom_user_agent: str | No
     with the shared default; this is only needed if one turns out to be
     pickier (blocks even a normal browser UA, or wants something else
     entirely). None/empty clears the override and falls back to the default."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute(
-            "UPDATE providers SET custom_user_agent=?, updated_at=? WHERE id=?",
-            (custom_user_agent or None, _now(), provider_id),
-        )
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute(
+        "UPDATE providers SET custom_user_agent=?, updated_at=? WHERE id=?",
+        (custom_user_agent or None, _now(), provider_id),
+    )
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def set_provider_auto_create_categories(provider_id: int, enabled: bool) -> None:
     """Opt-in per provider (default off, unchanged behavior for anyone who
     doesn't touch this) -- see vod_importer.auto_create_categories_for_provider
     for what turning it on actually does on the next import."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute(
-            "UPDATE providers SET auto_create_categories=?, updated_at=? WHERE id=?",
-            (int(enabled), _now(), provider_id),
-        )
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute(
+        "UPDATE providers SET auto_create_categories=?, updated_at=? WHERE id=?",
+        (int(enabled), _now(), provider_id),
+    )
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def set_provider_import_exclude_categories(provider_id: int, category_names: list[str], exclude_uncategorized: bool = False) -> None:
     """Provider category names (as this provider itself names them, e.g.
-    "Movies - Spanish") to auto-archive on import -- unlike the language
+    "Movies - Spanish") to skip entirely on import -- unlike the language
     exclusion rules (config.get/save_import_language_exclusion), this is
     per-provider since available categories genuinely differ provider to
-    provider. See vod_importer._should_auto_archive.
+    provider. See vod_importer._should_exclude_from_import.
 
     exclude_uncategorized (GH issue #7) is a separate switch, not another
     category name -- some providers ship items with no category attached at
     all, which can never appear in category_names since there's no name to
     add."""
-    with _WRITE_LOCK:
-        import json
-        conn = _connect()
-        conn.execute(
-            "UPDATE providers SET import_exclude_categories=?, import_exclude_uncategorized=?, updated_at=? WHERE id=?",
-            (json.dumps([c.strip() for c in category_names if c.strip()]), int(exclude_uncategorized), _now(), provider_id),
-        )
-        _commit_with_retry(conn)
-        conn.close()
+    import json
+    conn = _connect()
+    conn.execute(
+        "UPDATE providers SET import_exclude_categories=?, import_exclude_uncategorized=?, updated_at=? WHERE id=?",
+        (json.dumps([c.strip() for c in category_names if c.strip()]), int(exclude_uncategorized), _now(), provider_id),
+    )
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def set_provider_archive_new_categories(provider_id: int, enabled: bool) -> None:
@@ -3022,40 +3304,38 @@ def set_provider_archive_new_categories(provider_id: int, enabled: bool) -> None
     (providers.known_import_categories) gets auto-archived on the import
     that discovers it, same as Dispatcharr's own VOD provider category
     behavior (GH issue #5). See vod_importer.import_provider_catalog."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute(
-            "UPDATE providers SET archive_new_categories=?, updated_at=? WHERE id=?",
-            (int(enabled), _now(), provider_id),
-        )
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute(
+        "UPDATE providers SET archive_new_categories=?, updated_at=? WHERE id=?",
+        (int(enabled), _now(), provider_id),
+    )
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def set_provider_known_import_categories(provider_id: int, category_names: list[str]) -> None:
     """Bookkeeping for archive_new_categories -- the full set of category
     names this provider has ever reported, so the next import can tell
-    which ones are genuinely new. Written unconditionally every import
-    (whether or not archive_new_categories is on) so turning the setting on
-    later doesn't retroactively treat the entire existing category list as
-    'new' and archive everything."""
-    with _WRITE_LOCK:
-        import json
-        conn = _connect()
+    which ones are genuinely new. Updating is conditional so an unchanged
+    provider snapshot does not create a provider-row write."""
+    import json
+    conn = _connect()
+    value = json.dumps(sorted({c.strip() for c in category_names if c.strip()}))
+    current = conn.execute("SELECT known_import_categories FROM providers WHERE id=?", (provider_id,)).fetchone()
+    if current and current["known_import_categories"] != value:
         conn.execute(
             "UPDATE providers SET known_import_categories=?, updated_at=? WHERE id=?",
-            (json.dumps(sorted({c.strip() for c in category_names if c.strip()})), _now(), provider_id),
+            (value, _now(), provider_id),
         )
-        _commit_with_retry(conn)
-        conn.close()
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def set_provider_dispatcharr_profile(provider_id: int, profile_id: int) -> None:
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("UPDATE providers SET dispatcharr_profile_id=?, updated_at=? WHERE id=?", (profile_id, _now(), provider_id))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("UPDATE providers SET dispatcharr_profile_id=?, updated_at=? WHERE id=?", (profile_id, _now(), provider_id))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def _parse_json_list(value: str | None) -> list:
@@ -3203,11 +3483,10 @@ def list_providers() -> list[dict]:
 
 
 def set_provider_active(provider_id: int, is_active: bool) -> None:
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("UPDATE providers SET is_active=?, updated_at=? WHERE id=?", (int(is_active), _now(), provider_id))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("UPDATE providers SET is_active=?, updated_at=? WHERE id=?", (int(is_active), _now(), provider_id))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def _delete_file_if_present(file_path: str | None) -> bool:
@@ -3258,15 +3537,9 @@ def _purge_if_sourceless_episode(conn: sqlite3.Connection, episode_id: int) -> N
 
 def _purge_if_sourceless_series(conn: sqlite3.Connection, series_id: int, orphaned_provider_id: int | None = None) -> None:
     """Series equivalent of _purge_if_sourceless_movie -- deletes the whole
-    series only once none of its episodes have any source left AND it has
-    no series_sources row of its own either (see _purge_if_sourceless_
-    episode for the per-episode version). The series_sources check matters
-    on its own: a series can have a real series-level source from a
-    provider before its episodes are lazily fetched (or between two
-    episode-level source losses), and that's not sourceless -- only
-    checking episode_sources here (pre-ported-fix behavior) could delete a
-    series still legitimately known to a provider. If the series survives
-    (still has sources from other providers) but its cached
+    series only once none of its episodes have any source left at all (see
+    _purge_if_sourceless_episode for the per-episode version). If the series
+    survives (still has sources from other providers) but its cached
     import_provider_id -- the "ask this provider for episode details"
     reference used by enrich_series, a plain column with no real FK, not a
     real source record -- pointed at the provider that just lost its
@@ -3289,19 +3562,23 @@ def _purge_if_sourceless_series(conn: sqlite3.Connection, series_id: int, orphan
         )
 
 
+# KNM: added 2026-09-14 -- catalog imports previously only upserted sources,
+# so content silently removed by a provider remained playable indefinitely.
 def reconcile_provider_catalog_sources(
     provider_id: int,
     *,
     seen_movie_stream_ids: set[str],
     seen_series_ids: set[str],
+    include_affected_ids: bool = False,
 ) -> dict[str, int]:
     """Remove this provider's sources absent from a successful full catalog.
 
-    The caller must pass IDs from the provider's raw catalog responses,
-    before import filtering. That distinction prevents a source excluded by
-    a local language/category policy from being confused with one the
-    provider no longer advertises. Canonical movies and series remain intact
-    whenever another provider still supplies a playable source."""
+    The caller must pass IDs from the provider's raw catalog responses, before
+    import filtering.  That distinction prevents a source excluded by a local
+    language/category policy from being confused with one the provider no
+    longer advertises.  Canonical movies and series remain intact whenever
+    another provider still supplies a playable source.
+    """
     with _WRITE_LOCK:
         conn = _connect()
         try:
@@ -3335,7 +3612,7 @@ def reconcile_provider_catalog_sources(
                 )
 
             # episode_sources identify their provider but not the parent
-            # provider_series_id. Remove them only when the provider no
+            # provider_series_id.  Remove them only when the provider no
             # longer advertises *any* source for that canonical series; a
             # retained sibling source may still be the origin of those rows.
             series_without_provider_source = [
@@ -3373,7 +3650,7 @@ def reconcile_provider_catalog_sources(
                 ).fetchone()
                 if remaining_source:
                     # A retained source is enough to keep a series that has
-                    # not had episode discovery run yet. If the vanished
+                    # not had episode discovery run yet.  If the vanished
                     # provider was still the legacy detail pointer, repoint
                     # it at the surviving source for compatibility.
                     conn.execute(
@@ -3385,11 +3662,15 @@ def reconcile_provider_catalog_sources(
                     _purge_if_sourceless_series(conn, series_id, orphaned_provider_id=provider_id)
 
             _commit_with_retry(conn)
-            return {
+            result = {
                 "movie_sources_removed": len(stale_movie_rows),
                 "series_sources_removed": len(stale_series_rows),
                 "episode_sources_removed": len(episode_source_ids),
             }
+            if include_affected_ids:
+                result["affected_movie_ids"] = list({row["movie_id"] for row in stale_movie_rows})
+                result["affected_series_ids"] = list(stale_series_by_id)
+            return result
         finally:
             conn.close()
 
@@ -3469,13 +3750,9 @@ def delete_provider(provider_id: int) -> None:
 # Deliberately does NOT flag "series with zero episodes yet" as an orphan --
 # that's the overwhelming majority of any freshly bulk-imported pool (XC
 # episodes are fetched lazily per-series, on demand, by design) and is
-# completely normal, not broken. A series with neither a series_sources row
-# nor any episode_sources is unplayable, though, even if its legacy
-# import_provider_id still points at a configured provider -- that pointer
-# is just a cached "ask this provider for detail" hint (see
-# _purge_if_sourceless_series's docstring), not itself a source record, so
-# checking only it (pre-ported-fix behavior) missed a series whose provider
-# still exists but whose actual sources are all gone.
+# completely normal. A series with neither a provider-level source nor an
+# episode source, however, is unplayable even if its legacy import_provider_id
+# happens to point at a still-configured provider.
 
 def find_orphans() -> dict:
     conn = _connect()
@@ -3554,9 +3831,6 @@ def purge_orphans() -> dict:
     concurrent import and cause its inserts to fail with a FOREIGN KEY error."""
     with _WRITE_LOCK:
         conn = _connect()
-        # See find_orphans' identical docstring/query -- same series_sources
-        # + episode_sources definition of "orphaned", not the legacy
-        # import_provider_id-only check.
         orphaned_series_ids = [r["id"] for r in conn.execute("""
             SELECT s.id
             FROM series s
@@ -3672,22 +3946,6 @@ _KNOWN_COUNTRY_SUFFIX_CODES = {
 _COUNTRY_SUFFIX_RE = re.compile(r"\s*\(([A-Za-z]{2,4})\)\s*$")
 
 
-def _country_suffix_code(name: str) -> str | None:
-    """The trailing "(<known country code>)" tag on a title, if any, e.g.
-    "Severance (2022) (US)" -> "US". Allowlist-only against
-    _KNOWN_COUNTRY_SUFFIX_CODES, same reasoning as that set's own comment --
-    a real title can legitimately end in "(Something)" that isn't a country
-    tag at all. Shared by _strip_country_suffix_for_dedup (Duplicate Finder
-    normalization) and vod_importer._should_auto_archive (Import Country
-    Exclusion) so the two features agree on exactly what counts as a
-    country-tagged title instead of drifting out of sync with their own
-    copies of this check."""
-    m = _COUNTRY_SUFFIX_RE.search(name)
-    if m and m.group(1).upper() in _KNOWN_COUNTRY_SUFFIX_CODES:
-        return m.group(1).upper()
-    return None
-
-
 def _strip_country_suffix_for_dedup(name: str) -> str:
     """Strips a single trailing "(<known country code>)" tag, e.g.
     "Severance (2022) (US)" -> "Severance (2022)". Only removes ONE layer
@@ -3698,6 +3956,65 @@ def _strip_country_suffix_for_dedup(name: str) -> str:
     if m and m.group(1).upper() in _KNOWN_COUNTRY_SUFFIX_CODES:
         return name[:m.start()].rstrip()
     return name
+
+
+def _dedup_name_key(name: str) -> str:
+    """Use the same conservative title key as Duplicate Finder."""
+    raw_name = name or ""
+    if get_duplicate_finder_quality_prefix_matching():
+        raw_name = _strip_quality_lang_prefix_for_dedup(raw_name)
+        raw_name = _strip_country_suffix_for_dedup(raw_name)
+    key = _normalize_title_for_dedup(raw_name)
+    if get_duplicate_finder_quality_prefix_matching():
+        key = _strip_quality_prefix_for_dedup(key)
+    return key
+
+
+# Trailing "(YYYY)" year suffix some providers append to the title itself
+# ("Crashing (2016)") while others leave it off the same series' name
+# entirely ("Crashing") -- a distinct artifact from the actual `year` column
+# (which both rows can have set correctly), so _normalize_title_for_dedup's
+# punctuation-only stripping never unifies them into one name-key bucket.
+# Only used by the base-name pass below (find_duplicate_groups pass 5) --
+# stripping the year out of the *comparison* key, never displayed or written
+# back, so a real "(2016)" that's part of a title's actual name (rare, but
+# not impossible) only risks a false-positive manual-review candidate, never
+# a silent data change.
+_TRAILING_YEAR_RE = re.compile(r"\s*\(\d{4}\)\s*$")
+
+
+def _base_name_for_dedup(name: str) -> str:
+    return _normalize_title_for_dedup(_TRAILING_YEAR_RE.sub("", name))
+
+
+def _import_match_key_name(name: str) -> str:
+    """Normalizes a title for use as an in-memory (name, year) LOOKUP KEY
+    during live import matching in bulk_import_movies/bulk_import_series --
+    never written back to the `name` column, so display stays exactly what
+    providers/rules produced.
+
+    Without this, two providers' rows for the same title/year/language never
+    merge whenever one provider's raw title carries extra literal text (a
+    trailing "(GB)"/"(PL)"/"(US)" country-of-origin tag, or a redundant
+    literal "(YYYY)") that the other's lacks -- e.g. "15 Storeys High"
+    (year=2002) vs. "15 Storeys High (2002)" (year=2002) previously created
+    two separate rows despite matching on every real signal. Strips one
+    trailing country-code tag, then one trailing literal year, so both
+    variants collapse to the same key.
+
+    The candidate-lookup query in bulk_import_movies/bulk_import_series
+    only fetches rows whose stored `name` exactly equals one of the
+    incoming item's own (raw or normalized) name strings -- it does not
+    scan the whole table. So a title with BOTH a stacked suffix and a
+    literal year on the SAME side (e.g. "Title (2002) (GB)") normalizes to
+    the same key as a plain "Title (2002)" row, but won't actually be
+    fetched as a SQL candidate unless "Title (2002) (GB)" (or its
+    normalized key) is itself already a stored name somewhere. This is a
+    known, accepted scope limit -- broadening the query to catch it would
+    require a same-year table scan per import chunk, not worth the cost for
+    a stacked-suffix case that hasn't been seen live. The single-layer case
+    (the one actually reported) is fully covered."""
+    return _TRAILING_YEAR_RE.sub("", _strip_country_suffix_for_dedup(name)).strip()
 
 
 def _duplicate_ignore_signature(item_ids: list[int]) -> str:
@@ -3719,14 +4036,13 @@ def ignore_duplicate_group(content_type: str, item_ids: list[int]) -> None:
     later changes (a new near-year item joins), that's a genuinely
     different cluster with its own signature and gets reviewed fresh
     rather than silently inheriting an old dismissal."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute(
-            "INSERT OR IGNORE INTO duplicate_ignores (content_type, signature, created_at) VALUES (?,?,?)",
-            (content_type, _duplicate_ignore_signature(item_ids), _now()),
-        )
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute(
+        "INSERT OR IGNORE INTO duplicate_ignores (content_type, signature, created_at) VALUES (?,?,?)",
+        (content_type, _duplicate_ignore_signature(item_ids), _now()),
+    )
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def _split_by_year_proximity(items: list[dict]) -> list[list[dict]]:
@@ -3749,51 +4065,6 @@ def _split_by_year_proximity(items: list[dict]) -> list[list[dict]]:
     if current:
         clusters.append(current)
     return clusters
-
-
-def _split_by_tmdb_conflict(items: list[dict]) -> list[list[dict]]:
-    """A confirmed DIFFERENT tmdb_id across two items is positive proof
-    they're different real content -- not ambiguity for a human to review,
-    so it splits a cluster apart rather than just getting flagged. Items
-    with no tmdb_id at all stay genuinely ambiguous (no evidence either
-    way) and fold into every id-having subgroup they could still plausibly
-    belong to."""
-    with_id = [i for i in items if i.get("tmdb_id")]
-    without_id = [i for i in items if not i.get("tmdb_id")]
-    by_id: dict[str, list[dict]] = {}
-    for i in with_id:
-        by_id.setdefault(i["tmdb_id"], []).append(i)
-    if len(by_id) <= 1:
-        return [items]
-    return [group + without_id for group in by_id.values()]
-
-
-_TRAILING_YEAR_RE = re.compile(r"\s*\(\d{4}\)\s*$")
-
-
-def _base_name_for_dedup(name: str) -> str:
-    return _normalize_title_for_dedup(_TRAILING_YEAR_RE.sub("", name))
-
-
-def _import_match_key_name(name: str) -> str:
-    """Normalizes a title for use as an in-memory/SQL-adjacent LOOKUP KEY
-    during import-time matching in bulk_import_movies/bulk_import_series --
-    never written back to the `name` column, so display stays exactly what
-    providers/rules produced.
-
-    Without this, two providers' rows for the same title/year/language never
-    merge whenever one provider's raw title carries extra literal text (a
-    trailing "(GB)"/"(PL)"/"(US)" country-of-origin tag, or a redundant
-    literal "(YYYY)") that the other's lacks -- e.g. "15 Storeys High"
-    (year=2002) vs. "15 Storeys High (2002)" (year=2002) previously created
-    two separate rows despite matching on every real signal (confirmed live
-    via UI screenshots showing sibling "duplicate" rows like this and "12
-    Monkeys (2015)" vs. "12 Monkeys (US)"). Strips one trailing country-code
-    tag, then one trailing literal year, so both variants collapse to the
-    same key. Only removes ONE layer of each -- a title with two stacked
-    country tags, or the country tag before the year instead of after,
-    isn't a pattern seen in the data."""
-    return _TRAILING_YEAR_RE.sub("", _strip_country_suffix_for_dedup(name)).strip()
 
 
 def _split_by_language_conflict(content_type: str, items: list[dict]) -> list[list[dict]]:
@@ -3843,6 +4114,23 @@ def _split_by_language_conflict(content_type: str, items: list[dict]) -> list[li
     if len(groups) <= 1:
         return [items]
     return [g["items"] for g in groups]
+
+
+def _split_by_tmdb_conflict(items: list[dict]) -> list[list[dict]]:
+    """A confirmed DIFFERENT tmdb_id across two items is positive proof
+    they're different real content -- not ambiguity for a human to review,
+    so it splits a cluster apart rather than just getting flagged. Items
+    with no tmdb_id at all stay genuinely ambiguous (no evidence either
+    way) and fold into every id-having subgroup they could still plausibly
+    belong to."""
+    with_id = [i for i in items if i.get("tmdb_id")]
+    without_id = [i for i in items if not i.get("tmdb_id")]
+    by_id: dict[str, list[dict]] = {}
+    for i in with_id:
+        by_id.setdefault(i["tmdb_id"], []).append(i)
+    if len(by_id) <= 1:
+        return [items]
+    return [group + without_id for group in by_id.values()]
 
 
 def find_duplicate_groups(content_type: str) -> list[dict]:
@@ -3909,14 +4197,7 @@ def find_duplicate_groups(content_type: str) -> list[dict]:
     ever produce a manual-review candidate; it is never read by either
     auto-merge path (auto_merge_movie_by_tmdb / auto_merge_series_by_tmdb),
     which both require a confirmed tmdb_id shared by BOTH sides and never
-    call this function.
-
-    A final language-conflict split (beads-974 Step 2) runs after every pass
-    above has finished building candidate_groups: a shared tmdb_id or name
-    match is proof of same-title, but not proof a pairing should be offered
-    as a single merge candidate if the two sides carry zero overlapping
-    source language -- see _split_by_language_conflict's docstring for the
-    same reasoning as the auto-merge gate's identical Step 1 check."""
+    call this function."""
     table = "movies" if content_type == "movie" else "series"
     id_col = "movie_id" if content_type == "movie" else "series_id"
     placements_table = "movie_category_placements" if content_type == "movie" else "series_category_placements"
@@ -3989,12 +4270,17 @@ def find_duplicate_groups(content_type: str) -> list[dict]:
         unclustered.extend(i for i in items if i["id"] not in bucket_grouped_ids)
 
     # Cross-bucket pass (beads-cd4): two rows can share a CONFIRMED tmdb_id
-    # while never landing in the same by_name bucket at all -- tmdb_id
-    # agreement is the same proof standard _split_by_tmdb_conflict already
-    # trusts to SPLIT a cluster apart, so it's equally trustworthy to JOIN
-    # one here -- this only fires on rows that didn't already cluster by
-    # name, so it can't undo any of the name-based grouping above, only add
-    # clusters that grouping missed.
+    # while never landing in the same by_name bucket at all -- the name-key
+    # normalization above only strips punctuation/whitespace (and, opt-in,
+    # a known quality/language prefix or country suffix), so a doubled year
+    # ("Title (2020) (2020)" vs "Title (2020)") or any other leftover
+    # prefix/suffix artifact the cosmetic pass doesn't cover produces a
+    # different key and the two rows never even reach _split_by_tmdb_conflict
+    # together. tmdb_id agreement is the same proof standard
+    # _split_by_tmdb_conflict already trusts to SPLIT a cluster apart, so
+    # it's equally trustworthy to JOIN one here -- this only fires on rows
+    # that didn't already cluster by name, so it can't undo any of the
+    # name-based grouping above, only add clusters that grouping missed.
     cross_by_tmdb: dict[str, list[dict]] = {}
     for i in unclustered:
         if i.get("tmdb_id"):
@@ -4009,15 +4295,20 @@ def find_duplicate_groups(content_type: str) -> list[dict]:
         candidate_groups.append(group)
         pass4_grouped_ids.update(ids)
 
-    # Pass 5 (beads-8sl): a row with a CONFIRMED tmdb_id and a same-base-name
+    # Pass 5 (beads-tbd): a row with a CONFIRMED tmdb_id and a same-base-name
     # row with NO tmdb_id at all never had anything to match on in pass 4 --
-    # there's no shared id to cross-bucket-join, and they never shared a
+    # there's no shared id to cross-bucket-join. They also never shared a
     # pass (1) name-key bucket in the first place whenever one side carries
-    # a "(YYYY)" the other lacks. Grouped here purely on year-stripped base
-    # name (_base_name_for_dedup) since there's no tmdb_id to prove the
-    # match -- this is NOT proof the way a shared tmdb_id is, so unlike pass
-    # 4 this can only ever surface a manual-review candidate, never feed an
-    # auto-merge path.
+    # a "(YYYY)" the other lacks ("Crashing" vs "Crashing (2016)", a live
+    # example that motivated this pass -- 2318 such series clusters found
+    # system-wide 2026-09-10, none previously surfaced anywhere in
+    # find_duplicate_groups). Grouped here purely on year-stripped base name
+    # (_base_name_for_dedup) since there's no tmdb_id to prove the match --
+    # this is NOT proof the way a shared tmdb_id is, so unlike pass 4 this
+    # can only ever surface a manual-review candidate. The automatic path has
+    # a separate, stricter exact normalized-name + exact-year rule for a
+    # missing-TMDB card when there is exactly one TMDB-backed holder; it does
+    # not consume these broader year-stripped candidates.
     still_unclustered = [i for i in unclustered if i["id"] not in pass4_grouped_ids]
     by_base_name: dict[str, list[dict]] = {}
     for i in still_unclustered:
@@ -4039,9 +4330,13 @@ def find_duplicate_groups(content_type: str) -> list[dict]:
 
     # beads-974 (Step 2): applied once, after every pass above has finished
     # building candidate_groups, rather than at each individual append site
-    # -- see _split_by_language_conflict's docstring. Re-check
-    # ignored-signature per resulting sub-group since a human may have
-    # dismissed one language pairing but not another.
+    # -- a shared tmdb_id proves same-title, but a cluster built on tmdb_id
+    # (or on name-key alone) can still bundle rows that share zero source
+    # language, which is exactly the cross-language-merge risk this bead
+    # exists to prevent (see _split_by_language_conflict's docstring and
+    # auto_merge_movie_by_tmdb / auto_merge_series_by_tmdb's identical Step
+    # 1 gate). Re-check ignored-signature per resulting sub-group since a
+    # human may have dismissed one language pairing but not another.
     language_split_groups: list[list[dict]] = []
     for items in candidate_groups:
         for sub in _split_by_language_conflict(content_type, items):
@@ -4070,9 +4365,13 @@ def find_duplicate_groups(content_type: str) -> list[dict]:
         # (provider-level "this provider's episode N is playable", only
         # populated once enrich_series has actually run for that series) --
         # a series can be genuinely backed by 1-2 real providers long before
-        # its episodes get enriched, and counting via episode_sources made
-        # every not-yet-enriched series show "0 sources" in the Duplicate
-        # Finder even though it's actively carried.
+        # its episodes get enriched (a separate, slower, per-series async
+        # step -- see enrich_series's docstring), and counting via
+        # episode_sources made every not-yet-enriched series show "0
+        # sources" in the Duplicate Finder even though it's actively
+        # carried. Found live 2026-09-09: only ~11% of series had any
+        # episodes imported yet, so nearly every series duplicate candidate
+        # showed a misleading zero.
         src_counts = conn.execute(f"""
             SELECT series_id AS id, COUNT(*) c FROM series_sources
             WHERE series_id IN ({placeholders}) GROUP BY series_id
@@ -4227,18 +4526,17 @@ def _generate_xc_password() -> str:
 
 
 def create_xc_client(label: str, ip_allowlist: str | None = None) -> dict:
-    with _WRITE_LOCK:
-        username = _generate_xc_username()
-        password = _generate_xc_password()
-        conn = _connect()
-        cur = conn.execute(
-            "INSERT INTO xc_clients (label, username, password, enabled, ip_allowlist, created_at) VALUES (?,?,?,1,?,?)",
-            (label, username, encrypt_value(password), ip_allowlist, _now()),
-        )
-        client_id = cur.lastrowid
-        _commit_with_retry(conn)
-        conn.close()
-        return get_xc_client(client_id)
+    username = _generate_xc_username()
+    password = _generate_xc_password()
+    conn = _connect()
+    cur = conn.execute(
+        "INSERT INTO xc_clients (label, username, password, enabled, ip_allowlist, created_at) VALUES (?,?,?,1,?,?)",
+        (label, username, encrypt_value(password), ip_allowlist, _now()),
+    )
+    client_id = cur.lastrowid
+    _commit_with_retry(conn)
+    conn.close()
+    return get_xc_client(client_id)
 
 
 def list_xc_clients() -> list[dict]:
@@ -4290,40 +4588,37 @@ def update_xc_client(
     ip_allowlist: str | None = None, clear_ip_allowlist: bool = False,
     category_allowlist: str | None = None, clear_category_allowlist: bool = False,
 ) -> None:
-    with _WRITE_LOCK:
-        conn = _connect()
-        if label is not None:
-            conn.execute("UPDATE xc_clients SET label=? WHERE id=?", (label, client_id))
-        if enabled is not None:
-            conn.execute("UPDATE xc_clients SET enabled=? WHERE id=?", (int(enabled), client_id))
-        if clear_ip_allowlist:
-            conn.execute("UPDATE xc_clients SET ip_allowlist=NULL WHERE id=?", (client_id,))
-        elif ip_allowlist is not None:
-            conn.execute("UPDATE xc_clients SET ip_allowlist=? WHERE id=?", (ip_allowlist, client_id))
-        if clear_category_allowlist:
-            conn.execute("UPDATE xc_clients SET category_allowlist=NULL WHERE id=?", (client_id,))
-        elif category_allowlist is not None:
-            conn.execute("UPDATE xc_clients SET category_allowlist=? WHERE id=?", (category_allowlist, client_id))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    if label is not None:
+        conn.execute("UPDATE xc_clients SET label=? WHERE id=?", (label, client_id))
+    if enabled is not None:
+        conn.execute("UPDATE xc_clients SET enabled=? WHERE id=?", (int(enabled), client_id))
+    if clear_ip_allowlist:
+        conn.execute("UPDATE xc_clients SET ip_allowlist=NULL WHERE id=?", (client_id,))
+    elif ip_allowlist is not None:
+        conn.execute("UPDATE xc_clients SET ip_allowlist=? WHERE id=?", (ip_allowlist, client_id))
+    if clear_category_allowlist:
+        conn.execute("UPDATE xc_clients SET category_allowlist=NULL WHERE id=?", (client_id,))
+    elif category_allowlist is not None:
+        conn.execute("UPDATE xc_clients SET category_allowlist=? WHERE id=?", (category_allowlist, client_id))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def regenerate_xc_client_secret(client_id: int) -> dict:
-    with _WRITE_LOCK:
-        password = _generate_xc_password()
-        conn = _connect()
-        conn.execute("UPDATE xc_clients SET password=? WHERE id=?", (encrypt_value(password), client_id))
-        _commit_with_retry(conn)
-        conn.close()
-        return get_xc_client(client_id)
+    password = _generate_xc_password()
+    conn = _connect()
+    conn.execute("UPDATE xc_clients SET password=? WHERE id=?", (encrypt_value(password), client_id))
+    _commit_with_retry(conn)
+    conn.close()
+    return get_xc_client(client_id)
 
 
 def delete_xc_client(client_id: int) -> None:
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("DELETE FROM xc_clients WHERE id=?", (client_id,))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("DELETE FROM xc_clients WHERE id=?", (client_id,))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def record_xc_client_seen(client_id: int, ip: str) -> None:
@@ -4358,16 +4653,15 @@ def record_xc_client_seen(client_id: int, ip: str) -> None:
 #      Dispatcharr instance, all drawing from the same real connection pool.
 
 def create_dispatcharr_connection(label: str, url: str, token: str) -> int:
-    with _WRITE_LOCK:
-        conn = _connect()
-        cur = conn.execute(
-            "INSERT INTO dispatcharr_connections (label, url, token, created_at) VALUES (?,?,?,?)",
-            (label, url.rstrip("/"), encrypt_value(token), _now()),
-        )
-        connection_id = cur.lastrowid
-        _commit_with_retry(conn)
-        conn.close()
-        return connection_id
+    conn = _connect()
+    cur = conn.execute(
+        "INSERT INTO dispatcharr_connections (label, url, token, created_at) VALUES (?,?,?,?)",
+        (label, url.rstrip("/"), encrypt_value(token), _now()),
+    )
+    connection_id = cur.lastrowid
+    _commit_with_retry(conn)
+    conn.close()
+    return connection_id
 
 
 def list_dispatcharr_connections() -> list[dict]:
@@ -4395,28 +4689,26 @@ def update_dispatcharr_connection(
     token: str | None = None, vod_relay_account_id: int | None = None,
     clear_vod_relay_account_id: bool = False,
 ) -> None:
-    with _WRITE_LOCK:
-        conn = _connect()
-        if label is not None:
-            conn.execute("UPDATE dispatcharr_connections SET label=? WHERE id=?", (label, connection_id))
-        if url is not None:
-            conn.execute("UPDATE dispatcharr_connections SET url=? WHERE id=?", (url.rstrip("/"), connection_id))
-        if token is not None:
-            conn.execute("UPDATE dispatcharr_connections SET token=? WHERE id=?", (encrypt_value(token), connection_id))
-        if clear_vod_relay_account_id:
-            conn.execute("UPDATE dispatcharr_connections SET vod_relay_account_id=NULL WHERE id=?", (connection_id,))
-        elif vod_relay_account_id is not None:
-            conn.execute("UPDATE dispatcharr_connections SET vod_relay_account_id=? WHERE id=?", (vod_relay_account_id, connection_id))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    if label is not None:
+        conn.execute("UPDATE dispatcharr_connections SET label=? WHERE id=?", (label, connection_id))
+    if url is not None:
+        conn.execute("UPDATE dispatcharr_connections SET url=? WHERE id=?", (url.rstrip("/"), connection_id))
+    if token is not None:
+        conn.execute("UPDATE dispatcharr_connections SET token=? WHERE id=?", (encrypt_value(token), connection_id))
+    if clear_vod_relay_account_id:
+        conn.execute("UPDATE dispatcharr_connections SET vod_relay_account_id=NULL WHERE id=?", (connection_id,))
+    elif vod_relay_account_id is not None:
+        conn.execute("UPDATE dispatcharr_connections SET vod_relay_account_id=? WHERE id=?", (vod_relay_account_id, connection_id))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def delete_dispatcharr_connection(connection_id: int) -> None:
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("DELETE FROM dispatcharr_connections WHERE id=?", (connection_id,))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("DELETE FROM dispatcharr_connections WHERE id=?", (connection_id,))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 # ── Provider live-TV accounts (for shared connection-limit coordination) ────
@@ -4480,11 +4772,10 @@ def set_provider_live_account(provider_id: int, connection_id: int, account_id: 
 
 
 def remove_provider_live_account(link_id: int) -> None:
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("DELETE FROM provider_live_accounts WHERE id=?", (link_id,))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("DELETE FROM provider_live_accounts WHERE id=?", (link_id,))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 # ── Provider sub-accounts (vod_manager-4dh) ──────────────────────────────────
@@ -4534,34 +4825,32 @@ def update_provider_sub_account(
     sub_account_id: int, label: str | None = None, username: str | None = None, password: str | None = None,
     max_streams: int | None = None, is_active: bool | None = None, sort_order: int | None = None,
 ) -> None:
-    with _WRITE_LOCK:
-        sets, params = [], []
-        if label is not None:
-            sets.append("label=?"); params.append(label)
-        if username is not None:
-            sets.append("username=?"); params.append(username)
-        if password is not None:
-            sets.append("password=?"); params.append(encrypt_value(password))
-        if max_streams is not None:
-            sets.append("max_streams=?"); params.append(max_streams)
-        if is_active is not None:
-            sets.append("is_active=?"); params.append(int(is_active))
-        if sort_order is not None:
-            sets.append("sort_order=?"); params.append(sort_order)
-        if not sets:
-            return
-        conn = _connect()
-        conn.execute(f"UPDATE provider_sub_accounts SET {', '.join(sets)} WHERE id=?", (*params, sub_account_id))
-        _commit_with_retry(conn)
-        conn.close()
+    sets, params = [], []
+    if label is not None:
+        sets.append("label=?"); params.append(label)
+    if username is not None:
+        sets.append("username=?"); params.append(username)
+    if password is not None:
+        sets.append("password=?"); params.append(encrypt_value(password))
+    if max_streams is not None:
+        sets.append("max_streams=?"); params.append(max_streams)
+    if is_active is not None:
+        sets.append("is_active=?"); params.append(int(is_active))
+    if sort_order is not None:
+        sets.append("sort_order=?"); params.append(sort_order)
+    if not sets:
+        return
+    conn = _connect()
+    conn.execute(f"UPDATE provider_sub_accounts SET {', '.join(sets)} WHERE id=?", (*params, sub_account_id))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def delete_provider_sub_account(sub_account_id: int) -> None:
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("DELETE FROM provider_sub_accounts WHERE id=?", (sub_account_id,))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("DELETE FROM provider_sub_accounts WHERE id=?", (sub_account_id,))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def list_provider_sub_account_live_accounts(sub_account_id: int) -> list[dict]:
@@ -4598,11 +4887,10 @@ def set_provider_sub_account_live_account(sub_account_id: int, connection_id: in
 
 
 def remove_provider_sub_account_live_account(link_id: int) -> None:
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("DELETE FROM provider_sub_account_live_accounts WHERE id=?", (link_id,))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("DELETE FROM provider_sub_account_live_accounts WHERE id=?", (link_id,))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def merge_providers_into_subaccounts(primary_provider_id: int, other_provider_ids: list[int]) -> dict:
@@ -4629,92 +4917,91 @@ def merge_providers_into_subaccounts(primary_provider_id: int, other_provider_id
     silently dropped -- reported back in providers_partially_merged so an
     admin can look at what's left before deciding what to do with it. An
     other-provider with any leftover collided sources is NOT deleted."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        primary = conn.execute("SELECT id, name FROM providers WHERE id=?", (primary_provider_id,)).fetchone()
-        if not primary:
-            conn.close()
-            raise ValueError(f"primary provider {primary_provider_id} not found")
-
-        movie_sources_moved = 0
-        episode_sources_moved = 0
-        movie_source_collisions = 0
-        episode_source_collisions = 0
-        live_accounts_migrated = 0
-        sub_accounts_created = 0
-        providers_removed: list[int] = []
-        providers_partially_merged: list[dict] = []
-
-        for other_id in other_provider_ids:
-            if other_id == primary_provider_id:
-                continue
-            other = conn.execute("SELECT * FROM providers WHERE id=?", (other_id,)).fetchone()
-            if not other:
-                continue
-            other = dict(other)
-
-            sub_account_id = create_provider_sub_account(
-                primary_provider_id, other["name"], other["username"], decrypt_value(other["password"]),
-                max_streams=other.get("shared_connection_limit") or 0, sort_order=other.get("priority") or 0,
-            )
-            sub_accounts_created += 1
-
-            # Re-pointed one row at a time (not a bulk UPDATE) so a collision on
-            # one row doesn't block every other row on this same provider from
-            # moving -- see this function's own docstring for the collision path.
-            collided_movie_ids = []
-            for row in conn.execute("SELECT id FROM movie_sources WHERE provider_id=?", (other_id,)).fetchall():
-                try:
-                    conn.execute("UPDATE movie_sources SET provider_id=? WHERE id=?", (primary_provider_id, row["id"]))
-                    movie_sources_moved += 1
-                except sqlite3.IntegrityError:
-                    movie_source_collisions += 1
-                    collided_movie_ids.append(row["id"])
-            collided_episode_ids = []
-            for row in conn.execute("SELECT id FROM episode_sources WHERE provider_id=?", (other_id,)).fetchall():
-                try:
-                    conn.execute("UPDATE episode_sources SET provider_id=? WHERE id=?", (primary_provider_id, row["id"]))
-                    episode_sources_moved += 1
-                except sqlite3.IntegrityError:
-                    episode_source_collisions += 1
-                    collided_episode_ids.append(row["id"])
-
-            for link in conn.execute("SELECT * FROM provider_live_accounts WHERE provider_id=?", (other_id,)).fetchall():
-                conn.execute(
-                    """INSERT INTO provider_sub_account_live_accounts (sub_account_id, dispatcharr_connection_id, dispatcharr_account_id, dispatcharr_profile_id)
-                       VALUES (?,?,?,?)
-                       ON CONFLICT(sub_account_id, dispatcharr_connection_id) DO UPDATE SET
-                           dispatcharr_account_id=excluded.dispatcharr_account_id,
-                           dispatcharr_profile_id=excluded.dispatcharr_profile_id""",
-                    (sub_account_id, link["dispatcharr_connection_id"], link["dispatcharr_account_id"], link["dispatcharr_profile_id"]),
-                )
-                live_accounts_migrated += 1
-
-            _commit_with_retry(conn)
-
-            if collided_movie_ids or collided_episode_ids:
-                providers_partially_merged.append({
-                    "provider_id": other_id, "name": other["name"],
-                    "movie_collisions": len(collided_movie_ids), "episode_collisions": len(collided_episode_ids),
-                })
-            else:
-                providers_removed.append(other_id)
-
+    conn = _connect()
+    primary = conn.execute("SELECT id, name FROM providers WHERE id=?", (primary_provider_id,)).fetchone()
+    if not primary:
         conn.close()
+        raise ValueError(f"primary provider {primary_provider_id} not found")
 
-        for pid in providers_removed:
-            delete_provider(pid)
+    movie_sources_moved = 0
+    episode_sources_moved = 0
+    movie_source_collisions = 0
+    episode_source_collisions = 0
+    live_accounts_migrated = 0
+    sub_accounts_created = 0
+    providers_removed: list[int] = []
+    providers_partially_merged: list[dict] = []
 
-        return {
-            "sub_accounts_created": sub_accounts_created,
-            "movie_sources_moved": movie_sources_moved,
-            "episode_sources_moved": episode_sources_moved,
-            "movie_source_collisions": movie_source_collisions,
-            "episode_source_collisions": episode_source_collisions,
-            "live_accounts_migrated": live_accounts_migrated,
-            "providers_removed": len(providers_removed),
-            "providers_partially_merged": providers_partially_merged,
-        }
+    for other_id in other_provider_ids:
+        if other_id == primary_provider_id:
+            continue
+        other = conn.execute("SELECT * FROM providers WHERE id=?", (other_id,)).fetchone()
+        if not other:
+            continue
+        other = dict(other)
+
+        sub_account_id = create_provider_sub_account(
+            primary_provider_id, other["name"], other["username"], decrypt_value(other["password"]),
+            max_streams=other.get("shared_connection_limit") or 0, sort_order=other.get("priority") or 0,
+        )
+        sub_accounts_created += 1
+
+        # Re-pointed one row at a time (not a bulk UPDATE) so a collision on
+        # one row doesn't block every other row on this same provider from
+        # moving -- see this function's own docstring for the collision path.
+        collided_movie_ids = []
+        for row in conn.execute("SELECT id FROM movie_sources WHERE provider_id=?", (other_id,)).fetchall():
+            try:
+                conn.execute("UPDATE movie_sources SET provider_id=? WHERE id=?", (primary_provider_id, row["id"]))
+                movie_sources_moved += 1
+            except sqlite3.IntegrityError:
+                movie_source_collisions += 1
+                collided_movie_ids.append(row["id"])
+        collided_episode_ids = []
+        for row in conn.execute("SELECT id FROM episode_sources WHERE provider_id=?", (other_id,)).fetchall():
+            try:
+                conn.execute("UPDATE episode_sources SET provider_id=? WHERE id=?", (primary_provider_id, row["id"]))
+                episode_sources_moved += 1
+            except sqlite3.IntegrityError:
+                episode_source_collisions += 1
+                collided_episode_ids.append(row["id"])
+
+        for link in conn.execute("SELECT * FROM provider_live_accounts WHERE provider_id=?", (other_id,)).fetchall():
+            conn.execute(
+                """INSERT INTO provider_sub_account_live_accounts (sub_account_id, dispatcharr_connection_id, dispatcharr_account_id, dispatcharr_profile_id)
+                   VALUES (?,?,?,?)
+                   ON CONFLICT(sub_account_id, dispatcharr_connection_id) DO UPDATE SET
+                       dispatcharr_account_id=excluded.dispatcharr_account_id,
+                       dispatcharr_profile_id=excluded.dispatcharr_profile_id""",
+                (sub_account_id, link["dispatcharr_connection_id"], link["dispatcharr_account_id"], link["dispatcharr_profile_id"]),
+            )
+            live_accounts_migrated += 1
+
+        _commit_with_retry(conn)
+
+        if collided_movie_ids or collided_episode_ids:
+            providers_partially_merged.append({
+                "provider_id": other_id, "name": other["name"],
+                "movie_collisions": len(collided_movie_ids), "episode_collisions": len(collided_episode_ids),
+            })
+        else:
+            providers_removed.append(other_id)
+
+    conn.close()
+
+    for pid in providers_removed:
+        delete_provider(pid)
+
+    return {
+        "sub_accounts_created": sub_accounts_created,
+        "movie_sources_moved": movie_sources_moved,
+        "episode_sources_moved": episode_sources_moved,
+        "movie_source_collisions": movie_source_collisions,
+        "episode_source_collisions": episode_source_collisions,
+        "live_accounts_migrated": live_accounts_migrated,
+        "providers_removed": len(providers_removed),
+        "providers_partially_merged": providers_partially_merged,
+    }
 
 
 # ── Provider sync profiles (per-connection Dispatcharr profile id) ──────────
@@ -4751,24 +5038,23 @@ def upsert_category(
     name: str, content_type: str, is_smart: bool = False, sort_order: int = 0,
     rule_json: str | None = None,
 ) -> int:
-    with _WRITE_LOCK:
-        conn = _connect()
-        row = conn.execute("SELECT id FROM categories WHERE name = ? AND content_type = ?", (name, content_type)).fetchone()
-        if row:
-            category_id = row["id"]
-            conn.execute(
-                "UPDATE categories SET content_type=?, is_smart=?, sort_order=?, rule_json=? WHERE id=?",
-                (content_type, int(is_smart), sort_order, rule_json, category_id),
-            )
-        else:
-            cur = conn.execute(
-                "INSERT INTO categories (name, content_type, is_smart, sort_order, rule_json, created_at) VALUES (?,?,?,?,?,?)",
-                (name, content_type, int(is_smart), sort_order, rule_json, _now()),
-            )
-            category_id = cur.lastrowid
-        _commit_with_retry(conn)
-        conn.close()
-        return category_id
+    conn = _connect()
+    row = conn.execute("SELECT id FROM categories WHERE name = ? AND content_type = ?", (name, content_type)).fetchone()
+    if row:
+        category_id = row["id"]
+        conn.execute(
+            "UPDATE categories SET content_type=?, is_smart=?, sort_order=?, rule_json=? WHERE id=?",
+            (content_type, int(is_smart), sort_order, rule_json, category_id),
+        )
+    else:
+        cur = conn.execute(
+            "INSERT INTO categories (name, content_type, is_smart, sort_order, rule_json, created_at) VALUES (?,?,?,?,?,?)",
+            (name, content_type, int(is_smart), sort_order, rule_json, _now()),
+        )
+        category_id = cur.lastrowid
+    _commit_with_retry(conn)
+    conn.close()
+    return category_id
 
 
 def get_category(category_id: int) -> dict | None:
@@ -4789,27 +5075,24 @@ def delete_category(category_id: int) -> None:
     """Hard delete. movie_category_placements/series_category_placements for
     this category cascade via FK — the movies/series themselves are untouched,
     just no longer placed in this category."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("DELETE FROM categories WHERE id=?", (category_id,))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("DELETE FROM categories WHERE id=?", (category_id,))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def set_category_sort_order(category_id: int, sort_order: int) -> None:
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("UPDATE categories SET sort_order=? WHERE id=?", (sort_order, category_id))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("UPDATE categories SET sort_order=? WHERE id=?", (sort_order, category_id))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def set_category_name(category_id: int, name: str) -> None:
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("UPDATE categories SET name=? WHERE id=?", (name, category_id))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("UPDATE categories SET name=? WHERE id=?", (name, category_id))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def set_category_schedule_interval(category_id: int, interval_seconds: int | None, use_ai_evaluation: bool) -> None:
@@ -4819,22 +5102,20 @@ def set_category_schedule_interval(category_id: int, interval_seconds: int | Non
     call), so scheduling it has no real downside; AI-assisted evaluation
     costs real, recurring money against a whole catalog if left on by
     default, so a user must deliberately turn it on per-rule."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute(
-            "UPDATE categories SET schedule_interval_seconds=?, use_ai_evaluation=? WHERE id=?",
-            (interval_seconds, int(use_ai_evaluation), category_id),
-        )
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute(
+        "UPDATE categories SET schedule_interval_seconds=?, use_ai_evaluation=? WHERE id=?",
+        (interval_seconds, int(use_ai_evaluation), category_id),
+    )
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def mark_category_evaluated(category_id: int) -> None:
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("UPDATE categories SET last_evaluated_at=? WHERE id=?", (_now(), category_id))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("UPDATE categories SET last_evaluated_at=? WHERE id=?", (_now(), category_id))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def categories_due_for_scheduled_evaluation() -> list[dict]:
@@ -4884,21 +5165,19 @@ def set_category_ai_description(category_id: int, ai_description: str | None) ->
     """Persisted so a re-run of AI Evaluate (see ai_assist.py) doesn't require
     re-typing the description each time -- same pattern as sync_source for
     TMDB Lists categories."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("UPDATE categories SET ai_description=? WHERE id=?", (ai_description, category_id))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("UPDATE categories SET ai_description=? WHERE id=?", (ai_description, category_id))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def set_category_sync_source(category_id: int, sync_source: str | None) -> None:
     """sync_source e.g. 'tmdb_list:1234567' — see tmdb_sync.py for the actual
     fetch/match/place logic that reads this."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("UPDATE categories SET sync_source=? WHERE id=?", (sync_source, category_id))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("UPDATE categories SET sync_source=? WHERE id=?", (sync_source, category_id))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def set_category_sync_sources(category_id: int, sources: list[str]) -> None:
@@ -4908,25 +5187,23 @@ def set_category_sync_sources(category_id: int, sources: list[str]) -> None:
     this. Stored as a JSON string (same convention as categories.rule_json),
     empty list stored as NULL so list_sync_categories' NOT NULL check still
     excludes a category that's been fully unlinked."""
-    with _WRITE_LOCK:
-        import json
-        conn = _connect()
-        conn.execute(
-            "UPDATE categories SET sync_sources=? WHERE id=?",
-            (json.dumps(sources) if sources else None, category_id),
-        )
-        _commit_with_retry(conn)
-        conn.close()
+    import json
+    conn = _connect()
+    conn.execute(
+        "UPDATE categories SET sync_sources=? WHERE id=?",
+        (json.dumps(sources) if sources else None, category_id),
+    )
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def set_category_sync_mode(category_id: int, sync_mode: str) -> None:
-    with _WRITE_LOCK:
-        if sync_mode not in ("add_only", "mirror"):
-            raise ValueError(f"invalid sync_mode {sync_mode!r}")
-        conn = _connect()
-        conn.execute("UPDATE categories SET sync_mode=? WHERE id=?", (sync_mode, category_id))
-        _commit_with_retry(conn)
-        conn.close()
+    if sync_mode not in ("add_only", "mirror"):
+        raise ValueError(f"invalid sync_mode {sync_mode!r}")
+    conn = _connect()
+    conn.execute("UPDATE categories SET sync_mode=? WHERE id=?", (sync_mode, category_id))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def list_sync_categories() -> list[dict]:
@@ -5062,26 +5339,25 @@ def set_category_active(category_id: int, is_active: bool) -> None:
     a content_type, since that reproduces the exact "Dispatcharr aborts
     VOD refresh on an empty category list" bug _seed_default_categories
     exists to prevent -- this is the same failure reachable a different way."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        category = conn.execute("SELECT content_type FROM categories WHERE id=?", (category_id,)).fetchone()
-        if not category:
-            conn.close()
-            raise ValueError(f"category {category_id} not found")
-        if not is_active:
-            active_count = conn.execute(
-                "SELECT COUNT(*) c FROM categories WHERE content_type=? AND is_active=1 AND id!=?",
-                (category["content_type"], category_id),
-            ).fetchone()["c"]
-            if active_count == 0:
-                conn.close()
-                raise ValueError(
-                    f"Can't disable the last active {category['content_type']} category -- "
-                    "at least 1 must stay active or Dispatcharr's VOD refresh will fail with an empty category list."
-                )
-        conn.execute("UPDATE categories SET is_active=? WHERE id=?", (int(is_active), category_id))
-        _commit_with_retry(conn)
+    conn = _connect()
+    category = conn.execute("SELECT content_type FROM categories WHERE id=?", (category_id,)).fetchone()
+    if not category:
         conn.close()
+        raise ValueError(f"category {category_id} not found")
+    if not is_active:
+        active_count = conn.execute(
+            "SELECT COUNT(*) c FROM categories WHERE content_type=? AND is_active=1 AND id!=?",
+            (category["content_type"], category_id),
+        ).fetchone()["c"]
+        if active_count == 0:
+            conn.close()
+            raise ValueError(
+                f"Can't disable the last active {category['content_type']} category -- "
+                "at least 1 must stay active or Dispatcharr's VOD refresh will fail with an empty category list."
+            )
+    conn.execute("UPDATE categories SET is_active=? WHERE id=?", (int(is_active), category_id))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def bulk_set_category_active(category_ids: list[int], is_active: bool) -> dict:
@@ -5091,46 +5367,44 @@ def bulk_set_category_active(category_ids: list[int], is_active: bool) -> dict:
     from the same content_type in one action could otherwise pass a
     per-row check while still leaving that content_type with zero active
     categories once the whole batch lands."""
-    with _WRITE_LOCK:
-        if not category_ids:
-            return {"changed": 0}
-        conn = _connect()
-        placeholders = ",".join("?" for _ in category_ids)
-        if not is_active:
-            rows = conn.execute(
-                f"SELECT DISTINCT content_type FROM categories WHERE id IN ({placeholders})", category_ids,
-            ).fetchall()
-            for row in rows:
-                ct = row["content_type"]
-                remaining = conn.execute(
-                    f"SELECT COUNT(*) c FROM categories WHERE content_type=? AND is_active=1 AND id NOT IN ({placeholders})",
-                    (ct, *category_ids),
-                ).fetchone()["c"]
-                if remaining == 0:
-                    conn.close()
-                    raise ValueError(
-                        f"Can't disable every active {ct} category -- at least 1 must stay active or "
-                        "Dispatcharr's VOD refresh will fail with an empty category list."
-                    )
-        conn.execute(f"UPDATE categories SET is_active=? WHERE id IN ({placeholders})", (int(is_active), *category_ids))
-        _commit_with_retry(conn)
-        conn.close()
-        return {"changed": len(category_ids)}
+    if not category_ids:
+        return {"changed": 0}
+    conn = _connect()
+    placeholders = ",".join("?" for _ in category_ids)
+    if not is_active:
+        rows = conn.execute(
+            f"SELECT DISTINCT content_type FROM categories WHERE id IN ({placeholders})", category_ids,
+        ).fetchall()
+        for row in rows:
+            ct = row["content_type"]
+            remaining = conn.execute(
+                f"SELECT COUNT(*) c FROM categories WHERE content_type=? AND is_active=1 AND id NOT IN ({placeholders})",
+                (ct, *category_ids),
+            ).fetchone()["c"]
+            if remaining == 0:
+                conn.close()
+                raise ValueError(
+                    f"Can't disable every active {ct} category -- at least 1 must stay active or "
+                    "Dispatcharr's VOD refresh will fail with an empty category list."
+                )
+    conn.execute(f"UPDATE categories SET is_active=? WHERE id IN ({placeholders})", (int(is_active), *category_ids))
+    _commit_with_retry(conn)
+    conn.close()
+    return {"changed": len(category_ids)}
 
 
 def bulk_delete_categories(category_ids: list[int]) -> int:
     """Hard delete. movie_category_placements/series_category_placements
     for these categories cascade via FK -- the movies/series themselves
     are untouched, just no longer placed in these categories."""
-    with _WRITE_LOCK:
-        if not category_ids:
-            return 0
-        conn = _connect()
-        placeholders = ",".join("?" for _ in category_ids)
-        conn.execute(f"DELETE FROM categories WHERE id IN ({placeholders})", category_ids)
-        _commit_with_retry(conn)
-        conn.close()
-        return len(category_ids)
+    if not category_ids:
+        return 0
+    conn = _connect()
+    placeholders = ",".join("?" for _ in category_ids)
+    conn.execute(f"DELETE FROM categories WHERE id IN ({placeholders})", category_ids)
+    _commit_with_retry(conn)
+    conn.close()
+    return len(category_ids)
 
 
 _MMDD_RE = re.compile(r"^(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$")
@@ -5154,29 +5428,28 @@ def set_category_schedule(category_id: int, start_mmdd: str | None, end_mmdd: st
     Halloween category and setting its schedule while already in mid-
     October shouldn't have to wait until next year's Oct 1 transition to
     turn on for the first time."""
-    with _WRITE_LOCK:
-        if (start_mmdd is None) != (end_mmdd is None):
-            raise ValueError("both a start and end date are required to set a schedule (or clear both to remove it)")
-        if start_mmdd is not None and not _MMDD_RE.match(start_mmdd):
-            raise ValueError(f"invalid start date {start_mmdd!r} -- expected MM-DD")
-        if end_mmdd is not None and not _MMDD_RE.match(end_mmdd):
-            raise ValueError(f"invalid end date {end_mmdd!r} -- expected MM-DD")
-        conn = _connect()
-        if not conn.execute("SELECT 1 FROM categories WHERE id=?", (category_id,)).fetchone():
-            conn.close()
-            raise ValueError(f"category {category_id} not found")
-        conn.execute(
-            "UPDATE categories SET schedule_start_mmdd=?, schedule_end_mmdd=? WHERE id=?",
-            (start_mmdd, end_mmdd, category_id),
-        )
-        _commit_with_retry(conn)
+    if (start_mmdd is None) != (end_mmdd is None):
+        raise ValueError("both a start and end date are required to set a schedule (or clear both to remove it)")
+    if start_mmdd is not None and not _MMDD_RE.match(start_mmdd):
+        raise ValueError(f"invalid start date {start_mmdd!r} -- expected MM-DD")
+    if end_mmdd is not None and not _MMDD_RE.match(end_mmdd):
+        raise ValueError(f"invalid end date {end_mmdd!r} -- expected MM-DD")
+    conn = _connect()
+    if not conn.execute("SELECT 1 FROM categories WHERE id=?", (category_id,)).fetchone():
         conn.close()
-        if start_mmdd is not None and end_mmdd is not None:
-            should_be_active = _mmdd_in_range(_today_mmdd(), start_mmdd, end_mmdd)
-            try:
-                set_category_active(category_id, should_be_active)
-            except ValueError:
-                pass  # e.g. would disable the last active category -- schedule is still saved, just can't apply yet
+        raise ValueError(f"category {category_id} not found")
+    conn.execute(
+        "UPDATE categories SET schedule_start_mmdd=?, schedule_end_mmdd=? WHERE id=?",
+        (start_mmdd, end_mmdd, category_id),
+    )
+    _commit_with_retry(conn)
+    conn.close()
+    if start_mmdd is not None and end_mmdd is not None:
+        should_be_active = _mmdd_in_range(_today_mmdd(), start_mmdd, end_mmdd)
+        try:
+            set_category_active(category_id, should_be_active)
+        except ValueError:
+            pass  # e.g. would disable the last active category -- schedule is still saved, just can't apply yet
 
 
 def _today_mmdd() -> str:
@@ -5237,29 +5510,28 @@ def purge_excluded_from_categories() -> dict:
     once -- an install that ran import-time exclusion before this fix could
     have thousands of already-wrongly-placed rows sitting there, and
     nothing else would ever clean those up on its own."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        movie_ids = [r["movie_id"] for r in conn.execute("""
-            SELECT DISTINCT p.movie_id FROM movie_category_placements p
-            JOIN movies m ON m.id = p.movie_id WHERE m.review_excluded=1
-        """).fetchall()]
-        series_ids = [r["series_id"] for r in conn.execute("""
-            SELECT DISTINCT p.series_id FROM series_category_placements p
-            JOIN series s ON s.id = p.series_id WHERE s.review_excluded=1
-        """).fetchall()]
-        if movie_ids:
-            conn.execute(
-                f"DELETE FROM movie_category_placements WHERE movie_id IN ({','.join('?' * len(movie_ids))})",
-                movie_ids,
-            )
-        if series_ids:
-            conn.execute(
-                f"DELETE FROM series_category_placements WHERE series_id IN ({','.join('?' * len(series_ids))})",
-                series_ids,
-            )
-        _commit_with_retry(conn)
-        conn.close()
-        return {"movies_removed": len(movie_ids), "series_removed": len(series_ids)}
+    conn = _connect()
+    movie_ids = [r["movie_id"] for r in conn.execute("""
+        SELECT DISTINCT p.movie_id FROM movie_category_placements p
+        JOIN movies m ON m.id = p.movie_id WHERE m.review_excluded=1
+    """).fetchall()]
+    series_ids = [r["series_id"] for r in conn.execute("""
+        SELECT DISTINCT p.series_id FROM series_category_placements p
+        JOIN series s ON s.id = p.series_id WHERE s.review_excluded=1
+    """).fetchall()]
+    if movie_ids:
+        conn.execute(
+            f"DELETE FROM movie_category_placements WHERE movie_id IN ({','.join('?' * len(movie_ids))})",
+            movie_ids,
+        )
+    if series_ids:
+        conn.execute(
+            f"DELETE FROM series_category_placements WHERE series_id IN ({','.join('?' * len(series_ids))})",
+            series_ids,
+        )
+    _commit_with_retry(conn)
+    conn.close()
+    return {"movies_removed": len(movie_ids), "series_removed": len(series_ids)}
 
 
 def get_movie_category_ids(movie_id: int) -> list[int]:
@@ -5284,48 +5556,68 @@ def get_series_category_ids(series_id: int) -> list[int]:
 # ── Movies ───────────────────────────────────────────────────────────────────
 
 def upsert_movie(name: str, year: int | None = None, **fields) -> int:
-    with _WRITE_LOCK:
-        conn = _connect()
+    conn = _connect()
 
-        def _insert(needs_review: int = 0) -> int:
-            cols = ["name", "year", "needs_year_review", *fields.keys()]
-            vals = [name, year, needs_review, *fields.values()]
-            placeholders = ", ".join("?" for _ in cols)
-            cur = conn.execute(
-                f"INSERT INTO movies ({', '.join(cols)}, created_at) VALUES ({placeholders}, ?)",
-                (*vals, _now()),
-            )
-            return cur.lastrowid
+    def _insert(needs_review: int = 0) -> int:
+        cols = ["name", "year", "needs_year_review", *fields.keys()]
+        vals = [name, year, needs_review, *fields.values()]
+        placeholders = ", ".join("?" for _ in cols)
+        cur = conn.execute(
+            f"INSERT INTO movies ({', '.join(cols)}, created_at) VALUES ({placeholders}, ?)",
+            (*vals, _now()),
+        )
+        return cur.lastrowid
 
-        def _update(movie_id: int) -> None:
-            if fields:
-                sets = ", ".join(f"{k}=?" for k in fields)
-                conn.execute(f"UPDATE movies SET {sets}, updated_at=? WHERE id=?", (*fields.values(), _now(), movie_id))
+    def _update(movie_id: int) -> None:
+        if fields:
+            sets = ", ".join(f"{k}=?" for k in fields)
+            conn.execute(f"UPDATE movies SET {sets}, updated_at=? WHERE id=?", (*fields.values(), _now(), movie_id))
 
-        row = conn.execute("SELECT id FROM movies WHERE name = ? AND year IS ?", (name, year)).fetchone()
-        if row:
-            movie_id = row["id"]
+    row = conn.execute("SELECT id FROM movies WHERE name = ? AND year IS ?", (name, year)).fetchone()
+    if row:
+        movie_id = row["id"]
+        _update(movie_id)
+    elif year is None:
+        # No exact (name, NULL) row exists yet. Rather than blindly create a
+        # fresh row that might just be an unlabeled duplicate of something
+        # already in the pool, look for existing candidates by name alone.
+        # Exactly one -> merge into it (almost certainly the same title,
+        # just missing year metadata from this particular source). Two or
+        # more -> can't tell which one it is, so create a new row but flag
+        # it for a human to resolve rather than silently guessing wrong.
+        candidates = conn.execute("SELECT id FROM movies WHERE name = ?", (name,)).fetchall()
+        if len(candidates) == 1:
+            movie_id = candidates[0]["id"]
             _update(movie_id)
-        elif year is None:
-            # No exact (name, NULL) row exists yet. Rather than blindly create a
-            # fresh row that might just be an unlabeled duplicate of something
-            # already in the pool, look for existing candidates by name alone.
-            # Exactly one -> merge into it (almost certainly the same title,
-            # just missing year metadata from this particular source). Two or
-            # more -> can't tell which one it is, so create a new row but flag
-            # it for a human to resolve rather than silently guessing wrong.
-            candidates = conn.execute("SELECT id FROM movies WHERE name = ?", (name,)).fetchall()
-            if len(candidates) == 1:
-                movie_id = candidates[0]["id"]
-                _update(movie_id)
-            else:
-                movie_id = _insert(needs_review=1 if candidates else 0)
+        else:
+            movie_id = _insert(needs_review=1 if candidates else 0)
+    else:
+        # #knm: normalized-title + year-proximity import matching (was exact-string only)
+        # No exact-string row exists, but a provider formatting the same
+        # title slightly differently (punctuation, casing, a "4K:"-style
+        # quality prefix) shouldn't spawn a permanent second row -- that's
+        # exactly what find_duplicate_groups' pass (1)+(2) recognize after
+        # the fact (see there). Apply the same normalized-title +
+        # year-proximity matching here, at import time, so identical real
+        # titles land on one row instead of needing a later manual merge.
+        # Exactly one same-normalized-title candidate within 1 year -> treat
+        # as the same row. Anything more ambiguous (0 or 2+ candidates)
+        # falls back to a plain insert, same as before -- the Duplicate
+        # Finder remains the safety net for whatever this doesn't catch.
+        target_key = _normalize_title_for_dedup(name)
+        nearby_rows = conn.execute(
+            "SELECT id, name FROM movies WHERE year IS NOT NULL AND ABS(year - ?) <= 1", (year,),
+        ).fetchall()
+        candidates = [r for r in nearby_rows if _normalize_title_for_dedup(r["name"]) == target_key]
+        if len(candidates) == 1:
+            movie_id = candidates[0]["id"]
+            _update(movie_id)
         else:
             movie_id = _insert()
 
-        _commit_with_retry(conn)
-        conn.close()
-        return movie_id
+    _commit_with_retry(conn)
+    conn.close()
+    return movie_id
 
 
 def _movie_filter_clause(
@@ -5384,6 +5676,245 @@ def list_all_movie_ids(
     conn = _connect()
     clause, params = _movie_filter_clause(search, category_id, provider_id, archived)
     rows = conn.execute(f"SELECT m.id FROM movies m {clause}", params).fetchall()
+    conn.close()
+    return [r["id"] for r in rows]
+
+
+def list_movie_ids_pending_tmdb_enrichment(limit: int | None = None, item_ids: set[int] | None = None) -> list[int]:
+    """Movies whose imported TMDB identity has not yet been resolved.
+
+    This deliberately keys off ``last_enriched_at IS NULL``, not the general
+    enrichment TTL.  A normal provider catalog refresh is a presence/new-item
+    reconciliation and must not turn into another full metadata crawl for
+    movies whose metadata is already complete.
+    """
+    conn = _connect()
+    scope_clause = ""
+    params: list = []
+    if item_ids is not None:
+        ids = sorted({int(item_id) for item_id in item_ids})
+        if not ids:
+            conn.close()
+            return []
+        scope_clause = f" AND id IN ({','.join('?' * len(ids))})"
+        params.extend(ids)
+    limit_clause = " LIMIT ?" if limit is not None else ""
+    if limit is not None:
+        params.append(max(1, int(limit)))
+    rows = conn.execute(f"""
+        SELECT id FROM movies
+        WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> ''
+          AND is_adult=0 AND review_excluded=0
+          AND last_enriched_at IS NULL
+          {scope_clause}
+          AND NOT EXISTS (
+              SELECT 1 FROM tmdb_lookup_failures f
+              WHERE f.content_type='movie' AND f.item_id=movies.id
+          )
+        ORDER BY id
+    """ + limit_clause, params).fetchall()
+    conn.close()
+    return [r["id"] for r in rows]
+
+
+def count_movies_pending_tmdb_enrichment(item_ids: set[int] | None = None) -> int:
+    conn = _connect()
+    scope_clause = ""
+    params: list = []
+    if item_ids is not None:
+        ids = sorted({int(item_id) for item_id in item_ids})
+        if not ids:
+            conn.close()
+            return 0
+        scope_clause = f" AND id IN ({','.join('?' * len(ids))})"
+        params.extend(ids)
+    row = conn.execute(f"""
+        SELECT COUNT(*) AS c FROM movies
+        WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> ''
+          AND is_adult=0 AND review_excluded=0 AND last_enriched_at IS NULL
+           {scope_clause}
+           AND NOT EXISTS (
+              SELECT 1 FROM tmdb_lookup_failures f
+              WHERE f.content_type='movie' AND f.item_id=movies.id
+          )
+    """, params).fetchone()
+    conn.close()
+    return int(row["c"])
+
+
+def list_series_pending_tmdb_metadata_enrichment(limit: int | None = None, item_ids: set[int] | None = None) -> list[dict]:
+    """Known-TMDB series awaiting their canonical TMDB title/detail pass.
+
+    This is canonical-series scoped, deliberately not source scoped: source
+    rows keep their raw provider title/language while the card gets one stable
+    TMDB name regardless of how many providers or variants carry it.
+    """
+    conn = _connect()
+    scope_clause = ""
+    params: list = []
+    if item_ids is not None:
+        ids = sorted({int(item_id) for item_id in item_ids})
+        if not ids:
+            conn.close()
+            return []
+        scope_clause = f" AND id IN ({','.join('?' * len(ids))})"
+        params.extend(ids)
+    limit_clause = " LIMIT ?" if limit is not None else ""
+    if limit is not None:
+        params.append(max(1, int(limit)))
+    rows = conn.execute(f"""
+        SELECT id, tmdb_id FROM series
+        WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> ''
+          AND is_adult=0 AND review_excluded=0
+          {scope_clause}
+          AND (
+                tmdb_metadata_enriched_at IS NULL
+                -- Backfill an older successful identity lookup that predated
+                -- its first-air-year write.  This remains a tiny bounded set
+                -- (only cards still held for year review), not a recurring
+                -- full-catalog TMDB crawl.
+                OR (needs_year_review=1 AND year IS NULL)
+              )
+          AND NOT EXISTS (
+              SELECT 1 FROM tmdb_lookup_failures f
+              WHERE f.content_type='series' AND f.item_id=series.id
+          )
+        ORDER BY id
+    """ + limit_clause, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def count_series_pending_tmdb_metadata_enrichment(item_ids: set[int] | None = None) -> int:
+    conn = _connect()
+    scope_clause = ""
+    params: list = []
+    if item_ids is not None:
+        ids = sorted({int(item_id) for item_id in item_ids})
+        if not ids:
+            conn.close()
+            return 0
+        scope_clause = f" AND id IN ({','.join('?' * len(ids))})"
+        params.extend(ids)
+    row = conn.execute(f"""
+        SELECT COUNT(*) AS c FROM series
+        WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> ''
+          AND is_adult=0 AND review_excluded=0
+           {scope_clause}
+           AND (tmdb_metadata_enriched_at IS NULL OR (needs_year_review=1 AND year IS NULL))
+          AND NOT EXISTS (
+              SELECT 1 FROM tmdb_lookup_failures f
+              WHERE f.content_type='series' AND f.item_id=series.id
+          )
+    """, params).fetchone()
+    conn.close()
+    return int(row["c"])
+
+
+def list_pending_trailer_enrichment(limit: int = 100) -> list[dict]:
+    """Return a bounded, provider-free queue for known identities.
+
+    A missing trailer is retried once; confirmed absences are permanently
+    quiet until a future explicit force operation clears the status.
+    """
+    conn = _connect()
+    per_type = max(1, int(limit) // 2)
+    rows = conn.execute("""
+        SELECT * FROM (
+        SELECT 'movie' AS content_type, id, tmdb_id FROM movies
+        WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> '' AND is_adult=0
+          AND review_excluded=0 AND trailer_status IN ('unknown', 'not_found', 'error')
+          AND trailer_attempts < 2 ORDER BY id LIMIT ?
+        )
+        UNION ALL
+        SELECT * FROM (
+        SELECT 'series' AS content_type, id, tmdb_id FROM series
+        WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> '' AND is_adult=0
+          AND review_excluded=0 AND trailer_status IN ('unknown', 'not_found', 'error')
+          AND trailer_attempts < 2 ORDER BY id LIMIT ?
+        )
+        ORDER BY content_type, id
+    """, (per_type, per_type)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def record_trailer_result(content_type: str, item_id: int, *, key: str | None = None,
+                          site: str | None = None, error: str | None = None) -> None:
+    """Persist a found, absent, or failed trailer check without provider I/O."""
+    table = "movies" if content_type == "movie" else "series"
+    with _WRITE_LOCK:
+        conn = _connect()
+        row = conn.execute(f"SELECT trailer_attempts FROM {table} WHERE id=?", (item_id,)).fetchone()
+        if not row:
+            conn.close(); return
+        attempts = int(row["trailer_attempts"] or 0) + 1
+        if key:
+            status, last_error = "found", None
+        elif error:
+            status, last_error = "error", str(error)[:500]
+        else:
+            status = "confirmed_none" if attempts >= 2 else "not_found"
+            last_error = "TMDB returned no YouTube trailer or teaser"
+        conn.execute(f"""UPDATE {table}
+            SET trailer_key=?, trailer_site=?, trailer_status=?, trailer_attempts=?,
+                trailer_checked_at=?, trailer_last_error=?, updated_at=? WHERE id=?""",
+            (key, site or ("YouTube" if key else None), status, attempts, _now(), last_error, _now(), item_id))
+        _commit_with_retry(conn)
+        conn.close()
+
+
+def apply_provider_trailers(provider_id: int, content_type: str, items: list[dict]) -> int:
+    """Persist trailer values supplied by the provider's catalog response."""
+    if not items:
+        return 0
+    source_table = "movie_sources" if content_type == "movie" else "series_sources"
+    source_id = "provider_stream_id" if content_type == "movie" else "provider_series_id"
+    target_table = "movies" if content_type == "movie" else "series"
+    updated = 0
+    with _WRITE_LOCK:
+        conn = _connect()
+        for item in items:
+            trailer = item.get("trailer") or item.get("youtube_trailer")
+            if not trailer:
+                continue
+            trailer = str(trailer).strip()
+            if not trailer:
+                continue
+            row = conn.execute(
+                f"SELECT {('movie_id' if content_type == 'movie' else 'series_id')} AS item_id FROM {source_table} WHERE provider_id=? AND {source_id}=?",
+                (provider_id, str(item.get(source_id) or item.get("provider_stream_id") or item.get("provider_series_id"))),
+            ).fetchone()
+            if not row:
+                continue
+            conn.execute(
+                f"UPDATE {target_table} SET trailer_key=?, trailer_site='provider', trailer_status='found', trailer_attempts=0, trailer_checked_at=?, trailer_last_error=NULL, updated_at=? WHERE id=?",
+                (trailer, _now(), _now(), row["item_id"]),
+            )
+            updated += 1
+        _commit_with_retry(conn)
+        conn.close()
+    return updated
+
+
+def list_movie_ids_pending_provider_enrichment(provider_id: int | None = None) -> list[int]:
+    """New movies with no imported TMDB identity left for provider fallback."""
+    conn = _connect()
+    provider_clause = ""
+    params: tuple = ()
+    if provider_id is not None:
+        provider_clause = """AND EXISTS (
+            SELECT 1 FROM movie_sources ms
+            WHERE ms.movie_id=movies.id AND ms.provider_id=?
+        )"""
+        params = (provider_id,)
+    rows = conn.execute(f"""
+        SELECT id FROM movies
+        WHERE (tmdb_id IS NULL OR TRIM(tmdb_id) = '')
+          AND last_enriched_at IS NULL
+          {provider_clause}
+        ORDER BY id
+    """, params).fetchall()
     conn.close()
     return [r["id"] for r in rows]
 
@@ -5472,11 +6003,10 @@ def get_tmdb_sync_interval_seconds() -> int | None:
 
 
 def mark_provider_catalog_refreshed(provider_id: int) -> None:
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("UPDATE providers SET last_catalog_refresh_at=? WHERE id=?", (_now(), provider_id))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("UPDATE providers SET last_catalog_refresh_at=? WHERE id=?", (_now(), provider_id))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def set_provider_import_totals(provider_id: int, movie_total: int | None, series_total: int | None) -> None:
@@ -5490,14 +6020,13 @@ def set_provider_import_totals(provider_id: int, movie_total: int | None, series
     45,000 ever made it into the pool" without digging through logs.
     None for either side that doesn't apply (e.g. Plex/Emby import provider
     counts separately and doesn't call this)."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute(
-            "UPDATE providers SET last_movie_provider_total=?, last_series_provider_total=? WHERE id=?",
-            (movie_total, series_total, provider_id),
-        )
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute(
+        "UPDATE providers SET last_movie_provider_total=?, last_series_provider_total=? WHERE id=?",
+        (movie_total, series_total, provider_id),
+    )
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def _is_stale(last_enriched_at) -> bool:
@@ -5508,7 +6037,12 @@ def _is_stale(last_enriched_at) -> bool:
 
 def movie_needs_enrichment(movie_id: int) -> bool:
     movie = get_movie(movie_id)
-    return bool(movie) and _is_stale(movie.get("last_enriched_at"))
+    # Metadata enrichment is ingestion work, not a daily provider poll.  A
+    # catalog refresh has already confirmed the source is still present; once
+    # rich metadata has been written, leave it alone unless a human explicitly
+    # requests a forced refresh.  This also keeps provider-detail fallback
+    # limited to genuinely new/unresolved movies.
+    return bool(movie) and not movie.get("last_enriched_at")
 
 
 def set_movie_enrichment(movie_id: int, **fields) -> None:
@@ -5521,53 +6055,7 @@ def set_movie_enrichment(movie_id: int, **fields) -> None:
         fields["last_enriched_at"] = _now()
         sets = ", ".join(f"{k}=?" for k in fields)
         conn.execute(f"UPDATE movies SET {sets} WHERE id=?", (*fields.values(), movie_id))
-        _commit_with_retry(conn)
-        conn.close()
-
-
-def apply_movie_enrichment_batch(items: list[dict]) -> None:
-    """Writes every movie from one bulk_enrich_all movie-phase chunk under a
-    single connection/lock/commit, instead of vod_importer.enrich_movie's old
-    per-movie set_movie_enrichment (+ conditional set_movie_source_bitrate)
-    calls, which each independently acquired _WRITE_LOCK, opened a
-    connection, and did a full fsync-backed commit -- the same
-    per-item-lock-contention problem enrich_series_episodes_batch fixes for
-    series, just at movie-count scale (bulk_enrich_all's movie concurrency
-    is 8) instead of episode-count scale.
-
-    One held connection + one _item_savepoint per movie (so one malformed
-    item -- e.g. an unknown field name -- can't lose the rest of the chunk)
-    + one _commit_with_retry at the end preserves the same per-movie upsert
-    correctness while paying the lock-acquisition and fsync cost once per
-    chunk instead of once per movie.
-
-    `items` is a list of dicts: {"movie_id": int, "fields": dict (may be
-    empty -- set_movie_enrichment's own **fields shape, e.g. genre/
-    description/cast_list/director/country/tmdb_id/poster_url/duration_secs/
-    rating/release_date/content_rating), "source_id": int | None (movie_sources
-    row to stamp bitrate onto), "bitrate": int | None}."""
-    if not items:
-        return
-    with _WRITE_LOCK:
-        conn = _connect()
-        for item in items:
-            movie_id = item["movie_id"]
-            try:
-                with _item_savepoint(conn):
-                    fields = dict(item.get("fields") or {})
-                    fields["last_enriched_at"] = _now()
-                    sets = ", ".join(f"{k}=?" for k in fields)
-                    conn.execute(f"UPDATE movies SET {sets} WHERE id=?", (*fields.values(), movie_id))
-                    source_id = item.get("source_id")
-                    if source_id is not None and item.get("bitrate") is not None:
-                        conn.execute(
-                            "UPDATE movie_sources SET bitrate=? WHERE id=?",
-                            (item["bitrate"], source_id),
-                        )
-            except Exception as exc:
-                logger.warning(
-                    "[apply_movie_enrichment_batch] skipped movie_id=%s: %s", movie_id, exc,
-                )
+        conn.execute("UPDATE movie_sources SET provider_detail_deferred=0 WHERE movie_id=?", (movie_id,))
         _commit_with_retry(conn)
         conn.close()
 
@@ -5627,19 +6115,17 @@ def set_movie_source_file_size_bytes(source_id: int, file_size_bytes: int) -> No
     one-time Content-Length probe once the pool item is backfilled into
     someone's category, without touching local_file_path -- it stays a
     pointer (virtual), not a local copy (actual)."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("UPDATE movie_sources SET file_size_bytes=? WHERE id=?", (file_size_bytes, source_id))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("UPDATE movie_sources SET file_size_bytes=? WHERE id=?", (file_size_bytes, source_id))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def set_episode_source_file_size_bytes(source_id: int, file_size_bytes: int) -> None:
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("UPDATE episode_sources SET file_size_bytes=? WHERE id=?", (file_size_bytes, source_id))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("UPDATE episode_sources SET file_size_bytes=? WHERE id=?", (file_size_bytes, source_id))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def set_movie_source_bitrate(source_id: int, bitrate: int | None) -> None:
@@ -5650,6 +6136,54 @@ def set_movie_source_bitrate(source_id: int, bitrate: int | None) -> None:
     with _WRITE_LOCK:
         conn = _connect()
         conn.execute("UPDATE movie_sources SET bitrate=? WHERE id=?", (bitrate, source_id))
+        _commit_with_retry(conn)
+        conn.close()
+
+
+def apply_movie_enrichment_batch(items: list[dict]) -> None:
+    """Writes every movie from one bulk_enrich_all movie-phase chunk under a
+    single connection/lock/commit, instead of vod_importer.enrich_movie's old
+    per-movie set_movie_enrichment (+ conditional set_movie_source_bitrate)
+    calls, which each independently acquired _WRITE_LOCK, opened a
+    connection, and did a full fsync-backed commit -- the same
+    per-item-lock-contention problem beads-3po already fixed for series via
+    enrich_series_episodes_batch (see that function's docstring), just at
+    movie-count scale (bulk_enrich_all's movie concurrency is 8) instead of
+    episode-count scale. See beads-ds8.
+
+    One held connection + one _item_savepoint per movie (so one malformed
+    item -- e.g. an unknown field name -- can't lose the rest of the chunk)
+    + one _commit_with_retry at the end preserves the same per-movie upsert
+    correctness while paying the lock-acquisition and fsync cost once per
+    chunk instead of once per movie.
+
+    `items` is a list of dicts: {"movie_id": int, "fields": dict (may be
+    empty -- set_movie_enrichment's own **fields shape, e.g. genre/
+    description/cast_list/director/country/tmdb_id/poster_url/duration_secs/
+    rating/release_date/content_rating), "source_id": int | None (movie_sources
+    row to stamp bitrate onto), "bitrate": int | None}."""
+    if not items:
+        return
+    with _WRITE_LOCK:
+        conn = _connect()
+        for item in items:
+            movie_id = item["movie_id"]
+            try:
+                with _item_savepoint(conn):
+                    fields = dict(item.get("fields") or {})
+                    fields["last_enriched_at"] = _now()
+                    sets = ", ".join(f"{k}=?" for k in fields)
+                    conn.execute(f"UPDATE movies SET {sets} WHERE id=?", (*fields.values(), movie_id))
+                    source_id = item.get("source_id")
+                    if source_id is not None and item.get("bitrate") is not None:
+                        conn.execute(
+                            "UPDATE movie_sources SET bitrate=? WHERE id=?",
+                            (item["bitrate"], source_id),
+                        )
+            except Exception as exc:
+                logger.warning(
+                    "[apply_movie_enrichment_batch] skipped movie_id=%s: %s", movie_id, exc,
+                )
         _commit_with_retry(conn)
         conn.close()
 
@@ -5673,32 +6207,30 @@ def delete_movie(movie_id: int) -> None:
     new INSERT). Archive is the durable way to hide something that's still
     provider-backed; only a truly sourceless item is safe to hard-delete.
     movie_sources/movie_category_placements cascade via FK."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        source_count = conn.execute("SELECT COUNT(*) c FROM movie_sources WHERE movie_id=?", (movie_id,)).fetchone()["c"]
-        if source_count > 0:
-            conn.close()
-            raise ValueError(
-                f"Can't delete a movie with {source_count} active source(s) -- the next catalog sync would just "
-                "re-import it fresh, with none of its archived/category state carried over. Archive it instead; "
-                "only sourceless orphans (see Orphan Checker) can be deleted."
-            )
-        conn.execute("DELETE FROM movies WHERE id=?", (movie_id,))
-        _commit_with_retry(conn)
+    conn = _connect()
+    source_count = conn.execute("SELECT COUNT(*) c FROM movie_sources WHERE movie_id=?", (movie_id,)).fetchone()["c"]
+    if source_count > 0:
         conn.close()
+        raise ValueError(
+            f"Can't delete a movie with {source_count} active source(s) -- the next catalog sync would just "
+            "re-import it fresh, with none of its archived/category state carried over. Archive it instead; "
+            "only sourceless orphans (see Orphan Checker) can be deleted."
+        )
+    conn.execute("DELETE FROM movies WHERE id=?", (movie_id,))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def set_movie_adult(movie_id: int, is_adult: bool) -> None:
     """Manual override — also stamps is_adult_manual so future auto-detection
     passes (see resync_adult_flags) never silently revert this."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute(
-            "UPDATE movies SET is_adult=?, is_adult_manual=1, updated_at=? WHERE id=?",
-            (int(is_adult), _now(), movie_id),
-        )
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute(
+        "UPDATE movies SET is_adult=?, is_adult_manual=1, updated_at=? WHERE id=?",
+        (int(is_adult), _now(), movie_id),
+    )
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def delete_movie_source(movie_id: int, source_id: int) -> None:
@@ -5711,23 +6243,22 @@ def delete_movie_source(movie_id: int, source_id: int) -> None:
     never cleaned up on delete, admin or portal, silently growing disk
     usage forever). Skipped if another source row still points at the
     exact same path, same defensive check as remove_movie_library_owner."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        row = conn.execute("SELECT local_file_path FROM movie_sources WHERE id=? AND movie_id=?", (source_id, movie_id)).fetchone()
-        file_path = None
-        if row and row["local_file_path"]:
-            other_ref = conn.execute(
-                """SELECT 1 FROM movie_sources WHERE local_file_path=? AND id!=?
-                   UNION SELECT 1 FROM episode_sources WHERE local_file_path=? LIMIT 1""",
-                (row["local_file_path"], source_id, row["local_file_path"]),
-            ).fetchone()
-            if not other_ref:
-                file_path = row["local_file_path"]
-        conn.execute("DELETE FROM movie_sources WHERE id=? AND movie_id=?", (source_id, movie_id))
-        _purge_if_sourceless_movie(conn, movie_id)
-        _commit_with_retry(conn)
-        conn.close()
-        _delete_file_if_present(file_path)
+    conn = _connect()
+    row = conn.execute("SELECT local_file_path FROM movie_sources WHERE id=? AND movie_id=?", (source_id, movie_id)).fetchone()
+    file_path = None
+    if row and row["local_file_path"]:
+        other_ref = conn.execute(
+            """SELECT 1 FROM movie_sources WHERE local_file_path=? AND id!=?
+               UNION SELECT 1 FROM episode_sources WHERE local_file_path=? LIMIT 1""",
+            (row["local_file_path"], source_id, row["local_file_path"]),
+        ).fetchone()
+        if not other_ref:
+            file_path = row["local_file_path"]
+    conn.execute("DELETE FROM movie_sources WHERE id=? AND movie_id=?", (source_id, movie_id))
+    _purge_if_sourceless_movie(conn, movie_id)
+    _commit_with_retry(conn)
+    conn.close()
+    _delete_file_if_present(file_path)
 
 
 def move_movie_source(source_id: int, movie_id: int, target_movie_id: int) -> None:
@@ -5739,15 +6270,14 @@ def move_movie_source(source_id: int, movie_id: int, target_movie_id: int) -> No
     (provider_id, provider_stream_id) UNIQUE constraint doesn't involve
     movie_id, so this can't collide. If that was the old movie's last
     source, it gets purged same as a plain delete would."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        if not conn.execute("SELECT 1 FROM movies WHERE id=?", (target_movie_id,)).fetchone():
-            conn.close()
-            raise ValueError(f"target movie {target_movie_id} not found")
-        conn.execute("UPDATE movie_sources SET movie_id=? WHERE id=? AND movie_id=?", (target_movie_id, source_id, movie_id))
-        _purge_if_sourceless_movie(conn, movie_id)
-        _commit_with_retry(conn)
+    conn = _connect()
+    if not conn.execute("SELECT 1 FROM movies WHERE id=?", (target_movie_id,)).fetchone():
         conn.close()
+        raise ValueError(f"target movie {target_movie_id} not found")
+    conn.execute("UPDATE movie_sources SET movie_id=? WHERE id=? AND movie_id=?", (target_movie_id, source_id, movie_id))
+    _purge_if_sourceless_movie(conn, movie_id)
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def list_movie_placements_for_category(category_id: int) -> list[dict]:
@@ -5761,14 +6291,13 @@ def list_movie_placements_for_category(category_id: int) -> list[dict]:
 
 
 def remove_movie_from_category(movie_id: int, category_id: int) -> None:
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute(
-            "DELETE FROM movie_category_placements WHERE movie_id=? AND category_id=?",
-            (movie_id, category_id),
-        )
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute(
+        "DELETE FROM movie_category_placements WHERE movie_id=? AND category_id=?",
+        (movie_id, category_id),
+    )
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def remove_movie_from_all_categories(movie_id: int) -> None:
@@ -5778,11 +6307,10 @@ def remove_movie_from_all_categories(movie_id: int) -> None:
     Dispatcharr", since evaluate_smart_category's own review_excluded
     filter only stops FUTURE placement, it never un-places an existing
     match on its own."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("DELETE FROM movie_category_placements WHERE movie_id=?", (movie_id,))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("DELETE FROM movie_category_placements WHERE movie_id=?", (movie_id,))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def place_movie_in_category(movie_id: int, category_id: int) -> int:
@@ -5792,62 +6320,60 @@ def place_movie_in_category(movie_id: int, category_id: int) -> int:
     placements (for the same movie in additional categories) get an
     invisible zero-width-space marker appended so Dispatcharr's same-account
     (name, year) dedup treats each as a distinct catalog entry.
+
+    Raises on a review_excluded=1 movie -- same guard evaluate_smart_category
+    already applies to its own candidate pool (see that function's
+    docstring): "archived" is enforced entirely through category placement,
+    so an unguarded placement call silently un-archives the item. This was
+    the beads-4o6 leak -- single-item placement (this function) and the DVR
+    pointer-backfill call sites had no such guard, unlike the bulk/smart-
+    category paths.
     """
-    with _WRITE_LOCK:
-        conn = _connect()
-        flagged = conn.execute("SELECT needs_year_review, review_excluded FROM movies WHERE id=?", (movie_id,)).fetchone()
-        if flagged and flagged["needs_year_review"]:
-            conn.close()
-            raise ValueError(f"movie {movie_id} needs year review before it can be placed in a category")
-        if flagged and flagged["review_excluded"]:
-            # Archiving a movie doesn't hide it directly -- it only removes it
-            # from listings and strips its existing category placements at the
-            # moment it's set (see evaluate_smart_category's docstring). Actual
-            # visibility is governed entirely by category placement, so placing
-            # an archived row here would silently re-surface it in listings
-            # while it still reads as archived everywhere else, with no
-            # review_excluded flag change to explain why. evaluate_smart_category
-            # and bulk_place_movies_in_category already exclude archived rows
-            # from their candidate pool before ever getting here -- this closes
-            # the same gap for this function's other callers (the single-item
-            # placement endpoint, DVR backfill call sites).
-            conn.close()
-            raise ValueError(f"movie {movie_id} is archived and cannot be placed in a category")
-        existing = conn.execute(
-            "SELECT export_stream_id FROM movie_category_placements WHERE movie_id=? AND category_id=?",
-            (movie_id, category_id),
-        ).fetchone()
-        if existing:
-            conn.close()
-            return existing["export_stream_id"]
+    conn = _connect()
+    flagged = conn.execute(
+        "SELECT needs_year_review, review_excluded FROM movies WHERE id=?", (movie_id,)
+    ).fetchone()
+    if flagged and flagged["needs_year_review"]:
+        conn.close()
+        raise ValueError(f"movie {movie_id} needs year review before it can be placed in a category")
+    if flagged and flagged["review_excluded"]:
+        conn.close()
+        raise ValueError(f"movie {movie_id} is archived (review_excluded) and cannot be placed in a category")
+    existing = conn.execute(
+        "SELECT export_stream_id FROM movie_category_placements WHERE movie_id=? AND category_id=?",
+        (movie_id, category_id),
+    ).fetchone()
+    if existing:
+        conn.close()
+        return existing["export_stream_id"]
 
-        placement_count = conn.execute(
-            "SELECT COUNT(*) c FROM movie_category_placements WHERE movie_id=?", (movie_id,)
-        ).fetchone()["c"]
-        name_suffix = _ZW_MARKER * placement_count  # 0 suffixes for the 1st placement, 1 for the 2nd, ...
+    placement_count = conn.execute(
+        "SELECT COUNT(*) c FROM movie_category_placements WHERE movie_id=?", (movie_id,)
+    ).fetchone()["c"]
+    name_suffix = _ZW_MARKER * placement_count  # 0 suffixes for the 1st placement, 1 for the 2nd, ...
 
-        # BEGIN IMMEDIATE around the read-then-insert: without it, two concurrent
-        # placements (e.g. a scheduled refresh auto-placing while a user runs
-        # "Place all filtered") can both read the same MAX(export_stream_id) and
-        # try to insert the same value -- caught by the UNIQUE constraint, but as
-        # an unhandled IntegrityError rather than being serialized cleanly. This
-        # forces the write lock before the read, so the second caller blocks
-        # (and retries via _commit_with_retry) instead of racing.
-        conn.isolation_level = None
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            export_stream_id = _EXPORT_STREAM_ID_BASE + _next_placement_seq(conn)
-            conn.execute(
-                "INSERT INTO movie_category_placements (movie_id, category_id, export_stream_id, name_suffix) VALUES (?,?,?,?)",
-                (movie_id, category_id, export_stream_id, name_suffix),
-            )
-            _commit_with_retry(conn)
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
-        return export_stream_id
+    # BEGIN IMMEDIATE around the read-then-insert: without it, two concurrent
+    # placements (e.g. a scheduled refresh auto-placing while a user runs
+    # "Place all filtered") can both read the same MAX(export_stream_id) and
+    # try to insert the same value -- caught by the UNIQUE constraint, but as
+    # an unhandled IntegrityError rather than being serialized cleanly. This
+    # forces the write lock before the read, so the second caller blocks
+    # (and retries via _commit_with_retry) instead of racing.
+    conn.isolation_level = None
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        export_stream_id = _EXPORT_STREAM_ID_BASE + _next_placement_seq(conn)
+        conn.execute(
+            "INSERT INTO movie_category_placements (movie_id, category_id, export_stream_id, name_suffix) VALUES (?,?,?,?)",
+            (movie_id, category_id, export_stream_id, name_suffix),
+        )
+        _commit_with_retry(conn)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return export_stream_id
 
 
 def _next_placement_seq(conn: sqlite3.Connection) -> int:
@@ -5877,66 +6403,65 @@ def bulk_place_movies_in_category(movie_ids: list[int], category_id: int) -> int
     whole id list as one statement -- a catalog-wide catch-all category can
     match tens of thousands of movies, which exceeds SQLite's bound-parameter
     limit (32766 on this build; historically as low as 999 on some) in a
-    single query.
-
-    Holds _WRITE_LOCK for the whole call (found live 2026-09-15): this used
-    to open its own unlocked connection, so the periodic smart-category
-    resweep (main.py's catalog refresher calls this via evaluate_smart_category
-    on every provider refresh) could executemany/commit here at the exact
-    same moment a concurrent enrich write (add_episode, apply_movie_enrichment_batch,
-    etc. -- all already _WRITE_LOCK'd against each other) was mid-transaction,
-    which is real cross-connection SQLite contention the 30s busy_timeout
-    doesn't reliably absorb under full-catalog bulk enrichment load -- it
-    surfaced as 'database is locked' 500s on the plain single-item /enrich/
-    endpoint, and as silently-dropped episode/movie writes in the batch
-    writer's per-item error handling."""
+    single query."""
     if not movie_ids:
         return 0
-    with _WRITE_LOCK:
-        conn = _connect()
-        already: set[int] = set()
-        for chunk in _chunked(movie_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            already.update(r["movie_id"] for r in conn.execute(
-                f"SELECT movie_id FROM movie_category_placements WHERE category_id=? AND movie_id IN ({placeholders})",
-                (category_id, *chunk),
-            ).fetchall())
-        flagged: set[int] = set()
-        for chunk in _chunked(movie_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            flagged.update(r["id"] for r in conn.execute(
-                f"SELECT id FROM movies WHERE needs_year_review=1 AND id IN ({placeholders})", chunk,
-            ).fetchall())
-        if flagged:
-            logger.info("[vod_db] skipping %d movie(s) still needing year review for category=%s", len(flagged), category_id)
-        to_place = [mid for mid in movie_ids if mid not in already and mid not in flagged]
-        if not to_place:
-            conn.close()
-            return 0
-
-        counts: dict[int, int] = {}
-        for chunk in _chunked(to_place):
-            placeholders = ",".join("?" for _ in chunk)
-            for r in conn.execute(
-                f"SELECT movie_id, COUNT(*) c FROM movie_category_placements WHERE movie_id IN ({placeholders}) GROUP BY movie_id",
-                chunk,
-            ).fetchall():
-                counts[r["movie_id"]] = r["c"]
-
-        next_seq = _next_placement_seq(conn)
-        rows = []
-        for mid in to_place:
-            name_suffix = _ZW_MARKER * counts.get(mid, 0)
-            rows.append((mid, category_id, _EXPORT_STREAM_ID_BASE + next_seq, name_suffix))
-            next_seq += 1
-
-        conn.executemany(
-            "INSERT INTO movie_category_placements (movie_id, category_id, export_stream_id, name_suffix) VALUES (?,?,?,?)",
-            rows,
-        )
-        _commit_with_retry(conn)
+    conn = _connect()
+    already: set[int] = set()
+    for chunk in _chunked(movie_ids):
+        placeholders = ",".join("?" for _ in chunk)
+        already.update(r["movie_id"] for r in conn.execute(
+            f"SELECT movie_id FROM movie_category_placements WHERE category_id=? AND movie_id IN ({placeholders})",
+            (category_id, *chunk),
+        ).fetchall())
+    flagged: set[int] = set()
+    for chunk in _chunked(movie_ids):
+        placeholders = ",".join("?" for _ in chunk)
+        flagged.update(r["id"] for r in conn.execute(
+            f"SELECT id FROM movies WHERE needs_year_review=1 AND id IN ({placeholders})", chunk,
+        ).fetchall())
+    if flagged:
+        logger.info("[vod_db] skipping %d movie(s) still needing year review for category=%s", len(flagged), category_id)
+    to_place = [mid for mid in movie_ids if mid not in already and mid not in flagged]
+    if not to_place:
         conn.close()
-        return len(rows)
+        return 0
+
+    counts: dict[int, int] = {}
+    for chunk in _chunked(to_place):
+        placeholders = ",".join("?" for _ in chunk)
+        for r in conn.execute(
+            f"SELECT movie_id, COUNT(*) c FROM movie_category_placements WHERE movie_id IN ({placeholders}) GROUP BY movie_id",
+            chunk,
+        ).fetchall():
+            counts[r["movie_id"]] = r["c"]
+
+    next_seq = _next_placement_seq(conn)
+    rows = []
+    for mid in to_place:
+        name_suffix = _ZW_MARKER * counts.get(mid, 0)
+        rows.append((mid, category_id, _EXPORT_STREAM_ID_BASE + next_seq, name_suffix))
+        next_seq += 1
+
+    conn.executemany(
+        "INSERT INTO movie_category_placements (movie_id, category_id, export_stream_id, name_suffix) VALUES (?,?,?,?)",
+        rows,
+    )
+    _commit_with_retry(conn)
+    conn.close()
+    return len(rows)
+
+
+def _enabled_languages_clause(column: str) -> tuple[str, list[str]]:
+    """SQL fragment + bind params gating `column` to config.get_enabled_languages()
+    (default EN+ES, user-adjustable via the Providers tab). Sources whose
+    language isn't in that set are excluded from playback/export/failover
+    entirely -- rows stay in the DB untouched, just filtered out of these
+    read paths. See config.get_enabled_languages for why this is separate
+    from the import-time language exclusion."""
+    codes = get_enabled_languages()
+    placeholders = ",".join("?" * len(codes))
+    return f"COALESCE({column}, 'EN') IN ({placeholders})", codes
 
 
 def _best_source_cte() -> str:
@@ -6056,42 +6581,54 @@ def get_movie_export_row_by_stream_id(export_stream_id: int) -> dict | None:
 # ── Series / Episodes ────────────────────────────────────────────────────────
 
 def upsert_series(name: str, year: int | None = None, **fields) -> int:
-    with _WRITE_LOCK:
-        conn = _connect()
+    conn = _connect()
 
-        def _insert(needs_review: int = 0) -> int:
-            cols = ["name", "year", "needs_year_review", *fields.keys()]
-            vals = [name, year, needs_review, *fields.values()]
-            placeholders = ", ".join("?" for _ in cols)
-            cur = conn.execute(
-                f"INSERT INTO series ({', '.join(cols)}, created_at) VALUES ({placeholders}, ?)",
-                (*vals, _now()),
-            )
-            return cur.lastrowid
+    def _insert(needs_review: int = 0) -> int:
+        cols = ["name", "year", "needs_year_review", *fields.keys()]
+        vals = [name, year, needs_review, *fields.values()]
+        placeholders = ", ".join("?" for _ in cols)
+        cur = conn.execute(
+            f"INSERT INTO series ({', '.join(cols)}, created_at) VALUES ({placeholders}, ?)",
+            (*vals, _now()),
+        )
+        return cur.lastrowid
 
-        def _update(series_id: int) -> None:
-            if fields:
-                sets = ", ".join(f"{k}=?" for k in fields)
-                conn.execute(f"UPDATE series SET {sets}, updated_at=? WHERE id=?", (*fields.values(), _now(), series_id))
+    def _update(series_id: int) -> None:
+        if fields:
+            sets = ", ".join(f"{k}=?" for k in fields)
+            conn.execute(f"UPDATE series SET {sets}, updated_at=? WHERE id=?", (*fields.values(), _now(), series_id))
 
-        row = conn.execute("SELECT id FROM series WHERE name = ? AND year IS ?", (name, year)).fetchone()
-        if row:
-            series_id = row["id"]
+    row = conn.execute("SELECT id FROM series WHERE name = ? AND year IS ?", (name, year)).fetchone()
+    if row:
+        series_id = row["id"]
+        _update(series_id)
+    elif year is None:
+        # Same reasoning as upsert_movie above.
+        candidates = conn.execute("SELECT id FROM series WHERE name = ?", (name,)).fetchall()
+        if len(candidates) == 1:
+            series_id = candidates[0]["id"]
             _update(series_id)
-        elif year is None:
-            # Same reasoning as upsert_movie above.
-            candidates = conn.execute("SELECT id FROM series WHERE name = ?", (name,)).fetchall()
-            if len(candidates) == 1:
-                series_id = candidates[0]["id"]
-                _update(series_id)
-            else:
-                series_id = _insert(needs_review=1 if candidates else 0)
+        else:
+            series_id = _insert(needs_review=1 if candidates else 0)
+    else:
+        # Same normalized-title + year-proximity matching as upsert_movie
+        # above (beads-bzg.3) -- without this, series get the exact-string-
+        # only behavior that used to duplicate movies whenever a provider
+        # formatted the same title slightly differently.
+        target_key = _normalize_title_for_dedup(name)
+        nearby_rows = conn.execute(
+            "SELECT id, name FROM series WHERE year IS NOT NULL AND ABS(year - ?) <= 1", (year,),
+        ).fetchall()
+        candidates = [r for r in nearby_rows if _normalize_title_for_dedup(r["name"]) == target_key]
+        if len(candidates) == 1:
+            series_id = candidates[0]["id"]
+            _update(series_id)
         else:
             series_id = _insert()
 
-        _commit_with_retry(conn)
-        conn.close()
-        return series_id
+    _commit_with_retry(conn)
+    conn.close()
+    return series_id
 
 
 def _series_filter_clause(
@@ -6111,13 +6648,13 @@ def _series_filter_clause(
         where.append("s.id IN (SELECT series_id FROM series_category_placements WHERE category_id=?)")
         params.append(category_id)
     if provider_id is not None:
-        # At least one episode actually sourced from this provider — not
-        # import_provider_id, which only reflects whoever created the series
-        # row and undercounts providers that later merged episodes in.
-        where.append("""s.id IN (
-            SELECT e.series_id FROM episode_sources es JOIN episodes e ON e.id = es.episode_id
-            WHERE es.provider_id=?
-        )""")
+        # series_sources, not episode_sources: a newly imported series has no
+        # episode_sources row until get_series_info succeeds, so filtering on
+        # episode_sources excluded it from the very provider phase meant to
+        # enrich it. series_sources is written at catalog-import time and
+        # reflects every provider a series is known to belong to, including
+        # ones that haven't been detail-enriched yet.
+        where.append("s.id IN (SELECT series_id FROM series_sources WHERE provider_id=?)")
         params.append(provider_id)
     clause = f"WHERE {' AND '.join(where)}" if where else ""
     return clause, params
@@ -6157,36 +6694,6 @@ def list_all_series_ids(
     rows = conn.execute(f"SELECT s.id FROM series s {clause}", params).fetchall()
     conn.close()
     return [r["id"] for r in rows]
-
-
-def list_known_series_missing_year() -> list[dict]:
-    """Known, non-adult TV identities whose provider omitted the year."""
-    conn = _connect()
-    rows = conn.execute("""
-        SELECT id, tmdb_id FROM series
-        WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> ''
-          AND year IS NULL AND is_adult=0 AND review_excluded=0
-        ORDER BY id
-    """).fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
-
-
-def apply_series_tmdb_identity_batch(items: list[dict]) -> None:
-    """Write provider-free TV identity results without marking episodes fresh."""
-    if not items:
-        return
-    with _WRITE_LOCK:
-        conn = _connect()
-        for item in items:
-            fields = item["fields"]
-            sets = ", ".join(f"{key}=?" for key in fields)
-            conn.execute(
-                f"UPDATE series SET {sets}, updated_at=? WHERE id=?",
-                (*fields.values(), _now(), item["series_id"]),
-            )
-        _commit_with_retry(conn)
-        conn.close()
 
 
 def list_series_placements_for_ids(series_ids: list[int]) -> dict[int, list[dict]]:
@@ -6278,12 +6785,40 @@ def set_series_enrichment(series_id: int, **fields) -> None:
         conn.close()
 
 
+def apply_series_tmdb_metadata_batch(items: list[dict]) -> None:
+    """Persist canonical TMDB series metadata in one bounded transaction.
+
+    Only successful TMDB payloads reach this function. The marker is left
+    NULL for a bad or temporarily unavailable TMDB id, so a later import can
+    retry it; raw provider names remain solely on series_sources.
+    """
+    if not items:
+        return
+    with _WRITE_LOCK:
+        conn = _connect()
+        for item in items:
+            try:
+                with _item_savepoint(conn):
+                    fields = dict(item["fields"])
+                    fields["tmdb_metadata_enriched_at"] = _now()
+                    sets = ", ".join(f"{key}=?" for key in fields)
+                    conn.execute(
+                        f"UPDATE series SET {sets}, updated_at=? WHERE id=?",
+                        (*fields.values(), _now(), item["series_id"]),
+                    )
+            except Exception as exc:
+                logger.warning("[apply_series_tmdb_metadata_batch] skipped series_id=%s: %s", item["series_id"], exc)
+        _commit_with_retry(conn)
+        conn.close()
+
+
 def list_series_sources(series_id: int) -> list[dict]:
     """Every provider recorded as carrying this series -- enrich_series
-    loops over this instead of only ever calling back to
-    series.import_provider_id, the single legacy "primary provider" column.
-    Ordered by id so a series' original/longest-known source is tried
-    first, an arbitrary but stable tie-break."""
+    loops over this (added 2026-09-09 for series/episode failover) instead
+    of only ever calling back to series.import_provider_id, the single
+    legacy "primary provider" column. Ordered by id so a series' original/
+    longest-known source is tried first, which is an arbitrary but stable
+    tie-break -- there's no meaningful "best" provider to prefer otherwise."""
     conn = _connect()
     rows = conn.execute(
         """SELECT ss.*, p.name AS provider_name FROM series_sources ss
@@ -6298,20 +6833,32 @@ def list_series_sources(series_id: int) -> list[dict]:
 def series_source_needs_enrichment(source: dict) -> bool:
     """Per-source episode-discovery gate.
 
+    The import refresh is the presence reconciliation.  Once a source's
+    episode listing has been fetched, it stays clean until a future
+    provider-supplied source modification marker explicitly clears this
+    stamp (rather than re-fetching every listing on a blind TTL).
+
     Deliberately reads episodes_last_enriched_at, NOT last_seen_at --
     last_seen_at is also stamped by bulk_import_series's cheap catalog-list
     refresh (no episode data), which runs far more often than a full bulk
     enrich and would otherwise make a never-actually-fetched source look
     fresh forever. See episodes_last_enriched_at's migration comment."""
+    # A catalog refresh already tells us whether the source still exists.
+    # Do not re-request its complete episode listing merely because a timer
+    # elapsed; only a newly discovered source (or an explicit force action)
+    # needs this expensive provider call.  A future per-source provider
+    # modification marker can deliberately clear this stamp when the panel
+    # reports a changed series.
     return not source.get("episodes_last_enriched_at")
 
 
 def has_pending_series_source_enrichment(provider_id: int) -> bool:
     """Whether a provider has episode discovery work for pending ingestion.
 
-    Source-scoped: a canonical series may have sources from several
-    providers, but only a source whose episodes were never discovered
-    should consume an automatic enrichment lane."""
+    This is intentionally source-scoped: a canonical series may have sources
+    from several providers, but only a source whose episodes were never
+    discovered should consume an automatic enrichment lane.
+    """
     conn = _connect()
     row = conn.execute("""
         SELECT 1
@@ -6326,36 +6873,105 @@ def has_pending_series_source_enrichment(provider_id: int) -> bool:
     return row is not None
 
 
-def list_pending_series_sources(provider_id: int | None = None) -> list[dict]:
+def list_pending_series_sources(
+    provider_id: int | None = None, limit: int | None = None, series_ids: set[int] | None = None,
+) -> list[dict]:
     """Lists unprocessed episode-discovery sources, not just canonical series.
 
     A canonical series can retain several source variants from one provider.
     Automatic intake must visit every unstamped source so each fallback has
-    its own episode stream rows."""
+    its own episode stream rows.
+    """
     conn = _connect()
     provider_clause = ""
     params: tuple = ()
     if provider_id is not None:
         provider_clause = "AND ss.provider_id=?"
         params = (provider_id,)
+    series_clause = ""
+    if series_ids is not None:
+        ids = sorted({int(series_id) for series_id in series_ids})
+        if not ids:
+            conn.close()
+            return []
+        series_clause = f"AND ss.series_id IN ({','.join('?' * len(ids))})"
+        params = (*params, *ids)
+    limit_clause = " LIMIT ?" if limit is not None else ""
+    if limit is not None:
+        params = (*params, max(1, int(limit)))
     rows = conn.execute(f"""
         SELECT ss.id, ss.series_id, ss.provider_id
         FROM series_sources ss
         JOIN series s ON s.id=ss.series_id
         WHERE ss.episodes_last_enriched_at IS NULL
-          AND s.review_excluded=0
-          {provider_clause}
+           AND s.review_excluded=0
+           {provider_clause}
+           {series_clause}
         ORDER BY ss.id
+        {limit_clause}
     """, params).fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+
+def count_pending_series_sources(series_ids: set[int] | None = None) -> int:
+    conn = _connect()
+    series_clause = ""
+    params: list = []
+    if series_ids is not None:
+        ids = sorted({int(series_id) for series_id in series_ids})
+        if not ids:
+            conn.close()
+            return 0
+        series_clause = f"AND ss.series_id IN ({','.join('?' * len(ids))})"
+        params.extend(ids)
+    row = conn.execute(f"""
+        SELECT COUNT(*) AS c
+        FROM series_sources ss
+        JOIN series s ON s.id=ss.series_id
+          WHERE ss.episodes_last_enriched_at IS NULL
+           AND s.review_excluded=0
+           {series_clause}
+    """, params).fetchone()
+    conn.close()
+    return int(row["c"])
+
+
+def get_series_episode_summaries(series_ids: set[int] | list[int] | None) -> dict[int, dict]:
+    """Return compact series-level episode totals for sync reports."""
+    ids = sorted({int(series_id) for series_id in (series_ids or [])})
+    if not ids:
+        return {}
+    conn = _connect()
+    rows = conn.execute(
+        f"""SELECT s.id, s.name, s.year,
+                    COUNT(DISTINCT e.id) AS episode_count,
+                    COUNT(DISTINCT e.season_number) AS season_count,
+                    COUNT(DISTINCT es.id) AS episode_source_count
+               FROM series s
+               LEFT JOIN episodes e ON e.series_id=s.id
+               LEFT JOIN episode_sources es ON es.episode_id=e.id
+              WHERE s.id IN ({','.join('?' * len(ids))})
+              GROUP BY s.id""",
+        ids,
+    ).fetchall()
+    conn.close()
+    return {
+        int(row["id"]): {
+            "title": row["name"], "year": row["year"],
+            "episode_count": int(row["episode_count"]),
+            "season_count": int(row["season_count"]),
+            "episode_source_count": int(row["episode_source_count"]),
+        }
+        for row in rows
+    }
 
 
 def set_series_source_enrichment(series_id: int, provider_id: int, provider_series_id: str) -> None:
     with _WRITE_LOCK:
         conn = _connect()
         conn.execute(
-            "UPDATE series_sources SET last_seen_at=?, episodes_last_enriched_at=?, "
+            "UPDATE series_sources SET last_seen_at=?, episodes_last_enriched_at=?, provider_detail_deferred=0, "
             "consecutive_failures=0, last_failed_at=NULL "
             "WHERE series_id=? AND provider_id=? AND provider_series_id=?",
             (_now(), _now(), series_id, provider_id, provider_series_id),
@@ -6385,11 +7001,11 @@ def backfill_series_sources() -> int:
     """One-time migration helper: every existing series with a legacy
     import_provider_id/import_provider_series_id but no matching
     series_sources row yet gets one created from those columns, so nothing
-    already-imported regresses the moment enrich_series switches from
-    reading series.import_provider_id directly to reading series_sources
-    instead. Safe to call more than once -- INSERT OR IGNORE against the
-    same UNIQUE(provider_id, provider_series_id) constraint series_sources
-    already enforces."""
+    already-imported regresses (loses its only known provider) the moment
+    enrich_series switches from reading series.import_provider_id directly
+    to reading series_sources instead. Safe to call more than once --
+    INSERT OR IGNORE against the same UNIQUE(provider_id,
+    provider_series_id) constraint series_sources already enforces."""
     with _WRITE_LOCK:
         conn = _connect()
         now = _now()
@@ -6505,11 +7121,7 @@ def add_episode_source(
     reports category at the series level, not per-episode (see
     vod_importer.enrich_series, which reads it back off the series row --
     bulk_import_series is what stamps it there, since episodes aren't known
-    yet at that earlier, cheap bulk-list stage).
-
-    language: derived from raw_name via _source_language so the row is
-    playback/export-filterable by config.get_enabled_languages() as soon as
-    it's written, not only after a manual backfill run."""
+    yet at that earlier, cheap bulk-list stage)."""
     with _WRITE_LOCK:
         conn = _connect()
         source_id = _add_episode_source_row(
@@ -6545,7 +7157,7 @@ def _add_episode_source_row(
                provider_category_name=excluded.provider_category_name,
                bitrate=COALESCE(excluded.bitrate, episode_sources.bitrate),
                language=excluded.language""",
-        (episode_id, provider_id, provider_stream_id, container_extension, file_size_bytes, local_file_path, raw_name, provider_category_name, bitrate, _source_language(raw_name, provider_category_name), _now(), _now()),
+        (episode_id, provider_id, provider_stream_id, container_extension, file_size_bytes, local_file_path, raw_name, provider_category_name, bitrate, _source_language(raw_name), _now(), _now()),
     )
     return conn.execute(
         "SELECT id FROM episode_sources WHERE provider_id=? AND provider_stream_id=?",
@@ -6559,10 +7171,13 @@ def enrich_series_episodes_batch(series_id: int, provider_id: int, episodes: lis
     vod_importer.enrich_series's old per-episode add_episode +
     add_episode_source (+ conditional set_episode_source_bitrate) calls,
     which each independently acquired _WRITE_LOCK, opened a connection, and
-    did a full fsync-backed commit -- a 20-episode series was up to 40
-    separately-locked, separately-fsynced writes, contended against every
-    other concurrently-enriching series' own episode writes through the same
-    lock (bulk_enrich_all's series concurrency is 8).
+    did a full fsync-backed commit (see beads-3po) -- a 20-episode series was
+    up to 40 separately-locked, separately-fsynced writes, contended against
+    every other concurrently-enriching series' own episode writes through
+    the same lock (bulk_enrich_all's series concurrency is 8). Root-caused
+    live 2026-09-09/10: series enriched at ~0.6-0.7/sec vs. movies' ~22-25/sec,
+    a ~37x gap that was write-lock+fsync overhead multiplied by episode
+    count, not provider/network latency.
 
     One held connection + one _item_savepoint per episode (so one malformed
     episode's bad season/episode number or missing stream id can't lose the
@@ -6613,36 +7228,34 @@ def delete_series(series_id: int) -> None:
     something that's still provider-backed. episodes cascade via FK, which
     in turn cascades episode_sources; series_category_placements cascade
     off series directly."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        source_count = conn.execute("""
-            SELECT COUNT(*) c FROM episode_sources es
-            JOIN episodes e ON e.id = es.episode_id
-            WHERE e.series_id=?
-        """, (series_id,)).fetchone()["c"]
-        if source_count > 0:
-            conn.close()
-            raise ValueError(
-                f"Can't delete a series with {source_count} active episode source(s) -- the next catalog sync "
-                "would just re-import it fresh, with none of its archived/category state carried over. Archive "
-                "it instead; only sourceless orphans (see Orphan Checker) can be deleted."
-            )
-        conn.execute("DELETE FROM series WHERE id=?", (series_id,))
-        _commit_with_retry(conn)
+    conn = _connect()
+    source_count = conn.execute("""
+        SELECT COUNT(*) c FROM episode_sources es
+        JOIN episodes e ON e.id = es.episode_id
+        WHERE e.series_id=?
+    """, (series_id,)).fetchone()["c"]
+    if source_count > 0:
         conn.close()
+        raise ValueError(
+            f"Can't delete a series with {source_count} active episode source(s) -- the next catalog sync "
+            "would just re-import it fresh, with none of its archived/category state carried over. Archive "
+            "it instead; only sourceless orphans (see Orphan Checker) can be deleted."
+        )
+    conn.execute("DELETE FROM series WHERE id=?", (series_id,))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def set_series_adult(series_id: int, is_adult: bool) -> None:
     """Manual override — also stamps is_adult_manual so future auto-detection
     passes (see resync_adult_flags) never silently revert this."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute(
-            "UPDATE series SET is_adult=?, is_adult_manual=1, updated_at=? WHERE id=?",
-            (int(is_adult), _now(), series_id),
-        )
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute(
+        "UPDATE series SET is_adult=?, is_adult_manual=1, updated_at=? WHERE id=?",
+        (int(is_adult), _now(), series_id),
+    )
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def delete_episode_source(episode_id: int, source_id: int) -> None:
@@ -6650,26 +7263,25 @@ def delete_episode_source(episode_id: int, source_id: int) -> None:
     why this now also deletes the underlying file from disk, and why this
     isn't reference-counted against portal owners the way
     remove_episode_library_owner is."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        row = conn.execute("SELECT local_file_path FROM episode_sources WHERE id=? AND episode_id=?", (source_id, episode_id)).fetchone()
-        file_path = None
-        if row and row["local_file_path"]:
-            other_ref = conn.execute(
-                """SELECT 1 FROM episode_sources WHERE local_file_path=? AND id!=?
-                   UNION SELECT 1 FROM movie_sources WHERE local_file_path=? LIMIT 1""",
-                (row["local_file_path"], source_id, row["local_file_path"]),
-            ).fetchone()
-            if not other_ref:
-                file_path = row["local_file_path"]
-        conn.execute("DELETE FROM episode_sources WHERE id=? AND episode_id=?", (source_id, episode_id))
-        episode_row = conn.execute("SELECT series_id FROM episodes WHERE id=?", (episode_id,)).fetchone()
-        _purge_if_sourceless_episode(conn, episode_id)
-        if episode_row:
-            _purge_if_sourceless_series(conn, episode_row["series_id"])
-        _commit_with_retry(conn)
-        conn.close()
-        _delete_file_if_present(file_path)
+    conn = _connect()
+    row = conn.execute("SELECT local_file_path FROM episode_sources WHERE id=? AND episode_id=?", (source_id, episode_id)).fetchone()
+    file_path = None
+    if row and row["local_file_path"]:
+        other_ref = conn.execute(
+            """SELECT 1 FROM episode_sources WHERE local_file_path=? AND id!=?
+               UNION SELECT 1 FROM movie_sources WHERE local_file_path=? LIMIT 1""",
+            (row["local_file_path"], source_id, row["local_file_path"]),
+        ).fetchone()
+        if not other_ref:
+            file_path = row["local_file_path"]
+    conn.execute("DELETE FROM episode_sources WHERE id=? AND episode_id=?", (source_id, episode_id))
+    episode_row = conn.execute("SELECT series_id FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    _purge_if_sourceless_episode(conn, episode_id)
+    if episode_row:
+        _purge_if_sourceless_series(conn, episode_row["series_id"])
+    _commit_with_retry(conn)
+    conn.close()
+    _delete_file_if_present(file_path)
 
 
 def move_episode_source(source_id: int, episode_id: int, target_series_id: int, season_number: int, episode_number: int, name: str) -> int:
@@ -6679,23 +7291,22 @@ def move_episode_source(source_id: int, episode_id: int, target_series_id: int, 
     collision can just as easily land on a season/episode slot the correct
     series hasn't been given a row for yet, e.g. if this was the only
     source anyone had imported for it). Returns the target episode's id."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        if not conn.execute("SELECT 1 FROM series WHERE id=?", (target_series_id,)).fetchone():
-            conn.close()
-            raise ValueError(f"target series {target_series_id} not found")
+    conn = _connect()
+    if not conn.execute("SELECT 1 FROM series WHERE id=?", (target_series_id,)).fetchone():
         conn.close()
-        target_episode_id = add_episode(target_series_id, season_number, episode_number, name)
+        raise ValueError(f"target series {target_series_id} not found")
+    conn.close()
+    target_episode_id = add_episode(target_series_id, season_number, episode_number, name)
 
-        conn = _connect()
-        old_episode_row = conn.execute("SELECT series_id FROM episodes WHERE id=?", (episode_id,)).fetchone()
-        conn.execute("UPDATE episode_sources SET episode_id=? WHERE id=? AND episode_id=?", (target_episode_id, source_id, episode_id))
-        _purge_if_sourceless_episode(conn, episode_id)
-        if old_episode_row:
-            _purge_if_sourceless_series(conn, old_episode_row["series_id"])
-        _commit_with_retry(conn)
-        conn.close()
-        return target_episode_id
+    conn = _connect()
+    old_episode_row = conn.execute("SELECT series_id FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    conn.execute("UPDATE episode_sources SET episode_id=? WHERE id=? AND episode_id=?", (target_episode_id, source_id, episode_id))
+    _purge_if_sourceless_episode(conn, episode_id)
+    if old_episode_row:
+        _purge_if_sourceless_series(conn, old_episode_row["series_id"])
+    _commit_with_retry(conn)
+    conn.close()
+    return target_episode_id
 
 
 def list_failing_episode_sources_for_series(series_id: int, min_failures: int = 1) -> list[dict]:
@@ -6749,129 +7360,129 @@ def list_series_placements_for_category(category_id: int) -> list[dict]:
 
 
 def remove_series_from_category(series_id: int, category_id: int) -> None:
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute(
-            "DELETE FROM series_category_placements WHERE series_id=? AND category_id=?",
-            (series_id, category_id),
-        )
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute(
+        "DELETE FROM series_category_placements WHERE series_id=? AND category_id=?",
+        (series_id, category_id),
+    )
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def remove_series_from_all_categories(series_id: int) -> None:
     """See remove_movie_from_all_categories -- same reasoning, series side."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("DELETE FROM series_category_placements WHERE series_id=?", (series_id,))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("DELETE FROM series_category_placements WHERE series_id=?", (series_id,))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def place_series_in_category(series_id: int, category_id: int) -> int:
-    """Same virtual-file mechanism as place_movie_in_category, scoped to series."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        flagged = conn.execute("SELECT needs_year_review, review_excluded FROM series WHERE id=?", (series_id,)).fetchone()
-        if flagged and flagged["needs_year_review"]:
-            conn.close()
-            raise ValueError(f"series {series_id} needs year review before it can be placed in a category")
-        if flagged and flagged["review_excluded"]:
-            # See place_movie_in_category's identical guard/comment.
-            conn.close()
-            raise ValueError(f"series {series_id} is archived and cannot be placed in a category")
-        existing = conn.execute(
-            "SELECT export_series_id FROM series_category_placements WHERE series_id=? AND category_id=?",
-            (series_id, category_id),
-        ).fetchone()
-        if existing:
-            conn.close()
-            return existing["export_series_id"]
+    """Same virtual-file mechanism as place_movie_in_category, scoped to series.
 
-        placement_count = conn.execute(
-            "SELECT COUNT(*) c FROM series_category_placements WHERE series_id=?", (series_id,)
-        ).fetchone()["c"]
-        name_suffix = _ZW_MARKER * placement_count
+    Raises on a review_excluded=1 series -- see place_movie_in_category's
+    docstring (beads-4o6): archiving is enforced through category placement,
+    so this guard is required for the same reason there."""
+    conn = _connect()
+    flagged = conn.execute(
+        "SELECT needs_year_review, review_excluded FROM series WHERE id=?", (series_id,)
+    ).fetchone()
+    if flagged and flagged["needs_year_review"]:
+        conn.close()
+        raise ValueError(f"series {series_id} needs year review before it can be placed in a category")
+    if flagged and flagged["review_excluded"]:
+        conn.close()
+        raise ValueError(f"series {series_id} is archived (review_excluded) and cannot be placed in a category")
+    existing = conn.execute(
+        "SELECT export_series_id FROM series_category_placements WHERE series_id=? AND category_id=?",
+        (series_id, category_id),
+    ).fetchone()
+    if existing:
+        conn.close()
+        return existing["export_series_id"]
 
-        # See place_movie_in_category's matching comment -- same race, same fix.
-        conn.isolation_level = None
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            row = conn.execute(
-                "SELECT COALESCE(MAX(export_series_id), ?) m FROM series_category_placements",
-                (_SERIES_EXPORT_BASE - 1,),
-            ).fetchone()
-            export_series_id = max(row["m"] + 1, _SERIES_EXPORT_BASE)
+    placement_count = conn.execute(
+        "SELECT COUNT(*) c FROM series_category_placements WHERE series_id=?", (series_id,)
+    ).fetchone()["c"]
+    name_suffix = _ZW_MARKER * placement_count
 
-            conn.execute(
-                "INSERT INTO series_category_placements (series_id, category_id, export_series_id, name_suffix) VALUES (?,?,?,?)",
-                (series_id, category_id, export_series_id, name_suffix),
-            )
-            _commit_with_retry(conn)
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
-        return export_series_id
-
-
-def bulk_place_series_in_category(series_ids: list[int], category_id: int) -> int:
-    """Batch equivalent of place_series_in_category — see bulk_place_movies_in_category
-    (including the _chunked rationale and why this holds _WRITE_LOCK for the
-    whole call)."""
-    if not series_ids:
-        return 0
-    with _WRITE_LOCK:
-        conn = _connect()
-        already: set[int] = set()
-        for chunk in _chunked(series_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            already.update(r["series_id"] for r in conn.execute(
-                f"SELECT series_id FROM series_category_placements WHERE category_id=? AND series_id IN ({placeholders})",
-                (category_id, *chunk),
-            ).fetchall())
-        flagged: set[int] = set()
-        for chunk in _chunked(series_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            flagged.update(r["id"] for r in conn.execute(
-                f"SELECT id FROM series WHERE needs_year_review=1 AND id IN ({placeholders})", chunk,
-            ).fetchall())
-        if flagged:
-            logger.info("[vod_db] skipping %d series still needing year review for category=%s", len(flagged), category_id)
-        to_place = [sid for sid in series_ids if sid not in already and sid not in flagged]
-        if not to_place:
-            conn.close()
-            return 0
-
-        counts: dict[int, int] = {}
-        for chunk in _chunked(to_place):
-            placeholders = ",".join("?" for _ in chunk)
-            for r in conn.execute(
-                f"SELECT series_id, COUNT(*) c FROM series_category_placements WHERE series_id IN ({placeholders}) GROUP BY series_id",
-                chunk,
-            ).fetchall():
-                counts[r["series_id"]] = r["c"]
-
+    # See place_movie_in_category's matching comment -- same race, same fix.
+    conn.isolation_level = None
+    conn.execute("BEGIN IMMEDIATE")
+    try:
         row = conn.execute(
             "SELECT COALESCE(MAX(export_series_id), ?) m FROM series_category_placements",
             (_SERIES_EXPORT_BASE - 1,),
         ).fetchone()
-        next_id = max(row["m"] + 1, _SERIES_EXPORT_BASE)
+        export_series_id = max(row["m"] + 1, _SERIES_EXPORT_BASE)
 
-        rows = []
-        for sid in to_place:
-            name_suffix = _ZW_MARKER * counts.get(sid, 0)
-            rows.append((sid, category_id, next_id, name_suffix))
-            next_id += 1
-
-        conn.executemany(
+        conn.execute(
             "INSERT INTO series_category_placements (series_id, category_id, export_series_id, name_suffix) VALUES (?,?,?,?)",
-            rows,
+            (series_id, category_id, export_series_id, name_suffix),
         )
         _commit_with_retry(conn)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
         conn.close()
-        return len(rows)
+    return export_series_id
+
+
+def bulk_place_series_in_category(series_ids: list[int], category_id: int) -> int:
+    """Batch equivalent of place_series_in_category — see bulk_place_movies_in_category
+    (including the _chunked rationale)."""
+    if not series_ids:
+        return 0
+    conn = _connect()
+    already: set[int] = set()
+    for chunk in _chunked(series_ids):
+        placeholders = ",".join("?" for _ in chunk)
+        already.update(r["series_id"] for r in conn.execute(
+            f"SELECT series_id FROM series_category_placements WHERE category_id=? AND series_id IN ({placeholders})",
+            (category_id, *chunk),
+        ).fetchall())
+    flagged: set[int] = set()
+    for chunk in _chunked(series_ids):
+        placeholders = ",".join("?" for _ in chunk)
+        flagged.update(r["id"] for r in conn.execute(
+            f"SELECT id FROM series WHERE needs_year_review=1 AND id IN ({placeholders})", chunk,
+        ).fetchall())
+    if flagged:
+        logger.info("[vod_db] skipping %d series still needing year review for category=%s", len(flagged), category_id)
+    to_place = [sid for sid in series_ids if sid not in already and sid not in flagged]
+    if not to_place:
+        conn.close()
+        return 0
+
+    counts: dict[int, int] = {}
+    for chunk in _chunked(to_place):
+        placeholders = ",".join("?" for _ in chunk)
+        for r in conn.execute(
+            f"SELECT series_id, COUNT(*) c FROM series_category_placements WHERE series_id IN ({placeholders}) GROUP BY series_id",
+            chunk,
+        ).fetchall():
+            counts[r["series_id"]] = r["c"]
+
+    row = conn.execute(
+        "SELECT COALESCE(MAX(export_series_id), ?) m FROM series_category_placements",
+        (_SERIES_EXPORT_BASE - 1,),
+    ).fetchone()
+    next_id = max(row["m"] + 1, _SERIES_EXPORT_BASE)
+
+    rows = []
+    for sid in to_place:
+        name_suffix = _ZW_MARKER * counts.get(sid, 0)
+        rows.append((sid, category_id, next_id, name_suffix))
+        next_id += 1
+
+    conn.executemany(
+        "INSERT INTO series_category_placements (series_id, category_id, export_series_id, name_suffix) VALUES (?,?,?,?)",
+        rows,
+    )
+    _commit_with_retry(conn)
+    conn.close()
+    return len(rows)
 
 
 def get_series_export_rows() -> list[dict]:
@@ -6916,8 +7527,13 @@ def get_series_export_row_by_export_id(export_series_id: int) -> dict | None:
     return dict(row) if row else None
 
 
-def _episode_best_source_cte() -> str:
-    """See _best_source_cte's identical docstring -- episode equivalent."""
+def _episode_best_source_cte(*, extra_join: str = "", extra_where: str = "") -> str:
+    """See _best_source_cte's identical docstring -- episode equivalent.
+
+    Callers may scope the window-function input before SQLite ranks sources.
+    This matters for XC ``get_series_info``: without a scope, every series
+    request ranks every active episode source in the catalog first.
+    """
     lang_clause, _ = _enabled_languages_clause("es.language")
     return f"""
     WITH best_source AS (
@@ -6926,7 +7542,8 @@ def _episode_best_source_cte() -> str:
         ) AS rn
         FROM episode_sources es
         JOIN providers pr ON pr.id = es.provider_id
-        WHERE pr.is_active = 1 AND {lang_clause}
+        {extra_join}
+        WHERE pr.is_active = 1 AND {lang_clause} {extra_where}
     )
 """
 
@@ -6972,7 +7589,7 @@ def get_episode_export_row(episode_id: int) -> dict | None:
     the episode's own row id."""
     conn = _connect()
     _, lang_params = _enabled_languages_clause("es.language")
-    row = conn.execute(_episode_best_source_cte() + """
+    row = conn.execute(_episode_best_source_cte(extra_where="AND es.episode_id = ?") + """
         SELECT
             e.id AS episode_id, e.series_id AS series_id, e.season_number AS season_number,
             e.episode_number AS episode_number, e.name AS name, e.description AS description,
@@ -6982,7 +7599,7 @@ def get_episode_export_row(episode_id: int) -> dict | None:
         FROM episodes e
         LEFT JOIN best_source es ON es.episode_id = e.id AND es.rn = 1
         WHERE e.id = ?
-    """, (*lang_params, episode_id)).fetchone()
+    """, (*lang_params, episode_id, episode_id)).fetchone()
     conn.close()
     if not row:
         return None
@@ -7007,7 +7624,10 @@ def get_episode_export_rows_for_series(series_id: int) -> list[dict]:
     every other request until it finished."""
     conn = _connect()
     _, lang_params = _enabled_languages_clause("es.language")
-    rows = conn.execute(_episode_best_source_cte() + """
+    rows = conn.execute(_episode_best_source_cte(
+        extra_join="JOIN episodes target_episode ON target_episode.id = es.episode_id",
+        extra_where="AND target_episode.series_id = ?",
+    ) + """
         SELECT
             e.id AS episode_id, e.series_id AS series_id, e.season_number AS season_number,
             e.episode_number AS episode_number, e.name AS name, e.description AS description,
@@ -7018,7 +7638,7 @@ def get_episode_export_rows_for_series(series_id: int) -> list[dict]:
         LEFT JOIN best_source es ON es.episode_id = e.id AND es.rn = 1
         WHERE e.series_id = ?
         ORDER BY e.season_number, e.episode_number
-    """, (*lang_params, series_id)).fetchall()
+    """, (*lang_params, series_id, series_id)).fetchall()
     conn.close()
     results = [dict(r) for r in rows]
     for r in results:
@@ -7046,12 +7666,24 @@ def _looks_adult(*category_names) -> bool:
     return False
 
 
+def _catalog_fingerprint_from_item(kind: str, item: dict) -> str:
+    """Fallback for direct/test callers that predate importer fingerprints."""
+    fields = (
+        ("provider_stream_id", "name", "year", "container_extension", "provider_category_name", "raw_name", "tmdb_id", "poster_url")
+        if kind == "movie" else
+        ("provider_series_id", "name", "year", "provider_category_name", "raw_name", "genre", "description", "cast_list", "director", "poster_url", "rating", "release_date", "tmdb_id", "provider_last_modified")
+    )
+    payload = {field: item.get(field) for field in fields}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+
+
 def bulk_import_movies(provider_id: int, items: list[dict], _retry_depth: int = 0) -> dict:
     """items: [{name, year, provider_stream_id, container_extension, provider_category_name, auto_archive}, ...],
     optionally carrying tmdb_id and poster_url. Some providers' bulk
-    get_vod_streams lists already include these (unlike genre/cast/plot,
-    which never appear there; see bulk_import_series's richer capture for
-    series). Both only fill a missing canonical value, never overwrite one.
+    get_vod_streams list already includes these (unlike genre/cast/plot,
+    which never appear there; see bulk_import_series's identical-but-richer
+    capture for series). Both only fill a missing canonical value, never
+    overwrite an already-known value.
 
     Adult-content auto-detection runs on every import pass (not just first
     creation) so a provider re-categorizing something later still gets
@@ -7059,15 +7691,23 @@ def bulk_import_movies(provider_id: int, items: list[dict], _retry_depth: int = 
     is_adult to True from a matching category name, never downgrades, and
     never touches a row a human has manually corrected (is_adult_manual=1).
 
-    auto_archive (see vod_importer._should_auto_archive) mirrors the
-    is_adult/is_adult_manual upgrade-only pattern in BOTH directions: it can
-    archive an item, and if the item is already archived but was archived
-    automatically (review_excluded_manual=0), it can also un-archive it once
-    no active rule matches it any more -- e.g. an admin removes a category
-    from a provider's exclude list, then re-imports. A human's manual
-    archive/restore (bulk_set_review_excluded, review_excluded_manual=1) is
-    never touched in either direction -- that's what review_excluded_manual
-    exists to protect.
+    auto_archive archives new matches and preserves an existing automatic
+    archive when a later provider contributes the same title. Only an exact
+    re-import of the already-known provider source may clear an automatic
+    archive when should_archive goes False. A human's manual archive/restore
+    (bulk_set_review_excluded, review_excluded_manual=1) is never touched --
+    that's what review_excluded_manual exists to protect.
+
+    Provider-level category/uncategorized exclusion and the global language
+    exclusion rule no longer set auto_archive=True to reach this behavior --
+    per user direction (2026-09-10, follow-up to beads-974), an excluded
+    item is now filtered out of the items list entirely by the caller
+    (vod_importer._should_exclude_from_import, formerly _should_auto_
+    archive) before it ever reaches this function, so it's never stored at
+    all rather than stored-then-archived. auto_archive/should_archive stay
+    wired up here for any other caller that still wants the archive (not
+    skip) behavior; see vod_db.purge_excluded_archived_content for the
+    one-time cleanup of rows that were archived under the old behavior.
     """
     _WRITE_LOCK.acquire()
     try:
@@ -7079,309 +7719,401 @@ def bulk_import_movies(provider_id: int, items: list[dict], _retry_depth: int = 
         errors = 0
         archived = 0
         unarchived = 0
+        sources_changed = 0
+        changed_movie_ids: set[int] = set()
+        created_movie_ids: set[int] = set()
         lock_retry_items = []
-        # Committed every batch_size items rather than once at the very end (see
-        # _commit_with_retry's docstring) -- a real XC catalog is thousands of
-        # items, and holding one uncommitted transaction open for the whole loop
-        # made this a bad neighbor to every other background writer (enrichment,
-        # TMDB sync, category schedules, a concurrent provider's own import):
-        # they'd block on the write lock for the full 30s connect timeout and
-        # then fail with "database is locked" -- confirmed as the root cause of a
-        # real user's flood of exactly that warning during import. 200 wasn't
-        # small enough: the writer lock is held for the WHOLE batch (SAVEPOINTs
-        # don't release it, only the periodic commit does), and 200 items' worth
-        # of per-item SELECT/INSERT/UPDATE queries can itself run long enough to
-        # outlast even a 30s busy_timeout under real load -- confirmed live
-        # 2026-07-30: a provider's manually-triggered import collided with
-        # bulk_enrich_all's 8 concurrent writers running against a different
-        # provider and lost ~48% of its items to permanent lock errors even after
-        # all 3 retry passes. Matches bulk_import_plex_series's existing 20.
-        batch_size = 25
-        for i, item in enumerate(items):
-            try:
-                with _item_savepoint(conn):
+        # Chunked at 1000 items/round-trip instead of the old one-SELECT-plus-
+        # one-or-more-writes-PER-ITEM loop (up to 5 individual statements x
+        # 180K+ items in a real two-account import, confirmed live 2026-09-08
+        # as a multi-hour import). Each chunk now does a small constant number
+        # of bulk `WHERE ... IN (...)` SELECTs up front, resolves every item's
+        # branch (create/match/archive/flag) against those in-memory dicts --
+        # byte-for-byte the same decision logic as the old per-item version,
+        # just evaluated against a prefetched snapshot instead of a live
+        # per-item query -- then applies all writes for the chunk via
+        # `executemany`. Modeled on Dispatcharr's own VOD import
+        # (apps/vod/tasks.py: bulk-fetch existing keys by IN-query, diff in a
+        # Python dict, `bulk_create`/`bulk_update` per chunk) after comparing
+        # its ~1000x-fewer-round-trips approach against this function's
+        # original row-by-row design (see beads-otn).
+        #
+        # The write lock is still released/reacquired between chunks (see the
+        # loop below) for the same reason as the old batch_size=25 commit
+        # cadence: holding it for the whole import starves every other writer
+        # (enrichment, a concurrent provider's own import) with no timeout --
+        # confirmed live 2026-07-31/07-30, see _WRITE_LOCK's docstring. A
+        # 1000-item chunk's SELECTs+executemany run fast enough (bulk, not
+        # per-item) that this no longer needs to be as small as 25 to keep
+        # each lock-hold window short.
+        chunk_size = 1000
+        for chunk_start in range(0, len(items), chunk_size):
+            chunk = items[chunk_start:chunk_start + chunk_size]
+
+            # -- Bulk-fetch every lookup this chunk could possibly need, in a
+            # small constant number of round trips, instead of one SELECT per
+            # item. Every dict below is keyed exactly the way the old
+            # per-item queries were keyed, so the branch logic per item is
+            # unchanged -- only where the row comes from differs.
+            stream_ids = [item["provider_stream_id"] for item in chunk]
+            sources_by_stream_id: dict[str, sqlite3.Row] = {}
+            for i in range(0, len(stream_ids), 900):
+                sub = stream_ids[i:i + 900]
+                placeholders = ",".join("?" * len(sub))
+                rows = conn.execute(
+                    f"SELECT provider_stream_id, movie_id, catalog_fingerprint FROM movie_sources "
+                    f"WHERE provider_id=? AND provider_stream_id IN ({placeholders})",
+                    (provider_id, *sub),
+                ).fetchall()
+                for row in rows:
+                    sources_by_stream_id[row["provider_stream_id"]] = row
+
+            matched_movie_ids = {row["movie_id"] for row in sources_by_stream_id.values()}
+            movies_by_id: dict[int, sqlite3.Row] = {}
+            if matched_movie_ids:
+                ids = list(matched_movie_ids)
+                for i in range(0, len(ids), 900):
+                    sub = ids[i:i + 900]
+                    placeholders = ",".join("?" * len(sub))
+                    rows = conn.execute(
+                        f"SELECT id, tmdb_id, is_adult, is_adult_manual, review_excluded, review_excluded_manual "
+                        f"FROM movies WHERE id IN ({placeholders})", sub,
+                    ).fetchall()
+                    for row in rows:
+                        movies_by_id[row["id"]] = row
+
+            # Only items with no provider_stream_id match need name/year
+            # lookups -- same short-circuit the old per-item code had via
+            # elif/else, just computed once per chunk instead of per item.
+            unresolved = [item for item in chunk if item["provider_stream_id"] not in sources_by_stream_id]
+            name_year_pairs = {(item["name"], item.get("year")) for item in unresolved if item["name"].strip()}
+            # (name, year) -> list of candidate rows (usually one, but a
+            # title already split by language -- beads-974 Step 3 -- can
+            # have several movies rows sharing the same (name, year), one
+            # per language). movies_by_name mirrors this for the year=None
+            # branch. The right candidate for a given item is picked by
+            # language further down, not just "first row found".
+            #
+            # Keyed by _import_match_key_name(name), NOT the raw name --
+            # so "15 Storeys High" and "15 Storeys High (2002)" (or a
+            # trailing "(GB)"/"(PL)"/"(US)" country-of-origin tag some
+            # providers append) bucket together instead of silently
+            # creating sibling duplicate rows. This only affects the
+            # in-memory LOOKUP KEY; the `name` column actually stored/
+            # displayed on each row is completely untouched.
+            movies_by_name_year: dict[tuple[str, object], list[sqlite3.Row]] = {}
+            names_needing_candidates = {_import_match_key_name(item["name"]) for item in unresolved if item["name"].strip() and item.get("year") is None}
+            movies_by_name: dict[str, list[sqlite3.Row]] = {}
+            if name_year_pairs:
+                # Query by both the raw incoming name AND its normalized
+                # match key -- an existing row stored under the bare title
+                # (no suffix) only ever matches the normalized-key form, an
+                # existing row stored with the same suffix the incoming item
+                # has only ever matches the raw form. Querying both catches
+                # either ordering; the in-memory buckets below then group
+                # everything found under the shared normalized key.
+                names = list({n for n, _ in name_year_pairs} | {_import_match_key_name(n) for n, _ in name_year_pairs})
+                for i in range(0, len(names), 900):
+                    sub = names[i:i + 900]
+                    placeholders = ",".join("?" * len(sub))
+                    rows = conn.execute(
+                        f"SELECT id, name, year, tmdb_id, is_adult, is_adult_manual, review_excluded, review_excluded_manual "
+                        f"FROM movies WHERE name IN ({placeholders})", sub,
+                    ).fetchall()
+                    for row in rows:
+                        match_key = _import_match_key_name(row["name"])
+                        movies_by_name_year.setdefault((match_key, row["year"]), []).append(row)
+                        if match_key in names_needing_candidates:
+                            movies_by_name.setdefault(match_key, []).append(row)
+
+            # beads-974 (import-path gap): language sets for every candidate
+            # movie this chunk might match, so each match branch below can
+            # refuse to attach a language-conflicting item -- same
+            # COALESCE-to-EN/overlap rule as _shares_a_language, just
+            # prefetched in bulk instead of queried per item. Covers
+            # stream-id matches (movies_by_id), name/year matches, and
+            # single-candidate-name matches in one shot.
+            language_candidate_ids = set(movies_by_id.keys())
+            for rows in movies_by_name_year.values():
+                language_candidate_ids.update(row["id"] for row in rows)
+            movie_languages: dict[int, set[str]] = {}
+            if language_candidate_ids:
+                ids = list(language_candidate_ids)
+                for i in range(0, len(ids), 900):
+                    sub = ids[i:i + 900]
+                    placeholders = ",".join("?" * len(sub))
+                    rows = conn.execute(
+                        f"SELECT movie_id, COALESCE(language, 'EN') AS lang FROM movie_sources "
+                        f"WHERE movie_id IN ({placeholders})", sub,
+                    ).fetchall()
+                    for row in rows:
+                        movie_languages.setdefault(row["movie_id"], set()).add(row["lang"])
+
+            def _movie_language_ok(movie_id: int, item_lang: str) -> bool:
+                # A candidate with no sources yet (e.g. registered this same
+                # chunk via the negative-placeholder scheme below) has
+                # nothing to conflict with.
+                existing = movie_languages.get(movie_id)
+                return not existing or item_lang in existing
+
+            # -- Resolve every item's identity/branch against the prefetched
+            # dicts above (identical decision tree to the old per-item
+            # version), collecting writes to apply in bulk below instead of
+            # executing them one at a time.
+            movie_updates_adult: list[tuple] = []
+            movie_updates_archive: list[tuple] = []
+            movie_updates_unarchive: list[tuple] = []
+            movie_updates_tmdb: list[tuple] = []
+            movie_inserts: list[tuple] = []  # (name, year, is_adult, needs_year_review, review_excluded, poster_url, created_at)
+            movie_source_upserts: list[tuple] = []
+            # Each entry resolved below either already has a real movie_id
+            # (matched an existing row) or is a pending insert referenced by
+            # its position in movie_inserts -- resolved to a real id only
+            # after the bulk INSERT runs (SQLite has no multi-row RETURNING
+            # id here), same as the old code getting `cur.lastrowid`
+            # per-item, just deferred to right after the bulk insert instead
+            # of inline.
+            #
+            # movies_by_name_year/movies_by_name are updated in place as new
+            # rows are queued below (not just read from the initial
+            # snapshot) -- otherwise two items in the same chunk sharing a
+            # brand-new (name, year) (a real case: the same title filed under
+            # two provider categories) would both miss the snapshot and both
+            # get inserted, creating a duplicate the old live-requery,
+            # one-item-at-a-time code would never have produced. A pending
+            # insert's id isn't known yet (no id until the bulk INSERT flush
+            # below runs), so it's represented by a plain dict carrying its
+            # insert_index instead of a real sqlite3.Row.
+            pending: list[dict] = []
+
+            for item in chunk:
+                try:
                     name = item["name"]
+                    match_key = _import_match_key_name(name)
                     year = item.get("year")
                     category_looks_adult = _looks_adult(item.get("provider_category_name"))
                     should_archive = bool(item.get("auto_archive"))
-                    # Counted locally and only folded into the real created/matched/
-                    # flagged/archived totals once this item's last statement has
-                    # actually succeeded -- incrementing the outer counters
-                    # immediately would drift them out of sync with what's really
-                    # in the DB if a later statement in this same item (e.g. the
-                    # movie_sources insert below) goes on to raise and roll this
-                    # item back.
+                    movie_id = None
+                    insert_index = None
                     did_create = did_match = did_flag = did_archive = did_unarchive = False
-                    # Primary match: this exact provider+stream_id was already
-                    # imported before -- reuse its established movie_id directly,
-                    # UNCONDITIONALLY (checked before any name-based matching,
-                    # not just for a blank name), rather than re-deriving identity
-                    # from name/year on every single re-import. This is what makes
-                    # it safe for enrichment (vod_importer.enrich_movie) to
-                    # overwrite a raw-filename/placeholder name with the
-                    # provider's own clean title without the NEXT re-import
-                    # creating a duplicate orphaned row: a re-import's identity
-                    # now comes from provider_stream_id, not from re-matching a
-                    # (now-different) name string. Real gap closed here, found
-                    # live 2026-07-29: enrichment already fetches a movie's clean
-                    # title from get_vod_info but had nowhere safe to persist it,
-                    # because every earlier version of this function re-derived
-                    # identity from (name, year) on every single pass -- writing
-                    # the clean name would have silently duplicated on the very
-                    # next refresh.
-                    existing_source = conn.execute(
-                        "SELECT movie_id FROM movie_sources WHERE provider_id=? AND provider_stream_id=?",
-                        (provider_id, item["provider_stream_id"]),
-                    ).fetchone()
-                    if existing_source:
+
+                    item_lang = _source_language(item.get("raw_name"))
+                    existing_source = sources_by_stream_id.get(item["provider_stream_id"])
+                    source_fingerprint = item.get("catalog_fingerprint") or _catalog_fingerprint_from_item("movie", item)
+                    source_changed = not existing_source or existing_source["catalog_fingerprint"] != source_fingerprint
+                    if existing_source and _movie_language_ok(existing_source["movie_id"], item_lang):
                         movie_id = existing_source["movie_id"]
                         did_match = True
-                        existing = conn.execute(
-                            "SELECT is_adult, is_adult_manual, review_excluded, review_excluded_manual FROM movies WHERE id=?", (movie_id,)
-                        ).fetchone()
+                        existing = movies_by_id.get(movie_id)
                         if existing:
                             if category_looks_adult and not existing["is_adult"] and not existing["is_adult_manual"]:
-                                conn.execute("UPDATE movies SET is_adult=1 WHERE id=?", (movie_id,))
+                                movie_updates_adult.append((movie_id,))
                             if should_archive and not existing["review_excluded"] and not existing["review_excluded_manual"]:
-                                conn.execute("UPDATE movies SET review_excluded=1 WHERE id=?", (movie_id,))
-                                conn.execute("DELETE FROM movie_category_placements WHERE movie_id=?", (movie_id,))
+                                movie_updates_archive.append((movie_id,))
                                 did_archive = True
                             elif not should_archive and existing["review_excluded"] and not existing["review_excluded_manual"]:
-                                # Mirror of the archive branch above -- no active
-                                # rule matches this item any more (see this
-                                # function's docstring), so lift an
-                                # automatically-applied archive.
-                                conn.execute("UPDATE movies SET review_excluded=0 WHERE id=?", (movie_id,))
+                                movie_updates_unarchive.append((movie_id,))
                                 did_unarchive = True
                     elif not name.strip():
-                        # A blank provider-supplied name has no real identity to match
-                        # on -- treating "" like any other string let unrelated titles
-                        # silently collapse into one shared row (a real corruption found
-                        # in production: 3 completely unrelated movies from the same
-                        # provider, different genres, merged into a single blank-named
-                        # entry because they all matched (name='', year=NULL) exactly).
-                        # Never match a blank name against anything, including another
-                        # blank one -- reaching this branch at all already means the
-                        # existing_source check above found no established identity for
-                        # this stream, so this is a genuinely new item.
                         placeholder = f"[Untitled] {(item.get('provider_category_name') or '').strip() or 'Unknown'} · stream {item['provider_stream_id']}"
-                        cur = conn.execute(
-                            "INSERT INTO movies (name, year, is_adult, needs_year_review, review_excluded, poster_url, created_at) VALUES (?,?,?,?,?,?,?)",
-                            (placeholder, year, int(category_looks_adult), 1, int(should_archive), item.get("poster_url"), now),
-                        )
-                        movie_id = cur.lastrowid
+                        insert_index = len(movie_inserts)
+                        movie_inserts.append((placeholder, year, int(category_looks_adult), 1, int(should_archive), item.get("poster_url"), now))
                         did_create = True
                         did_flag = True
                         did_archive = should_archive
                     else:
-                        row = conn.execute(
-                            "SELECT id, is_adult, is_adult_manual, review_excluded, review_excluded_manual FROM movies WHERE name=? AND year IS ?",
-                            (name, year),
-                        ).fetchone()
+                        # beads-974 (import-path gap): among same-(name,year)
+                        # candidates -- there can be more than one once a
+                        # title has been split by language -- only accept a
+                        # match whose existing sources share a language with
+                        # this item (COALESCE-to-EN, overlap not equality).
+                        # A conflicting-language candidate is treated as no
+                        # match so it falls through to create-or-reuse-sibling
+                        # below, instead of re-mixing the split back together.
+                        row = next(
+                            (r for r in movies_by_name_year.get((match_key, year), [])
+                             if _movie_language_ok(r["id"], item_lang)),
+                            None,
+                        )
                         if row:
                             movie_id = row["id"]
                             did_match = True
                             if category_looks_adult and not row["is_adult"] and not row["is_adult_manual"]:
-                                conn.execute("UPDATE movies SET is_adult=1 WHERE id=?", (movie_id,))
+                                movie_updates_adult.append((movie_id,))
                             if should_archive and not row["review_excluded"] and not row["review_excluded_manual"]:
-                                conn.execute("UPDATE movies SET review_excluded=1 WHERE id=?", (movie_id,))
-                                # Becoming archived doesn't just set a flag -- it has to
-                                # actually remove any existing category placement, or
-                                # Dispatcharr keeps seeing it via whatever category it
-                                # was already in (the exact bug this whole block exists
-                                # to fix -- see evaluate_smart_category's docstring).
-                                conn.execute("DELETE FROM movie_category_placements WHERE movie_id=?", (movie_id,))
+                                movie_updates_archive.append((movie_id,))
                                 did_archive = True
                         elif year is None:
-                            # No exact (name, NULL) row, and no year to key an exact match
-                            # on -- same reasoning as upsert_movie: exactly one same-named
-                            # candidate means this is almost certainly it, just missing year
-                            # metadata from this provider; two or more is genuinely
-                            # ambiguous, flag rather than silently duplicate.
-                            candidates = conn.execute(
-                                "SELECT id, tmdb_id, review_excluded, review_excluded_manual FROM movies WHERE name=?", (name,)
-                            ).fetchall()
-                            # Requiring the sole candidate to already carry a
-                            # confirmed tmdb_id (found live on @Knm's fork,
-                            # "Inherit confirmed identities across providers"
-                            # 2026-09-16): without a year OR a corroborating
-                            # id, a same-name-only match is really just a
-                            # coincidence between two DIFFERENT real titles
-                            # that happen to share a name -- attaching a new
-                            # source to it would be a silent wrong merge, not
-                            # a real match. An unconfirmed candidate now falls
-                            # through to the create-new-row branch below
-                            # (same as zero candidates), which is exactly
-                            # correct: a real title deserves its own row
-                            # until something actually corroborates the
-                            # match.
+                            all_candidates = movies_by_name.get(match_key, [])
+                            candidates = [c for c in all_candidates if _movie_language_ok(c["id"], item_lang)]
                             if len(candidates) == 1 and candidates[0]["tmdb_id"]:
                                 movie_id = candidates[0]["id"]
                                 did_match = True
-                                # Same archive-upgrade check as the exact (name, year)
-                                # match above -- a null-year row matched this way is
-                                # just as real a match, and must not silently skip
-                                # becoming archived (a real bug: this branch used to
-                                # apply no exclusion rules at all, so a null-year
-                                # movie/series could never be caught by language/
-                                # category import exclusion no matter how many times
-                                # the catalog was re-imported).
                                 if should_archive and not candidates[0]["review_excluded"] and not candidates[0]["review_excluded_manual"]:
-                                    conn.execute("UPDATE movies SET review_excluded=1 WHERE id=?", (movie_id,))
-                                    conn.execute("DELETE FROM movie_category_placements WHERE movie_id=?", (movie_id,))
+                                    movie_updates_archive.append((movie_id,))
                                     did_archive = True
                             else:
-                                cur = conn.execute(
-                                    "INSERT INTO movies (name, year, is_adult, needs_year_review, review_excluded, poster_url, created_at) VALUES (?,?,?,?,?,?,?)",
-                                    (name, year, int(category_looks_adult), 1 if candidates else 0, int(should_archive), item.get("poster_url"), now),
-                                )
-                                movie_id = cur.lastrowid
+                                insert_index = len(movie_inserts)
+                                # needs_year_review/did_flag reflect whether the
+                                # NAME alone is ambiguous (multiple same-named
+                                # movies exist, regardless of language) -- use
+                                # the unfiltered candidate list, not the
+                                # language-filtered one, so a language mismatch
+                                # alone doesn't spuriously flag an otherwise
+                                # unambiguous title for review.
+                                movie_inserts.append((name, year, int(category_looks_adult), 1 if all_candidates else 0, int(should_archive), item.get("poster_url"), now))
                                 did_create = True
                                 did_archive = should_archive
-                                if candidates:
+                                if all_candidates:
                                     did_flag = True
+                                # Register this brand-new row immediately so a
+                                # later item in the same chunk with the same
+                                # name (still year=None) sees it as a
+                                # same-named candidate -- matches what a live
+                                # per-item requery would have found on the
+                                # next item's SELECT. "id" is a negative
+                                # placeholder (-1 - insert_index) resolved to
+                                # a real id in the flush step below, once the
+                                # bulk INSERT has actually run.
+                                new_row = {"id": -1 - insert_index, "review_excluded": int(should_archive), "review_excluded_manual": 0,
+                                           "is_adult": int(category_looks_adult), "is_adult_manual": 0}
+                                movies_by_name.setdefault(match_key, []).append(new_row)
                         else:
-                            # No exact (name, year) row exists, but a provider
-                            # formatting the same title slightly differently
-                            # (punctuation, casing, a "4K:"-style quality
-                            # prefix) shouldn't spawn a permanent second row --
-                            # that's exactly what find_duplicate_groups' pass
-                            # (1)+(2) recognize after the fact (see there).
-                            # Apply the same normalized-title + year-proximity
-                            # matching here, at import time, so identical real
-                            # titles land on one row instead of needing a
-                            # later manual merge. Exactly one same-normalized-
-                            # title candidate within 1 year -> treat as the
-                            # same row; anything more ambiguous (0 or 2+
-                            # candidates) falls back to a plain insert, same
-                            # as before -- Duplicate Finder remains the safety
-                            # net for whatever this doesn't catch.
-                            target_key = _normalize_title_for_dedup(name)
-                            nearby_rows = conn.execute(
-                                "SELECT id, name, year, is_adult, is_adult_manual, review_excluded, review_excluded_manual "
-                                "FROM movies WHERE year IS NOT NULL AND ABS(year - ?) <= 1", (year,),
-                            ).fetchall()
-                            # Match-key pass first (stricter than the general
-                            # normalized-title fallback below): strips one
-                            # trailing country-code tag ("(US)"/"(GB)"/etc)
-                            # then one trailing literal "(YYYY)" from BOTH
-                            # sides before comparing, so "15 Storeys High"
-                            # (year=2002) and "15 Storeys High (2002)"
-                            # (year=2002) -- same real title, same year, just
-                            # one provider's raw name carries redundant
-                            # literal text the other's lacks -- collapse to
-                            # one row instead of creating a sibling duplicate
-                            # (confirmed live via UI: "12 Monkeys (2015)" vs.
-                            # "12 Monkeys (US)", "15 Storeys High (2002)" vs.
-                            # "15 Storeys High (2002) (GB)"). Only reached
-                            # once the exact (name, year) match above has
-                            # already missed, so this never overrides a
-                            # literal match.
-                            match_key = _import_match_key_name(name)
-                            key_candidates = [r for r in nearby_rows if r["year"] == year and _import_match_key_name(r["name"]) == match_key]
-                            if len(key_candidates) == 1:
-                                fuzzy_candidates = key_candidates
-                            else:
-                                fuzzy_candidates = [r for r in nearby_rows if _normalize_title_for_dedup(r["name"]) == target_key]
-                            if len(fuzzy_candidates) == 1:
-                                movie_id = fuzzy_candidates[0]["id"]
-                                did_match = True
-                                if category_looks_adult and not fuzzy_candidates[0]["is_adult"] and not fuzzy_candidates[0]["is_adult_manual"]:
-                                    conn.execute("UPDATE movies SET is_adult=1 WHERE id=?", (movie_id,))
-                                if should_archive and not fuzzy_candidates[0]["review_excluded"] and not fuzzy_candidates[0]["review_excluded_manual"]:
-                                    conn.execute("UPDATE movies SET review_excluded=1 WHERE id=?", (movie_id,))
-                                    conn.execute("DELETE FROM movie_category_placements WHERE movie_id=?", (movie_id,))
-                                    did_archive = True
-                            else:
-                                cur = conn.execute(
-                                    "INSERT INTO movies (name, year, is_adult, review_excluded, poster_url, created_at) VALUES (?,?,?,?,?,?)",
-                                    (name, year, int(category_looks_adult), int(should_archive), item.get("poster_url"), now),
-                                )
-                                movie_id = cur.lastrowid
-                                did_create = True
-                                did_archive = should_archive
-                    if item.get("tmdb_id"):
-                        # Some providers' bulk get_vod_streams list already
-                        # includes "tmdb" (confirmed live 2026-09-05: 3 of 5
-                        # real providers) -- capturing it here means
-                        # enrich_movie's TMDB-first fallback (see its
-                        # docstring) can apply from this movie's very FIRST
-                        # enrichment pass, not just its second, skipping the
-                        # provider's get_vod_info call entirely instead of
-                        # needing one just to discover the id. Upgrade-only
-                        # (COALESCE): a provider that omits this field on one
-                        # pass must never erase an id already captured (by
-                        # this, a prior enrichment, or a Duplicate Finder
-                        # merge) on an earlier one.
-                        conn.execute(
-                            "UPDATE movies SET tmdb_id=COALESCE(tmdb_id, ?) WHERE id=?",
-                            (item["tmdb_id"], movie_id),
-                        )
-                    if item.get("poster_url"):
-                        # A canonical movie can have several provider
-                        # sources. Keep its first usable catalog poster so
-                        # later source variants cannot flip card artwork.
-                        conn.execute(
-                            """UPDATE movies
-                               SET poster_url=CASE
-                                   WHEN poster_url IS NULL OR TRIM(poster_url)='' THEN ?
-                                   ELSE poster_url
-                               END
-                               WHERE id=?""",
-                            (item["poster_url"], movie_id),
-                        )
-                    conn.execute(
-                        """INSERT INTO movie_sources (movie_id, provider_id, provider_stream_id, container_extension, provider_category_name, raw_name, language, added_at, last_seen_at)
-                           VALUES (?,?,?,?,?,?,?,?,?)
-                           ON CONFLICT(provider_id, provider_stream_id) DO UPDATE SET
-                               movie_id=excluded.movie_id, last_seen_at=excluded.last_seen_at, provider_category_name=excluded.provider_category_name,
-                               raw_name=excluded.raw_name, language=excluded.language""",
-                        (movie_id, provider_id, item["provider_stream_id"], item.get("container_extension", "mp4"),
-                         item.get("provider_category_name"), item.get("raw_name"), _source_language(item.get("raw_name"), item.get("provider_category_name")), now, now),
-                    )
-                    created += did_create
-                    matched += did_match
-                    flagged += did_flag
-                    archived += did_archive
-                    unarchived += did_unarchive
-            except sqlite3.OperationalError as exc:
-                # A periodic commit (above) frees the write lock regularly, but a
-                # concurrent writer can still grab it in the gap between this
-                # item's statements and the next periodic commit -- that's
-                # transient contention, not a bad item, so it gets one more pass
-                # after this batch finishes instead of being counted as a
-                # permanent failure (this is the exact "database is locked"
-                # flood a real user hit during import -- items were being
-                # silently and permanently dropped by this, not actually
-                # malformed).
-                if "locked" in str(exc).lower() and _retry_depth < _MAX_LOCK_RETRY_DEPTH:
-                    lock_retry_items.append(item)
-                else:
+                            insert_index = len(movie_inserts)
+                            # needs_year_review=0 here (vs. the other two insert
+                            # branches above, which pass 1) -- a real year means
+                            # there's nothing ambiguous to flag, matching the old
+                            # code's separate 5-column INSERT (no needs_year_review
+                            # column, defaulting to its schema default of 0) for
+                            # this exact branch.
+                            movie_inserts.append((name, year, int(category_looks_adult), 0, int(should_archive), item.get("poster_url"), now))
+                            did_create = True
+                            did_archive = should_archive
+                            # Same same-chunk-visibility fix as the year=None
+                            # insert branch above, keyed by (name, year) this
+                            # time -- a later item in this chunk with the same
+                            # (name, year) must match this row, not insert its
+                            # own duplicate. Same negative-placeholder id
+                            # scheme, resolved in the flush step below.
+                            new_row = {"id": -1 - insert_index, "review_excluded": int(should_archive), "review_excluded_manual": 0,
+                                       "is_adult": int(category_looks_adult), "is_adult_manual": 0}
+                            movies_by_name_year.setdefault((match_key, year), []).append(new_row)
+
+                    pending.append({
+                        "item": item, "movie_id": movie_id, "insert_index": insert_index,
+                        "did_create": did_create, "did_match": did_match, "did_flag": did_flag,
+                        "did_archive": did_archive, "did_unarchive": did_unarchive,
+                        "source_fingerprint": source_fingerprint, "source_changed": source_changed,
+                    })
+                except Exception as exc:
                     errors += 1
                     logger.warning("[vod_db] bulk_import_movies: skipped item name=%r stream_id=%r: %s",
                                     item.get("name"), item.get("provider_stream_id"), exc)
+
+            try:
+                with conn:
+                    # Inserts first so pending items get real ids before the
+                    # tmdb_id/movie_sources writes below reference them. One
+                    # INSERT per row (not executemany) because lastrowid is
+                    # needed back per-row to resolve each pending entry's
+                    # movie_id -- SQLite's executemany doesn't report a
+                    # lastrowid per row, only for the last statement run.
+                    insert_id_map: dict[int, int] = {}
+                    for idx, row in enumerate(movie_inserts):
+                        cur = conn.execute(
+                            "INSERT INTO movies (name, year, is_adult, needs_year_review, review_excluded, poster_url, created_at) VALUES (?,?,?,?,?,?,?)",
+                            row,
+                        )
+                        insert_id_map[idx] = cur.lastrowid
+
+                    def _resolve(movie_id):
+                        # Negative ids are the -1-insert_index placeholders
+                        # used above so a later item in the same chunk could
+                        # match a not-yet-inserted row; real SQLite rowids
+                        # are always positive, so this is an unambiguous
+                        # sentinel, not a guess.
+                        return insert_id_map[-1 - movie_id] if movie_id < 0 else movie_id
+
+                    for entry in pending:
+                        if entry["insert_index"] is not None:
+                            entry["movie_id"] = insert_id_map[entry["insert_index"]]
+                        elif entry["movie_id"] is not None:
+                            entry["movie_id"] = _resolve(entry["movie_id"])
+                        if entry["source_changed"] or entry["did_archive"] or entry["did_unarchive"]:
+                            changed_movie_ids.add(entry["movie_id"])
+                        if entry["did_create"]:
+                            created_movie_ids.add(entry["movie_id"])
+                    movie_updates_adult = [(_resolve(mid),) for (mid,) in movie_updates_adult]
+                    movie_updates_archive = [(_resolve(mid),) for (mid,) in movie_updates_archive]
+                    movie_updates_unarchive = [(_resolve(mid),) for (mid,) in movie_updates_unarchive]
+
+                    if movie_updates_adult:
+                        conn.executemany("UPDATE movies SET is_adult=1 WHERE id=?", movie_updates_adult)
+                    if movie_updates_archive:
+                        conn.executemany("UPDATE movies SET review_excluded=1 WHERE id=?", movie_updates_archive)
+                        conn.executemany("DELETE FROM movie_category_placements WHERE movie_id=?", movie_updates_archive)
+                    if movie_updates_unarchive:
+                        conn.executemany("UPDATE movies SET review_excluded=0 WHERE id=?", movie_updates_unarchive)
+
+                    for entry in pending:
+                        item = entry["item"]
+                        if entry["source_changed"] and item.get("tmdb_id"):
+                            conn.execute(
+                                "UPDATE movies SET tmdb_id=COALESCE(tmdb_id, ?) WHERE id=?",
+                                (item["tmdb_id"], entry["movie_id"]),
+                            )
+                        if entry["source_changed"] and item.get("poster_url"):
+                            # A canonical card can have several source variants
+                            # from this (or other) providers. Keep the first
+                            # usable bulk poster rather than letting a later
+                            # variant flip artwork on every catalog refresh.
+                            conn.execute(
+                                """UPDATE movies
+                                   SET poster_url=CASE
+                                       WHEN poster_url IS NULL OR TRIM(poster_url)='' THEN ?
+                                       ELSE poster_url
+                                   END
+                                   WHERE id=?""",
+                                (item["poster_url"], entry["movie_id"]),
+                            )
+                        if entry["source_changed"]:
+                            conn.execute(
+                                """INSERT INTO movie_sources (movie_id, provider_id, provider_stream_id, container_extension, provider_category_name, raw_name, language, catalog_fingerprint, provider_detail_deferred, added_at, last_seen_at)
+                                   VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                                   ON CONFLICT(provider_id, provider_stream_id) DO UPDATE SET
+                                       movie_id=excluded.movie_id, container_extension=excluded.container_extension, last_seen_at=excluded.last_seen_at, provider_category_name=excluded.provider_category_name,
+                                       raw_name=excluded.raw_name, language=excluded.language, catalog_fingerprint=excluded.catalog_fingerprint,
+                                       provider_detail_deferred=excluded.provider_detail_deferred""",
+                                (entry["movie_id"], provider_id, item["provider_stream_id"], item.get("container_extension", "mp4"),
+                                 item.get("provider_category_name"), item.get("raw_name"), _source_language(item.get("raw_name")), entry["source_fingerprint"],
+                                 int(not item.get("tmdb_id")), now, now),
+                            )
+                            sources_changed += 1
+                        created += entry["did_create"]
+                        matched += entry["did_match"]
+                        flagged += entry["did_flag"]
+                        archived += entry["did_archive"]
+                        unarchived += entry["did_unarchive"]
+            except sqlite3.OperationalError as exc:
+                # Same transient-lock-contention handling as the old per-item
+                # code, just applied to a whole chunk that failed to commit --
+                # the whole chunk's items retry together on the next pass
+                # rather than being permanently dropped (see this function's
+                # existing lock_retry_items handling below).
+                if "locked" in str(exc).lower() and _retry_depth < _MAX_LOCK_RETRY_DEPTH:
+                    lock_retry_items.extend(chunk)
+                else:
+                    errors += len(chunk)
+                    logger.warning("[vod_db] bulk_import_movies: skipped chunk of %d item(s): %s", len(chunk), exc)
             except Exception as exc:
-                errors += 1
-                logger.warning("[vod_db] bulk_import_movies: skipped item name=%r stream_id=%r: %s",
-                                item.get("name"), item.get("provider_stream_id"), exc)
-            finally:
-                # In a `finally` (not inline after the try/except) so this still
-                # fires on the blank-name branch's `continue` -- that continue
-                # jumps straight to the next loop iteration and would otherwise
-                # skip this check entirely for that item's index.
-                if (i + 1) % batch_size == 0:
-                    _commit_with_retry(conn)
-                    # Release+reacquire between batches -- holding the lock for the
-                    # WHOLE function (a large catalog can take many minutes) blocked
-                    # every other writer with no timeout, which could exhaust the
-                    # async thread pool if enough piled up waiting -- confirmed live
-                    # 2026-07-31 as the cause of Dispatcharr's VOD detail-refresh
-                    # requests hanging/500ing during a large concurrent import, fixed
-                    # by matching the lock's hold window to one batch's real SQLite
-                    # write-transaction span instead of the whole import.
-                    _WRITE_LOCK.release()
-                    _WRITE_LOCK.acquire()
-        _commit_with_retry(conn)
+                errors += len(chunk)
+                logger.warning("[vod_db] bulk_import_movies: skipped chunk of %d item(s): %s", len(chunk), exc)
+
+            # Release+reacquire between chunks -- see this function's lock
+            # docstring above; unchanged reasoning, just once per 1000-item
+            # chunk instead of once per 25.
+            _WRITE_LOCK.release()
+            _WRITE_LOCK.acquire()
         conn.close()
     finally:
         _WRITE_LOCK.release()
@@ -7395,59 +8127,13 @@ def bulk_import_movies(provider_id: int, items: list[dict], _retry_depth: int = 
         matched += retry_result["movies_matched"]
         archived += retry_result["movies_archived"]
         unarchived += retry_result["movies_unarchived"]
+        sources_changed += retry_result["sources_changed"]
+        changed_movie_ids.update(retry_result["changed_movie_ids"])
+        created_movie_ids.update(retry_result.get("created_movie_ids", []))
         flagged += retry_result["flagged_for_review"]
         errors += retry_result["errors"]
 
-    return {"movies_created": created, "movies_matched": matched, "movies_archived": archived, "movies_unarchived": unarchived, "total": len(items), "flagged_for_review": flagged, "errors": errors}
-
-
-def apply_provider_trailers(provider_id: int, content_type: str, items: list[dict]) -> int:
-    """Persist a trailer value supplied directly by the provider's bulk
-    catalog response (item["trailer"]/item["youtube_trailer"]) -- free at
-    import time, no extra request, same spirit as bulk_import_movies'
-    stream_icon poster capture. Called separately after bulk_import_movies/
-    bulk_import_series rather than inlined into them, since it needs each
-    item's now-resolved movie_id/series_id (looked up via the just-written
-    *_sources row) rather than the pre-insert item dict alone.
-
-    Always wins over whatever's currently stored -- unlike poster_url's
-    fill-only-if-blank rule, a provider can legitimately update which
-    trailer it serves for a title, and there's no other trailer source
-    competing to protect (trailer_site='provider' marks it as such)."""
-    if not items:
-        return 0
-    source_table = "movie_sources" if content_type == "movie" else "series_sources"
-    source_id_col = "provider_stream_id" if content_type == "movie" else "provider_series_id"
-    target_table = "movies" if content_type == "movie" else "series"
-    fk_col = "movie_id" if content_type == "movie" else "series_id"
-    updated = 0
-    with _WRITE_LOCK:
-        conn = _connect()
-        for item in items:
-            trailer = item.get("trailer") or item.get("youtube_trailer")
-            if not trailer:
-                continue
-            trailer = str(trailer).strip()
-            if not trailer:
-                continue
-            provider_item_id = item.get(source_id_col) or item.get("provider_stream_id") or item.get("provider_series_id")
-            row = conn.execute(
-                f"SELECT {fk_col} AS item_id FROM {source_table} WHERE provider_id=? AND {source_id_col}=?",
-                (provider_id, str(provider_item_id)),
-            ).fetchone()
-            if not row:
-                continue
-            conn.execute(
-                f"""UPDATE {target_table}
-                    SET trailer_key=?, trailer_site='provider', trailer_status='found',
-                        trailer_attempts=0, trailer_checked_at=?, trailer_last_error=NULL, updated_at=?
-                    WHERE id=?""",
-                (trailer, _now(), _now(), row["item_id"]),
-            )
-            updated += 1
-        _commit_with_retry(conn)
-        conn.close()
-    return updated
+    return {"movies_created": created, "movies_matched": matched, "movies_archived": archived, "movies_unarchived": unarchived, "sources_changed": sources_changed, "changed_movie_ids": list(changed_movie_ids), "created_movie_ids": list(created_movie_ids), "total": len(items), "flagged_for_review": flagged, "errors": errors}
 
 
 def bulk_import_series(provider_id: int, items: list[dict], _retry_depth: int = 0) -> dict:
@@ -7470,7 +8156,21 @@ def bulk_import_series(provider_id: int, items: list[dict], _retry_depth: int = 
     that per-series call is still needed). import_provider_id/
     import_provider_series_id are stamped so enrich_series() can call
     straight back to the right provider instead of re-scanning every
-    provider for a name match."""
+    provider for a name match.
+
+    Chunked (1000 items/round-trip) the same way as bulk_import_movies --
+    see that function's docstring for the full rationale (~180K+ items,
+    hours -> seconds, confirmed live 2026-09-08). The primary-match lookup
+    here is still a single bulk SELECT against `series` keyed on
+    (import_provider_id, import_provider_series_id) -- import_provider_id/
+    import_provider_series_id remain the legacy "primary provider" columns
+    directly on the series row, kept for backward compat with existing
+    code/UI. But every matching provider -- not just whichever one wins
+    that primary slot -- now also gets its own row in series_sources
+    (added 2026-09-09), mirroring movie_sources, so enrich_series can pull
+    episodes from every provider that actually carries this series instead
+    of only the first one matched.
+    """
     _WRITE_LOCK.acquire()
     try:
         conn = _connect()
@@ -7481,281 +8181,353 @@ def bulk_import_series(provider_id: int, items: list[dict], _retry_depth: int = 
         errors = 0
         archived = 0
         unarchived = 0
+        sources_changed = 0
+        changed_series_ids: set[int] = set()
+        created_series_ids: set[int] = set()
         lock_retry_items = []
         # See bulk_import_movies's identical comment -- same fix, same reason.
-        batch_size = 25
-        for i, item in enumerate(items):
-            try:
-                with _item_savepoint(conn):
+        chunk_size = 1000
+        for chunk_start in range(0, len(items), chunk_size):
+            chunk = items[chunk_start:chunk_start + chunk_size]
+
+            # -- Bulk-fetch every lookup this chunk could possibly need, in a
+            # small constant number of round trips. A provider_series_id is a
+            # source identity, not merely a legacy primary-pointer value: a
+            # secondary provider source must return to the canonical row it
+            # already belongs to. Otherwise ON CONFLICT below reassigns its
+            # series_sources row and leaves the old row as an unplayable
+            # zero-source shadow (observed live 2026-09-17).
+            series_ids = [item.get("provider_series_id") for item in chunk]
+            existing_by_series_id: dict[object, sqlite3.Row] = {}
+            source_fingerprints: dict[str, str | None] = {}
+            for i in range(0, len(series_ids), 900):
+                sub = series_ids[i:i + 900]
+                placeholders = ",".join("?" * len(sub))
+                rows = conn.execute(
+                    f"SELECT ss.provider_series_id, ss.catalog_fingerprint, s.id, s.is_adult, s.is_adult_manual, "
+                    f"s.review_excluded, s.review_excluded_manual, s.import_provider_series_id "
+                    f"FROM series_sources ss JOIN series s ON s.id=ss.series_id "
+                    f"WHERE ss.provider_id=? AND ss.provider_series_id IN ({placeholders})",
+                    (provider_id, *sub),
+                ).fetchall()
+                for row in rows:
+                    source_fingerprints[row["provider_series_id"]] = row["catalog_fingerprint"]
+                    existing_by_series_id[row["provider_series_id"]] = row
+            for i in range(0, len(series_ids), 900):
+                sub = series_ids[i:i + 900]
+                placeholders = ",".join("?" * len(sub))
+                rows = conn.execute(
+                    f"SELECT id, is_adult, is_adult_manual, review_excluded, review_excluded_manual, import_provider_series_id "
+                    f"FROM series WHERE import_provider_id=? AND import_provider_series_id IN ({placeholders})",
+                    (provider_id, *sub),
+                ).fetchall()
+                for row in rows:
+                    # A direct source mapping above is authoritative. This
+                    # legacy pointer remains only as a fallback for rows
+                    # created before series_sources existed.
+                    existing_by_series_id.setdefault(row["import_provider_series_id"], row)
+
+            # Only items with no provider_series_id match need name/year
+            # lookups -- same short-circuit as bulk_import_movies.
+            unresolved = [item for item in chunk if item.get("provider_series_id") not in existing_by_series_id]
+            name_year_pairs = {(item["name"], item.get("year")) for item in unresolved if item["name"].strip()}
+            # (name, year) -> list of candidates -- see bulk_import_movies's
+            # identical comment: a title already split by language can have
+            # more than one series row sharing (name, year).
+            # Keyed by _import_match_key_name(name), NOT the raw name -- see
+            # bulk_import_movies's identical fix for the full rationale
+            # (trailing country-of-origin suffixes / redundant literal years
+            # previously caused sibling duplicate series rows).
+            series_by_name_year: dict[tuple[str, object], list[sqlite3.Row]] = {}
+            names_needing_candidates = {_import_match_key_name(item["name"]) for item in unresolved if item["name"].strip() and item.get("year") is None}
+            series_by_name: dict[str, list[sqlite3.Row]] = {}
+            if name_year_pairs:
+                names = list({n for n, _ in name_year_pairs} | {_import_match_key_name(n) for n, _ in name_year_pairs})
+                for i in range(0, len(names), 900):
+                    sub = names[i:i + 900]
+                    placeholders = ",".join("?" * len(sub))
+                    rows = conn.execute(
+                        f"SELECT id, name, year, tmdb_id, is_adult, is_adult_manual, review_excluded, review_excluded_manual, import_provider_id "
+                        f"FROM series WHERE name IN ({placeholders})", sub,
+                    ).fetchall()
+                    for row in rows:
+                        match_key = _import_match_key_name(row["name"])
+                        series_by_name_year.setdefault((match_key, row["year"]), []).append(row)
+                        if match_key in names_needing_candidates:
+                            series_by_name.setdefault(match_key, []).append(row)
+
+            # beads-974 (import-path gap, series mirror of bulk_import_movies's
+            # identical fix): language sets for every candidate series this
+            # chunk might match, so each match branch below can refuse to
+            # attach a language-conflicting item.
+            series_language_candidate_ids = {row["id"] for row in existing_by_series_id.values()}
+            for rows in series_by_name_year.values():
+                series_language_candidate_ids.update(row["id"] for row in rows)
+            series_languages: dict[int, set[str]] = {}
+            if series_language_candidate_ids:
+                ids = list(series_language_candidate_ids)
+                for i in range(0, len(ids), 900):
+                    sub = ids[i:i + 900]
+                    placeholders = ",".join("?" * len(sub))
+                    rows = conn.execute(
+                        f"SELECT series_id, COALESCE(language, 'EN') AS lang FROM series_sources "
+                        f"WHERE series_id IN ({placeholders})", sub,
+                    ).fetchall()
+                    for row in rows:
+                        series_languages.setdefault(row["series_id"], set()).add(row["lang"])
+
+            def _series_language_ok(series_id: int, item_lang: str) -> bool:
+                existing_langs = series_languages.get(series_id)
+                return not existing_langs or item_lang in existing_langs
+
+            # -- Resolve every item's identity/branch against the prefetched
+            # dicts above (identical decision tree to the old per-item
+            # version) -- see bulk_import_movies's identical comment block
+            # for the full explanation of the pending/negative-placeholder-id
+            # scheme used to keep same-chunk duplicates from being created.
+            series_updates_adult: list[tuple] = []
+            series_updates_archive: list[tuple] = []
+            series_updates_unarchive: list[tuple] = []
+            series_updates_import_provider: list[tuple] = []  # (provider_id, provider_series_id, series_id)
+            # (name, year, is_adult, needs_year_review, review_excluded, import_provider_id, import_provider_series_id, provider_category_name, raw_name, created_at)
+            series_inserts: list[tuple] = []
+            pending: list[dict] = []
+
+            for item in chunk:
+                try:
                     name = item["name"]
+                    match_key = _import_match_key_name(name)
                     year = item.get("year")
                     category_looks_adult = _looks_adult(item.get("provider_category_name"))
                     should_archive = bool(item.get("auto_archive"))
-                    # See bulk_import_movies's identical did_create/did_match/did_flag
-                    # comment -- folded into the real counters only after this item's
-                    # last statement has actually succeeded.
+                    series_id = None
+                    insert_index = None
                     did_create = did_match = did_flag = did_archive = did_unarchive = False
-                    series_id_for_detail = None
-                    # Primary match: this exact provider+series_id was already
-                    # imported before -- reuse its established identity directly,
-                    # UNCONDITIONALLY (not just for a blank name), same reasoning
-                    # as bulk_import_movies's identical hoist above (see its
-                    # comment for the full explanation of why this is what makes
-                    # it safe for enrichment to later overwrite a raw/placeholder
-                    # name with the provider's clean title without the next
-                    # re-import creating a duplicate orphaned row).
-                    #
-                    # Resolved through series_sources first (ported from
-                    # knmplace's fork, real bug): series.import_provider_id/
-                    # import_provider_series_id is a single "primary provider"
-                    # pointer on the row itself, set once at creation. A
-                    # SECOND provider re-importing a series it's seen before
-                    # was never checked against that single pointer, so it
-                    # fell through to name/year matching (or created a new
-                    # row outright) instead of returning to the series its
-                    # own provider_series_id was already attached to via
-                    # series_sources -- silently spawning a duplicate,
-                    # source-less-from-this-provider's-perspective shadow row.
-                    # Falls back to the legacy import_provider_id check for a
-                    # row written before series_sources existed.
-                    existing = conn.execute(
-                        "SELECT s.id, s.is_adult, s.is_adult_manual, s.review_excluded, s.review_excluded_manual "
-                        "FROM series_sources ss JOIN series s ON s.id=ss.series_id "
-                        "WHERE ss.provider_id=? AND ss.provider_series_id=?",
-                        (provider_id, item.get("provider_series_id")),
-                    ).fetchone()
-                    if not existing:
-                        existing = conn.execute(
-                            "SELECT id, is_adult, is_adult_manual, review_excluded, review_excluded_manual "
-                            "FROM series WHERE import_provider_id=? AND import_provider_series_id=?",
-                            (provider_id, item.get("provider_series_id")),
-                        ).fetchone()
-                    if existing:
+                    cat_update_needed = False
+
+                    item_lang = _source_language(item.get("raw_name"))
+                    source_fingerprint = item.get("catalog_fingerprint") or _catalog_fingerprint_from_item("series", item)
+                    previous_fingerprint = source_fingerprints.get(item.get("provider_series_id"))
+                    source_changed = item.get("provider_series_id") not in source_fingerprints or previous_fingerprint != source_fingerprint
+                    existing = existing_by_series_id.get(item.get("provider_series_id"))
+                    if existing and _series_language_ok(existing["id"], item_lang):
+                        series_id = existing["id"]
                         did_match = True
-                        series_id_for_detail = existing["id"]
-                        # Real bug found live 2026-07-29: this value was captured
-                        # in `item` on every single import pass but never
-                        # actually written anywhere -- episode_sources.
-                        # provider_category_name (what evaluate_smart_category's
-                        # provider_category rule field and auto-create-categories
-                        # both actually read) was NULL for every episode of every
-                        # series ever imported through this path, so series-side
-                        # provider-category matching never worked for any
-                        # provider, not just whichever one happened to be tested.
-                        # Stored here (unconditionally overwritten -- provider-
-                        # sourced, not user-editable) so enrich_series can read it
-                        # back and stamp it onto each episode as episodes are
-                        # discovered (episodes aren't known yet at this cheap
-                        # bulk-list stage, only lazily via get_series_info).
-                        conn.execute("UPDATE series SET provider_category_name=?, raw_name=? WHERE id=?", (item.get("provider_category_name"), item.get("raw_name"), existing["id"]))
+                        cat_update_needed = source_changed
                         if category_looks_adult and not existing["is_adult"] and not existing["is_adult_manual"]:
-                            conn.execute("UPDATE series SET is_adult=1 WHERE id=?", (existing["id"],))
+                            series_updates_adult.append((series_id,))
                         if should_archive and not existing["review_excluded"] and not existing["review_excluded_manual"]:
-                            conn.execute("UPDATE series SET review_excluded=1 WHERE id=?", (existing["id"],))
-                            conn.execute("DELETE FROM series_category_placements WHERE series_id=?", (existing["id"],))
+                            series_updates_archive.append((series_id,))
                             did_archive = True
                         elif not should_archive and existing["review_excluded"] and not existing["review_excluded_manual"]:
-                            # Mirror of the archive branch above -- see
-                            # bulk_import_movies's docstring for why an
-                            # automatically applied archive can be
-                            # automatically lifted too.
-                            conn.execute("UPDATE series SET review_excluded=0 WHERE id=?", (existing["id"],))
+                            series_updates_unarchive.append((series_id,))
                             did_unarchive = True
                     elif not name.strip():
-                        # Same reasoning as bulk_import_movies's identical guard -- a
-                        # blank name has no real identity to match on, so never match it
-                        # against anything, including another blank one. Reaching this
-                        # branch at all already means the existing-identity check above
-                        # found no established row for this provider+series_id, so this
-                        # is a genuinely new item.
                         placeholder = f"[Untitled] {(item.get('provider_category_name') or '').strip() or 'Unknown'} · series {item.get('provider_series_id')}"
-                        cur = conn.execute(
-                            "INSERT INTO series (name, year, is_adult, needs_year_review, review_excluded, import_provider_id, import_provider_series_id, provider_category_name, raw_name, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                            (placeholder, year, int(category_looks_adult), 1, int(should_archive), provider_id, item.get("provider_series_id"), item.get("provider_category_name"), item.get("raw_name"), now),
-                        )
+                        insert_index = len(series_inserts)
+                        series_inserts.append((placeholder, year, int(category_looks_adult), 1, int(should_archive), provider_id, item.get("provider_series_id"), item.get("provider_category_name"), item.get("raw_name"), now))
                         did_create = True
                         did_flag = True
                         did_archive = should_archive
-                        series_id_for_detail = cur.lastrowid
                     else:
-                        row = conn.execute(
-                            "SELECT id, is_adult, is_adult_manual, review_excluded, review_excluded_manual, import_provider_id FROM series WHERE name=? AND year IS ?",
-                            (name, year),
-                        ).fetchone()
+                        # beads-974: only accept a same-(name,year) match whose
+                        # existing sources share a language with this item --
+                        # see bulk_import_movies's identical comment.
+                        row = next(
+                            (r for r in series_by_name_year.get((match_key, year), [])
+                             if _series_language_ok(r["id"], item_lang)),
+                            None,
+                        )
                         if row:
+                            series_id = row["id"]
                             did_match = True
-                            series_id_for_detail = row["id"]
-                            # See the identical comment on the existing-identity
-                            # match branch above -- same fix, same reasoning.
-                            conn.execute("UPDATE series SET provider_category_name=?, raw_name=? WHERE id=?", (item.get("provider_category_name"), item.get("raw_name"), row["id"]))
+                            cat_update_needed = source_changed
                             if category_looks_adult and not row["is_adult"] and not row["is_adult_manual"]:
-                                conn.execute("UPDATE series SET is_adult=1 WHERE id=?", (row["id"],))
+                                series_updates_adult.append((series_id,))
                             if should_archive and not row["review_excluded"] and not row["review_excluded_manual"]:
-                                conn.execute("UPDATE series SET review_excluded=1 WHERE id=?", (row["id"],))
-                                # See the identical comment in bulk_import_movies -- this
-                                # is what actually makes "archived" hide it from
-                                # Dispatcharr, not just the flag on its own.
-                                conn.execute("DELETE FROM series_category_placements WHERE series_id=?", (row["id"],))
+                                series_updates_archive.append((series_id,))
                                 did_archive = True
                             if row["import_provider_id"] is None:
                                 # This series previously had no working way to fetch episode
                                 # detail (e.g. its only prior source's provider was later
                                 # deleted) -- this provider can, so give it one rather than
                                 # leaving it permanently stuck.
-                                conn.execute(
-                                    "UPDATE series SET import_provider_id=?, import_provider_series_id=? WHERE id=?",
-                                    (provider_id, item.get("provider_series_id"), row["id"]),
-                                )
+                                series_updates_import_provider.append((provider_id, item.get("provider_series_id"), series_id))
                         elif year is None:
-                            # Same reasoning as bulk_import_movies above,
-                            # including the confirmed-tmdb_id requirement.
-                            candidates = conn.execute(
-                                "SELECT id, tmdb_id, import_provider_id, review_excluded, review_excluded_manual FROM series WHERE name=?",
-                                (name,),
-                            ).fetchall()
+                            all_candidates = series_by_name.get(match_key, [])
+                            candidates = [c for c in all_candidates if _series_language_ok(c["id"], item_lang)]
                             if len(candidates) == 1 and candidates[0]["tmdb_id"]:
+                                series_id = candidates[0]["id"]
                                 did_match = True
-                                series_id_for_detail = candidates[0]["id"]
-                                conn.execute("UPDATE series SET provider_category_name=?, raw_name=? WHERE id=?", (item.get("provider_category_name"), item.get("raw_name"), candidates[0]["id"]))
+                                cat_update_needed = source_changed
                                 if candidates[0]["import_provider_id"] is None:
-                                    conn.execute(
-                                        "UPDATE series SET import_provider_id=?, import_provider_series_id=? WHERE id=?",
-                                        (provider_id, item.get("provider_series_id"), candidates[0]["id"]),
-                                    )
-                                # Same archive-upgrade check as the exact (name, year)
-                                # match above -- see the identical comment in
-                                # bulk_import_movies for why this branch needs it too.
+                                    series_updates_import_provider.append((provider_id, item.get("provider_series_id"), series_id))
                                 if should_archive and not candidates[0]["review_excluded"] and not candidates[0]["review_excluded_manual"]:
-                                    conn.execute("UPDATE series SET review_excluded=1 WHERE id=?", (candidates[0]["id"],))
-                                    conn.execute("DELETE FROM series_category_placements WHERE series_id=?", (candidates[0]["id"],))
+                                    series_updates_archive.append((series_id,))
                                     did_archive = True
                             else:
-                                cur = conn.execute(
-                                    "INSERT INTO series (name, year, is_adult, needs_year_review, review_excluded, import_provider_id, import_provider_series_id, provider_category_name, raw_name, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                                    (name, year, int(category_looks_adult), 1 if candidates else 0, int(should_archive), provider_id, item.get("provider_series_id"), item.get("provider_category_name"), item.get("raw_name"), now),
-                                )
+                                insert_index = len(series_inserts)
+                                # needs_year_review/did_flag reflect name-only
+                                # ambiguity -- use the unfiltered candidate
+                                # list, same reasoning as bulk_import_movies.
+                                series_inserts.append((name, year, int(category_looks_adult), 1 if all_candidates else 0, int(should_archive), provider_id, item.get("provider_series_id"), item.get("provider_category_name"), item.get("raw_name"), now))
                                 did_create = True
                                 did_archive = should_archive
-                                if candidates:
+                                if all_candidates:
                                     did_flag = True
-                                series_id_for_detail = cur.lastrowid
+                                # Register this brand-new row immediately -- see
+                                # bulk_import_movies's identical comment for why
+                                # (a later item in this chunk with the same
+                                # still-year=None name must see this as a
+                                # same-named candidate, not create a duplicate).
+                                new_row = {"id": -1 - insert_index, "import_provider_id": provider_id,
+                                           "review_excluded": int(should_archive), "review_excluded_manual": 0,
+                                           "is_adult": int(category_looks_adult), "is_adult_manual": 0}
+                                series_by_name.setdefault(match_key, []).append(new_row)
                         else:
-                            # Same normalized-title + year-proximity fallback
-                            # as bulk_import_movies' identical branch above --
-                            # a provider formatting the same title slightly
-                            # differently shouldn't spawn a permanent second
-                            # row. Exactly one same-normalized-title candidate
-                            # within 1 year -> treat as the same row.
-                            target_key = _normalize_title_for_dedup(name)
-                            nearby_rows = conn.execute(
-                                "SELECT id, name, year, import_provider_id, is_adult, is_adult_manual, review_excluded, review_excluded_manual "
-                                "FROM series WHERE year IS NOT NULL AND ABS(year - ?) <= 1", (year,),
-                            ).fetchall()
-                            # Match-key pass first -- see bulk_import_movies'
-                            # identical branch for the full rationale (a
-                            # trailing country-code tag or redundant literal
-                            # year on one side only, same real title/year
-                            # otherwise). Only reached once the exact
-                            # (name, year) match above has already missed.
-                            match_key = _import_match_key_name(name)
-                            key_candidates = [r for r in nearby_rows if r["year"] == year and _import_match_key_name(r["name"]) == match_key]
-                            if len(key_candidates) == 1:
-                                fuzzy_candidates = key_candidates
-                            else:
-                                fuzzy_candidates = [r for r in nearby_rows if _normalize_title_for_dedup(r["name"]) == target_key]
-                            if len(fuzzy_candidates) == 1:
-                                did_match = True
-                                series_id_for_detail = fuzzy_candidates[0]["id"]
-                                conn.execute("UPDATE series SET provider_category_name=?, raw_name=? WHERE id=?", (item.get("provider_category_name"), item.get("raw_name"), series_id_for_detail))
-                                if fuzzy_candidates[0]["import_provider_id"] is None:
-                                    conn.execute(
-                                        "UPDATE series SET import_provider_id=?, import_provider_series_id=? WHERE id=?",
-                                        (provider_id, item.get("provider_series_id"), series_id_for_detail),
-                                    )
-                                if category_looks_adult and not fuzzy_candidates[0]["is_adult"] and not fuzzy_candidates[0]["is_adult_manual"]:
-                                    conn.execute("UPDATE series SET is_adult=1 WHERE id=?", (series_id_for_detail,))
-                                if should_archive and not fuzzy_candidates[0]["review_excluded"] and not fuzzy_candidates[0]["review_excluded_manual"]:
-                                    conn.execute("UPDATE series SET review_excluded=1 WHERE id=?", (series_id_for_detail,))
-                                    conn.execute("DELETE FROM series_category_placements WHERE series_id=?", (series_id_for_detail,))
-                                    did_archive = True
-                            else:
-                                cur = conn.execute(
-                                    "INSERT INTO series (name, year, is_adult, review_excluded, import_provider_id, import_provider_series_id, provider_category_name, raw_name, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                                    (name, year, int(category_looks_adult), int(should_archive), provider_id, item.get("provider_series_id"), item.get("provider_category_name"), item.get("raw_name"), now),
-                                )
-                                did_create = True
-                                did_archive = should_archive
-                                series_id_for_detail = cur.lastrowid
-                    if series_id_for_detail is not None and item.get("_has_detail"):
-                        conn.execute(
-                            "UPDATE series SET genre=?, description=?, cast_list=?, director=?, poster_url=?, "
-                            "rating=?, release_date=?, provider_last_modified=?, tmdb_id=COALESCE(tmdb_id, ?) WHERE id=?",
-                            (
-                                item.get("genre"), item.get("description"), item.get("cast_list"),
-                                item.get("director"), item.get("poster_url"), item.get("rating"),
-                                item.get("release_date"), item.get("provider_last_modified"),
-                                item.get("tmdb_id"), series_id_for_detail,
-                            ),
+                            insert_index = len(series_inserts)
+                            series_inserts.append((name, year, int(category_looks_adult), 0, int(should_archive), provider_id, item.get("provider_series_id"), item.get("provider_category_name"), item.get("raw_name"), now))
+                            did_create = True
+                            did_archive = should_archive
+                            # Same same-chunk-visibility fix as the year=None
+                            # insert branch above, keyed by (name, year) this
+                            # time -- see bulk_import_movies's identical comment.
+                            new_row = {"id": -1 - insert_index, "import_provider_id": provider_id,
+                                       "review_excluded": int(should_archive), "review_excluded_manual": 0,
+                                       "is_adult": int(category_looks_adult), "is_adult_manual": 0}
+                            series_by_name_year.setdefault((match_key, year), []).append(new_row)
+
+                    pending.append({
+                        "item": item, "series_id": series_id, "insert_index": insert_index,
+                        "did_create": did_create, "did_match": did_match, "did_flag": did_flag,
+                        "did_archive": did_archive, "did_unarchive": did_unarchive,
+                        "cat_update_needed": cat_update_needed,
+                        "source_fingerprint": source_fingerprint, "source_changed": source_changed,
+                    })
+                except Exception as exc:
+                    errors += 1
+                    logger.warning("[vod_db] bulk_import_series: skipped item name=%r series_id=%r: %s",
+                                    item.get("name"), item.get("provider_series_id"), exc)
+
+            try:
+                with conn:
+                    # Inserts first so pending items get real ids before the
+                    # category-name/detail writes below reference them --
+                    # see bulk_import_movies's identical comment for why this
+                    # is one INSERT per row instead of executemany (lastrowid
+                    # needed back per-row).
+                    insert_id_map: dict[int, int] = {}
+                    for idx, row in enumerate(series_inserts):
+                        cur = conn.execute(
+                            "INSERT INTO series (name, year, is_adult, needs_year_review, review_excluded, import_provider_id, import_provider_series_id, provider_category_name, raw_name, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                            row,
                         )
-                    # Multi-provider failover: whichever provider wins the
-                    # legacy "primary" import_provider_id/import_provider_
-                    # series_id slot above, THIS provider still gets its own
-                    # series_sources row so enrich_series can pull episodes
-                    # from every provider that actually carries this series,
-                    # not only the first one matched. INSERT OR IGNORE
-                    # against series_sources' own UNIQUE(provider_id,
-                    # provider_series_id) constraint -- a re-import of an
-                    # already-known source is a no-op here.
-                    if series_id_for_detail is not None and item.get("provider_series_id") is not None:
-                        conn.execute(
-                            "INSERT OR IGNORE INTO series_sources "
-                            "(series_id, provider_id, provider_series_id, provider_category_name, raw_name, language, added_at, last_seen_at) "
-                            "VALUES (?,?,?,?,?,?,?,?)",
-                            (
-                                series_id_for_detail, provider_id, item.get("provider_series_id"),
-                                item.get("provider_category_name"), item.get("raw_name"),
-                                _source_language(item.get("raw_name") or name, item.get("provider_category_name")), now, now,
-                            ),
-                        )
-                        conn.execute(
-                            "UPDATE series_sources SET last_seen_at=? WHERE series_id=? AND provider_id=? AND provider_series_id=?",
-                            (now, series_id_for_detail, provider_id, item.get("provider_series_id")),
-                        )
-                    created += did_create
-                    matched += did_match
-                    flagged += did_flag
-                    archived += did_archive
-                    unarchived += did_unarchive
+                        insert_id_map[idx] = cur.lastrowid
+
+                    def _resolve(series_id):
+                        # See bulk_import_movies's identical helper -- negative
+                        # ids are the -1-insert_index placeholders used above.
+                        return insert_id_map[-1 - series_id] if series_id < 0 else series_id
+
+                    for entry in pending:
+                        if entry["insert_index"] is not None:
+                            entry["series_id"] = insert_id_map[entry["insert_index"]]
+                        elif entry["series_id"] is not None:
+                            entry["series_id"] = _resolve(entry["series_id"])
+                        if entry["source_changed"] or entry["did_archive"] or entry["did_unarchive"]:
+                            changed_series_ids.add(entry["series_id"])
+                        if entry["did_create"]:
+                            created_series_ids.add(entry["series_id"])
+                    series_updates_adult = [(_resolve(sid),) for (sid,) in series_updates_adult]
+                    series_updates_archive = [(_resolve(sid),) for (sid,) in series_updates_archive]
+                    series_updates_unarchive = [(_resolve(sid),) for (sid,) in series_updates_unarchive]
+                    series_updates_import_provider = [(pid, psid, _resolve(sid)) for (pid, psid, sid) in series_updates_import_provider]
+
+                    if series_updates_adult:
+                        conn.executemany("UPDATE series SET is_adult=1 WHERE id=?", series_updates_adult)
+                    if series_updates_archive:
+                        conn.executemany("UPDATE series SET review_excluded=1 WHERE id=?", series_updates_archive)
+                        conn.executemany("DELETE FROM series_category_placements WHERE series_id=?", series_updates_archive)
+                    if series_updates_unarchive:
+                        conn.executemany("UPDATE series SET review_excluded=0 WHERE id=?", series_updates_unarchive)
+                    if series_updates_import_provider:
+                        conn.executemany("UPDATE series SET import_provider_id=?, import_provider_series_id=? WHERE id=?", series_updates_import_provider)
+
+                    for entry in pending:
+                        item = entry["item"]
+                        series_id = entry["series_id"]
+                        # Record this provider as a source for this series
+                        # regardless of whether it also won the legacy
+                        # import_provider_id "primary" slot above -- a
+                        # SECOND (or third...) matching provider used to be
+                        # silently discarded here (vod_manager series/
+                        # episode failover work, 2026-09-09), which meant
+                        # enrich_series only ever had one provider to fall
+                        # back to for a series multiple providers actually
+                        # carry. Mirrors movie_sources' upsert in
+                        # bulk_import_movies exactly.
+                        if entry["source_changed"] and item.get("provider_series_id") is not None:
+                            conn.execute(
+                                "INSERT INTO series_sources (series_id, provider_id, provider_series_id, provider_category_name, raw_name, language, catalog_fingerprint, provider_detail_deferred, added_at, last_seen_at) "
+                                "VALUES (?,?,?,?,?,?,?,?,?,?) "
+                                "ON CONFLICT(provider_id, provider_series_id) DO UPDATE SET "
+                                "series_id=excluded.series_id, provider_category_name=excluded.provider_category_name, "
+                                "raw_name=excluded.raw_name, language=excluded.language, catalog_fingerprint=excluded.catalog_fingerprint, provider_detail_deferred=excluded.provider_detail_deferred, last_seen_at=excluded.last_seen_at",
+                                (series_id, provider_id, item.get("provider_series_id"), item.get("provider_category_name"), item.get("raw_name"), _source_language(item.get("raw_name")), entry["source_fingerprint"], int(not item.get("tmdb_id")), now, now),
+                            )
+                            sources_changed += 1
+                        if entry["cat_update_needed"]:
+                            # Real bug found live 2026-07-29: this value was captured
+                            # in `item` on every single import pass but never
+                            # actually written anywhere -- episode_sources.
+                            # provider_category_name (what evaluate_smart_category's
+                            # provider_category rule field and auto-create-categories
+                            # both actually read) was NULL for every episode of every
+                            # series ever imported through this path, so series-side
+                            # provider-category matching never worked for any
+                            # provider, not just whichever one happened to be tested.
+                            # Stored here (unconditionally overwritten -- provider-
+                            # sourced, not user-editable) so enrich_series can read it
+                            # back and stamp it onto each episode as episodes are
+                            # discovered (episodes aren't known yet at this cheap
+                            # bulk-list stage, only lazily via get_series_info).
+                            conn.execute(
+                                "UPDATE series SET provider_category_name=?, raw_name=? WHERE id=?",
+                                (item.get("provider_category_name"), item.get("raw_name"), series_id),
+                            )
+                        if entry["source_changed"] and item.get("_has_detail"):
+                            conn.execute(
+                                "UPDATE series SET genre=?, description=?, cast_list=?, director=?, poster_url=?, "
+                                "rating=?, release_date=?, provider_last_modified=?, tmdb_id=COALESCE(tmdb_id, ?) WHERE id=?",
+                                (
+                                    item.get("genre"), item.get("description"), item.get("cast_list"),
+                                    item.get("director"), item.get("poster_url"), item.get("rating"),
+                                    item.get("release_date"), item.get("provider_last_modified"),
+                                    item.get("tmdb_id"), series_id,
+                                ),
+                            )
+                        created += entry["did_create"]
+                        matched += entry["did_match"]
+                        flagged += entry["did_flag"]
+                        archived += entry["did_archive"]
+                        unarchived += entry["did_unarchive"]
             except sqlite3.OperationalError as exc:
                 # See bulk_import_movies's identical handler -- transient lock
                 # contention gets a retry pass instead of a permanent, silent
                 # data loss.
                 if "locked" in str(exc).lower() and _retry_depth < _MAX_LOCK_RETRY_DEPTH:
-                    lock_retry_items.append(item)
+                    lock_retry_items.extend(chunk)
                 else:
-                    errors += 1
-                    logger.warning("[vod_db] bulk_import_series: skipped item name=%r series_id=%r: %s",
-                                    item.get("name"), item.get("provider_series_id"), exc)
+                    errors += len(chunk)
+                    logger.warning("[vod_db] bulk_import_series: skipped chunk of %d item(s): %s", len(chunk), exc)
             except Exception as exc:
-                errors += 1
-                logger.warning("[vod_db] bulk_import_series: skipped item name=%r series_id=%r: %s",
-                                item.get("name"), item.get("provider_series_id"), exc)
-            finally:
-                # See bulk_import_movies's identical comment -- must be `finally`
-                # so the blank-name branch's `continue` doesn't skip it.
-                if (i + 1) % batch_size == 0:
-                    _commit_with_retry(conn)
-                    # Release+reacquire between batches -- holding the lock for the
-                    # WHOLE function (a large catalog can take many minutes) blocked
-                    # every other writer with no timeout, which could exhaust the
-                    # async thread pool if enough piled up waiting -- confirmed live
-                    # 2026-07-31 as the cause of Dispatcharr's VOD detail-refresh
-                    # requests hanging/500ing during a large concurrent import, fixed
-                    # by matching the lock's hold window to one batch's real SQLite
-                    # write-transaction span instead of the whole import.
-                    _WRITE_LOCK.release()
-                    _WRITE_LOCK.acquire()
-        _commit_with_retry(conn)
+                errors += len(chunk)
+                logger.warning("[vod_db] bulk_import_series: skipped chunk of %d item(s): %s", len(chunk), exc)
+
+            # Release+reacquire between chunks -- see bulk_import_movies's
+            # identical comment for the full reasoning.
+            _WRITE_LOCK.release()
+            _WRITE_LOCK.acquire()
         conn.close()
     finally:
         _WRITE_LOCK.release()
@@ -7769,10 +8541,13 @@ def bulk_import_series(provider_id: int, items: list[dict], _retry_depth: int = 
         matched += retry_result["series_matched"]
         archived += retry_result["series_archived"]
         unarchived += retry_result["series_unarchived"]
+        sources_changed += retry_result["sources_changed"]
+        changed_series_ids.update(retry_result["changed_series_ids"])
+        created_series_ids.update(retry_result.get("created_series_ids", []))
         flagged += retry_result["flagged_for_review"]
         errors += retry_result["errors"]
 
-    return {"series_created": created, "series_matched": matched, "series_archived": archived, "series_unarchived": unarchived, "total": len(items), "flagged_for_review": flagged, "errors": errors}
+    return {"series_created": created, "series_matched": matched, "series_archived": archived, "series_unarchived": unarchived, "sources_changed": sources_changed, "changed_series_ids": list(changed_series_ids), "created_series_ids": list(created_series_ids), "total": len(items), "flagged_for_review": flagged, "errors": errors}
 
 
 _PLEX_DETAIL_FIELDS = ("genre", "description", "director", "cast_list", "poster_url", "last_enriched_at", "rating", "release_date")
@@ -7825,11 +8600,13 @@ def bulk_import_plex_movies(provider_id: int, items: list[dict]) -> dict:
     description, director, cast_list, poster_url, last_enriched_at,
     auto_archive}, ...]
 
-    auto_archive (see vod_importer._should_auto_archive, called with no
-    category args -- Plex/Emby have no XC-style flat category list to filter
-    on, only language rules apply here, see vod_manager-i4i) mirrors
-    bulk_import_movies' upgrade-only-both-directions archive/unarchive
-    semantics exactly -- see that function's docstring."""
+    auto_archive mirrors bulk_import_movies' archive-preserving semantics --
+    see that function's docstring,
+    including the note that provider-level category/language exclusion no
+    longer reaches this function at all: excluded items are filtered out by
+    the caller (vod_importer._should_exclude_from_import) before this is
+    even called, for Plex/Emby library-section-as-category exclusion (GH#9)
+    same as XC-provider category exclusion."""
     _WRITE_LOCK.acquire()
     try:
         conn = _connect()
@@ -7916,23 +8693,9 @@ def bulk_import_plex_movies(provider_id: int, items: list[dict]) -> dict:
                             # Same reasoning as bulk_import_movies. Still writes full detail
                             # even when flagged -- more info for whoever reviews it later.
                             candidates = conn.execute(
-                                "SELECT id, tmdb_id, review_excluded, review_excluded_manual FROM movies WHERE name=?", (name,)
+                                "SELECT id, review_excluded, review_excluded_manual FROM movies WHERE name=?", (name,)
                             ).fetchall()
-                            # Requiring the sole candidate to already carry a
-                            # confirmed tmdb_id (found live on @Knm's fork,
-                            # "Inherit confirmed identities across providers"
-                            # 2026-09-16): without a year OR a corroborating
-                            # id, a same-name-only match is really just a
-                            # coincidence between two DIFFERENT real titles
-                            # that happen to share a name -- attaching a new
-                            # source to it would be a silent wrong merge, not
-                            # a real match. An unconfirmed candidate now falls
-                            # through to the create-new-row branch below
-                            # (same as zero candidates), which is exactly
-                            # correct: a real title deserves its own row
-                            # until something actually corroborates the
-                            # match.
-                            if len(candidates) == 1 and candidates[0]["tmdb_id"]:
+                            if len(candidates) == 1:
                                 movie_id = candidates[0]["id"]
                                 did_match = True
                                 sets, set_params = _plex_detail_update_sql(detail, item.get("tmdb_id"))
@@ -8139,25 +8902,25 @@ def bulk_import_plex_series(provider_id: int, items: list[dict]) -> dict:
                     archived += did_archive
                     unarchived += did_unarchive
 
-                    # Multi-provider failover: this Plex/Emby provider gets
-                    # its own series_sources row too, same as the XC path in
-                    # bulk_import_series -- a Plex-only provider never
-                    # touches series.import_provider_id/import_provider_
-                    # series_id (those stay whichever provider originally
-                    # won that legacy "primary" slot), but Duplicate Finder
-                    # groups/enrich_series read series_sources, so without
-                    # this a Plex provider carrying a series shared with an
-                    # XC provider would show episode_sources rows but zero
-                    # series_sources rows.
+                    # Record this provider as a source for this series --
+                    # mirrors movie_sources' identical upsert in
+                    # bulk_import_plex_movies exactly. Missing until now
+                    # (beads-974 continuation, found live 2026-09-11): this
+                    # function wrote series/episodes/episode_sources but
+                    # never series_sources itself, so a Plex-only provider
+                    # never appeared as a source anywhere find_duplicate_
+                    # groups/enrich_series read series_sources (Duplicate
+                    # Finder provider badges + source counts, multi-provider
+                    # episode failover) -- Plex-109 had 553 movie_sources
+                    # rows but zero series_sources rows.
                     if item.get("provider_series_id") is not None:
                         conn.execute(
-                            "INSERT INTO series_sources (series_id, provider_id, provider_series_id, provider_category_name, raw_name, language, added_at, last_seen_at) "
-                            "VALUES (?,?,?,?,?,?,?,?) "
+                            "INSERT INTO series_sources (series_id, provider_id, provider_series_id, provider_category_name, raw_name, added_at, last_seen_at) "
+                            "VALUES (?,?,?,?,?,?,?) "
                             "ON CONFLICT(provider_id, provider_series_id) DO UPDATE SET "
                             "series_id=excluded.series_id, provider_category_name=excluded.provider_category_name, "
                             "last_seen_at=excluded.last_seen_at",
-                            (series_id, provider_id, item.get("provider_series_id"), item.get("provider_category_name"), item.get("name"),
-                             _source_language(item.get("name"), item.get("provider_category_name")), now, now),
+                            (series_id, provider_id, item.get("provider_series_id"), item.get("provider_category_name"), item.get("name"), now, now),
                         )
 
                     for ep in item.get("episodes", []):
@@ -8239,16 +9002,15 @@ def create_metadata_rule(
 ) -> int:
     """is_regex defaults to False (literal-text matching) -- see this
     column's migration comment for why literal is the safer default."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        cur = conn.execute(
-            "INSERT INTO metadata_rules (content_type, field, pattern, replacement, sort_order, is_regex, created_at) VALUES (?,?,?,?,?,?,?)",
-            (content_type, field, pattern, replacement, sort_order, int(is_regex), _now()),
-        )
-        rule_id = cur.lastrowid
-        _commit_with_retry(conn)
-        conn.close()
-        return rule_id
+    conn = _connect()
+    cur = conn.execute(
+        "INSERT INTO metadata_rules (content_type, field, pattern, replacement, sort_order, is_regex, created_at) VALUES (?,?,?,?,?,?,?)",
+        (content_type, field, pattern, replacement, sort_order, int(is_regex), _now()),
+    )
+    rule_id = cur.lastrowid
+    _commit_with_retry(conn)
+    conn.close()
+    return rule_id
 
 
 def list_metadata_rules(content_type: str | None = None) -> list[dict]:
@@ -8265,19 +9027,17 @@ def list_metadata_rules(content_type: str | None = None) -> list[dict]:
 
 
 def delete_metadata_rule(rule_id: int) -> None:
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("DELETE FROM metadata_rules WHERE id=?", (rule_id,))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("DELETE FROM metadata_rules WHERE id=?", (rule_id,))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def set_metadata_rule_active(rule_id: int, is_active: bool) -> None:
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("UPDATE metadata_rules SET is_active=? WHERE id=?", (int(is_active), rule_id))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("UPDATE metadata_rules SET is_active=? WHERE id=?", (int(is_active), rule_id))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def get_active_rules_for_field(content_type: str, field: str) -> list[dict]:
@@ -8381,72 +9141,71 @@ def apply_metadata_rules_to_pool(content_type: str, force: bool = False) -> dict
     the samples. See preview_metadata_rule for checking a rule BEFORE
     saving it in the first place, which is the safer path for anything
     correcting the earlier fix's own damage."""
-    with _WRITE_LOCK:
-        table = "movies" if content_type == "movie" else "series"
-        rules_by_field: dict[str, list[dict]] = {}
-        for field in REWRITABLE_FIELDS:
-            rules = get_active_rules_for_field(content_type, field)
-            if rules:
-                rules_by_field[field] = rules
-        if not rules_by_field:
-            return {"blocked": False, "checked": 0, "changed": 0}
+    table = "movies" if content_type == "movie" else "series"
+    rules_by_field: dict[str, list[dict]] = {}
+    for field in REWRITABLE_FIELDS:
+        rules = get_active_rules_for_field(content_type, field)
+        if rules:
+            rules_by_field[field] = rules
+    if not rules_by_field:
+        return {"blocked": False, "checked": 0, "changed": 0}
 
-        conn = _connect()
-        # Real bug found live 2026-07-31: a pool-wide rule apply overwrote name
-        # with no record of what it replaced whenever raw_name hadn't already
-        # been captured at import -- true for basically any pre-existing
-        # catalog, since raw_name tracking is new. That's the exact case the
-        # raw_name revert feature (built the same night) exists to protect
-        # against, so this fetches raw_name (series only -- see below) to
-        # backfill it from the about-to-be-overwritten name, and never touches
-        # a raw_name that's already set.
-        backfill_name = content_type == "series" and "name" in rules_by_field
-        cols = ["id", *rules_by_field.keys()]
-        if backfill_name and "raw_name" not in cols:
-            cols.append("raw_name")
-        rows = [dict(r) for r in conn.execute(f"SELECT {', '.join(cols)} FROM {table}").fetchall()]
+    conn = _connect()
+    # Real bug found live 2026-07-31: a pool-wide rule apply overwrote name
+    # with no record of what it replaced whenever raw_name hadn't already
+    # been captured at import -- true for basically any pre-existing
+    # catalog, since raw_name tracking is new. That's the exact case the
+    # raw_name revert feature (built the same night) exists to protect
+    # against, so this fetches raw_name (series only -- see below) to
+    # backfill it from the about-to-be-overwritten name, and never touches
+    # a raw_name that's already set.
+    backfill_name = content_type == "series" and "name" in rules_by_field
+    cols = ["id", *rules_by_field.keys()]
+    if backfill_name and "raw_name" not in cols:
+        cols.append("raw_name")
+    rows = [dict(r) for r in conn.execute(f"SELECT {', '.join(cols)} FROM {table}").fetchall()]
 
-        pending: dict[int, dict] = {}
-        samples = []
-        for row in rows:
-            updates = {}
-            for field, rules in rules_by_field.items():
-                new_val = apply_rules_to_value(row[field], rules)
-                if new_val != row[field]:
-                    updates[field] = new_val
-            if updates:
-                if backfill_name and "name" in updates and not row.get("raw_name"):
-                    updates["raw_name"] = row["name"]
-                pending[row["id"]] = updates
-                if len(samples) < 10:
-                    samples.append({"id": row["id"], "changes": updates})
+    pending: dict[int, dict] = {}
+    samples = []
+    for row in rows:
+        updates = {}
+        for field, rules in rules_by_field.items():
+            new_val = apply_rules_to_value(row[field], rules)
+            if new_val != row[field]:
+                updates[field] = new_val
+        if updates:
+            if backfill_name and "name" in updates and not row.get("raw_name"):
+                updates["raw_name"] = row["name"]
+            pending[row["id"]] = updates
+            if len(samples) < 10:
+                samples.append({"id": row["id"], "changes": updates})
 
-        threshold = max(_POOL_APPLY_BLAST_RADIUS_FLOOR, round(len(rows) * _POOL_APPLY_BLAST_RADIUS_FRACTION))
-        if not force and len(pending) > threshold:
-            conn.close()
-            return {"blocked": True, "checked": len(rows), "changed": len(pending), "threshold": threshold, "samples": samples}
-
-        # Movies have no single raw_name of their own -- it's captured per
-        # SOURCE (a movie can have arrived from more than one provider under
-        # different raw names), so the equivalent backfill for a movie whose
-        # name is about to change is onto each of its sources that doesn't
-        # already have its own raw_name, using the movie's current (pre-rule)
-        # name as the best available record of what it was.
-        if content_type == "movie" and "name" in rules_by_field:
-            old_name_by_id = {row["id"]: row["name"] for row in rows}
-            for row_id, updates in pending.items():
-                if "name" in updates:
-                    conn.execute(
-                        "UPDATE movie_sources SET raw_name=? WHERE movie_id=? AND raw_name IS NULL",
-                        (old_name_by_id[row_id], row_id),
-                    )
-
-        for row_id, updates in pending.items():
-            sets = ", ".join(f"{f}=?" for f in updates)
-            conn.execute(f"UPDATE {table} SET {sets} WHERE id=?", (*updates.values(), row_id))
-        _commit_with_retry(conn)
+    threshold = max(_POOL_APPLY_BLAST_RADIUS_FLOOR, round(len(rows) * _POOL_APPLY_BLAST_RADIUS_FRACTION))
+    if not force and len(pending) > threshold:
         conn.close()
-        return {"blocked": False, "checked": len(rows), "changed": len(pending)}
+        return {"blocked": True, "checked": len(rows), "changed": len(pending), "threshold": threshold, "samples": samples}
+
+    # Movies have no single raw_name of their own -- it's captured per
+    # SOURCE (a movie can have arrived from more than one provider under
+    # different raw names), so the equivalent backfill for a movie whose
+    # name is about to change is onto each of its sources that doesn't
+    # already have its own raw_name, using the movie's current (pre-rule)
+    # name as the best available record of what it was.
+    if content_type == "movie" and "name" in rules_by_field:
+        old_name_by_id = {row["id"]: row["name"] for row in rows}
+        for row_id, updates in pending.items():
+            if "name" in updates:
+                conn.execute(
+                    "UPDATE movie_sources SET raw_name=? WHERE movie_id=? AND raw_name IS NULL",
+                    (old_name_by_id[row_id], row_id),
+                )
+
+    for row_id, updates in pending.items():
+        sets = ", ".join(f"{f}=?" for f in updates)
+        conn.execute(f"UPDATE {table} SET {sets} WHERE id=?", (*updates.values(), row_id))
+    _commit_with_retry(conn)
+    conn.close()
+    return {"blocked": False, "checked": len(rows), "changed": len(pending)}
 
 
 # ── Merging duplicate pool entries ──────────────────────────────────────────
@@ -8465,21 +9224,18 @@ def _merge_movie_row(conn: sqlite3.Connection, from_id: int, into_id: int) -> No
     its own lock/connect/commit for the ordinary one-at-a-time UI path."""
     from_row = conn.execute("SELECT name, year, tmdb_id FROM movies WHERE id=?", (from_id,)).fetchone()
     into_row = conn.execute("SELECT name, year, tmdb_id FROM movies WHERE id=?", (into_id,)).fetchone()
-    if not from_row or not into_row:
-        # Found live 2026-09-15: two concurrent auto-merges of the same
-        # tmdb_id cluster in opposite directions can each pass their own
-        # pre-lock "still exists" check (see auto_merge_movie_by_tmdb) and
-        # then both reach here -- whichever runs second finds its from_id
-        # or into_id already deleted by the first. That check is a TOCTOU
-        # race by construction (it can't hold _WRITE_LOCK across the gap
-        # back to the caller); THIS check, taken while already holding the
-        # lock and right before the writes that would otherwise hit a
-        # FOREIGN KEY failure, is the actual atomic guard. No-op instead of
-        # raising -- the other concurrent merge already achieved the same
-        # end state.
+    if from_row is None or into_row is None:
+        # beads-3qf: this connection holds _WRITE_LOCK for the whole merge,
+        # so this is the last checkpoint before the UPDATE/DELETE below --
+        # if either row is already gone (deleted by an earlier merge in the
+        # same tmdb_id cluster, e.g. a chained auto_merge_movie_by_tmdb pass
+        # over several variants of the same title), merging a stale id here
+        # is exactly what produced the FK constraint failures seen live
+        # 2026-09-10. No-op instead of letting the DELETE/UPDATE below hit a
+        # now-nonexistent row.
         logger.warning(
-            "[merge_movie] id=%s -> id=%s skipped -- one side no longer exists "
-            "(already merged by a concurrent auto-merge)", from_id, into_id,
+            "[merge_movie] skipping id=%s -> id=%s -- one side no longer exists (already merged)",
+            from_id, into_id,
         )
         return
     # This permanently deletes `from_id` below (its sources/placements move
@@ -8522,25 +9278,209 @@ def _merge_movie_row(conn: sqlite3.Connection, from_id: int, into_id: int) -> No
 def merge_movie(from_id: int, into_id: int) -> None:
     """Holds _WRITE_LOCK for the whole operation -- see delete_provider's
     docstring for why an unlocked `movies` delete here can race a concurrent
-    import and cause its inserts to fail with a FOREIGN KEY error.
-
-    conn.close() is in a finally (found live 2026-09-15): two concurrent
-    auto-merges of the same tmdb_id pair in opposite directions can hit a
-    real FOREIGN KEY failure here (from_id already deleted by the other
-    merge) -- without the finally, that exception skipped conn.close(),
-    leaking an open connection that still held the WAL write lock until
-    Python GC eventually collected it, which then surfaced as spurious
-    'database is locked' on the NEXT unrelated writer as collateral damage,
-    not just failing this one merge."""
+    import and cause its inserts to fail with a FOREIGN KEY error."""
     if from_id == into_id:
         return
     with _WRITE_LOCK:
         conn = _connect()
+        _merge_movie_row(conn, from_id, into_id)
+        _commit_with_retry(conn)
+        conn.close()
+
+
+def _source_languages(conn: sqlite3.Connection, sources_table: str, fk_column: str, row_id: int) -> set[str]:
+    """Distinct COALESCE(language,'EN') values across a movie's/series'
+    _sources rows (beads-974) -- the merge-gate's view of "what language(s)
+    does this card actually carry", since movies/series themselves have no
+    language column of their own. COALESCE-to-EN matches _source_language's
+    own untagged-source default, so a row with no sources yet (or only
+    untagged ones) reads as {"EN"}, same as a freshly-tagged EN source --
+    this is what makes an untagged variant merge-compatible with an
+    explicit EN variant per the untagged-defaults-to-EN rule."""
+    rows = conn.execute(
+        f"SELECT DISTINCT COALESCE(language, 'EN') AS lang FROM {sources_table} WHERE {fk_column}=?",
+        (row_id,),
+    ).fetchall()
+    return {row["lang"] for row in rows} or {"EN"}
+
+
+def _shares_a_language(conn: sqlite3.Connection, sources_table: str, fk_column: str, id_a: int, id_b: int) -> bool:
+    """True if the two rows' source-language sets overlap at all (beads-974).
+    Overlap, not equality: a card can legitimately carry sources in more than
+    one language already (e.g. two providers both tagged EN plus one tagged
+    ES) -- the merge should only be blocked when two candidates share NO
+    language at all, not whenever their sets aren't identical."""
+    return bool(
+        _source_languages(conn, sources_table, fk_column, id_a)
+        & _source_languages(conn, sources_table, fk_column, id_b)
+    )
+
+
+def auto_merge_movie_by_tmdb(movie_id: int) -> list[dict]:
+    """Called right after enrichment confirms/refreshes `movie_id`'s tmdb_id
+    (see vod_importer.enrich_movie) -- every OTHER movie row sharing that
+    same non-null tmdb_id gets merged into it automatically, no human click,
+    regardless of how many there are (a same-tmdb_id cluster is commonly 3+
+    rows in practice -- one real film plus several provider language/dub
+    variants, e.g. "Title", "IR - Title", "AR-SUBS - Title" all carrying the
+    identical tmdb_id).
+
+    Design (user direction 2026-09-10, see beads-w80): tmdb_id equality is
+    the primary MUST-match gate -- it's independently corroborated by TMDB
+    itself, not derived from our own name-normalization heuristics. The one
+    deliberate partial-identity exception is a same normalized title + exact
+    year card with no TMDB ID: it is merged into the sole TMDB-backed card
+    only when no competing TMDB ID makes that pairing ambiguous. All merges
+    still require exact year agreement and the source-language guard.
+
+    The just-enriched row (`movie_id`) is kept as the surviving `into_id`
+    for every merge in the group -- its metadata was just refreshed from
+    TMDB/provider, so it's the freshest -- each other matching row is
+    deleted in turn after its sources/placements move over (see
+    _merge_movie_row). Respects duplicate_ignores per-pair exactly like the
+    manual flow: a pair a human already dismissed is skipped even if the
+    rest of the group still qualifies and merges.
+
+    No undo path exists for this merge (see _merge_movie_row's docstring on
+    why the delete is irreversible outside a DB backup) -- the logger.warning
+    call inside _merge_movie_row is the only audit trail, which is why every
+    call site here logs the year-agreement status on top of it."""
+    if not get_duplicate_finder_auto_merge_tmdb():
+        return []
+
+    movie = get_movie(movie_id)
+    tmdb_id = movie.get("tmdb_id") if movie else None
+    if not tmdb_id:
+        return []
+
+    conn = _connect()
+    merge_candidates = [
+        (dict(row), "tmdb_id") for row in conn.execute(
+            "SELECT id, name, year, tmdb_id FROM movies WHERE tmdb_id=? AND id!=?",
+            (tmdb_id, movie_id),
+        ).fetchall()
+    ]
+    # A provider can create a second card before TMDB enrichment runs. If its
+    # title/year exactly corroborates the already-known card, it is safe to
+    # fold the missing-ID card into the TMDB-backed survivor. Require that no
+    # competing TMDB ID exists for this same normalized title/year, otherwise
+    # a same-name remake would make the automatic choice ambiguous.
+    if movie.get("year") is not None:
+        same_year_rows = [
+            dict(row) for row in conn.execute(
+                "SELECT id, name, year, tmdb_id FROM movies WHERE year=? AND id!=?",
+                (movie["year"], movie_id),
+            ).fetchall()
+            if _dedup_name_key(row["name"]) == _dedup_name_key(movie.get("name") or "")
+        ]
+        same_name_tmdb_ids = {
+            str(row["tmdb_id"]) for row in same_year_rows if row.get("tmdb_id")
+        }
+        if not same_name_tmdb_ids or same_name_tmdb_ids == {str(tmdb_id)}:
+            merge_candidates.extend(
+                (row, "name_year_missing_tmdb")
+                for row in same_year_rows if not row.get("tmdb_id")
+            )
+    conn.close()
+    if not merge_candidates:
+        return []
+
+    ignored_sigs = set(list_ignored_duplicate_signatures("movie"))
+    this_year = movie.get("year")
+    merge_events = []
+    for row, match_type in merge_candidates:
+        signature = _duplicate_ignore_signature([movie_id, row["id"]])
+        if signature in ignored_sigs:
+            continue
+
+        # beads-3qf: other_rows was snapshotted above -- if this tmdb_id
+        # cluster has 3+ variants, a DIFFERENT concurrent/prior
+        # auto_merge_movie_by_tmdb call for another member of the same
+        # cluster can have already deleted or re-pointed movie_id or
+        # row["id"] by the time we get here (each variant's own enrichment
+        # independently triggers this function). Merging a stale id causes
+        # a merge cycle (A merges into B while B is simultaneously merging
+        # into A) and a FOREIGN KEY constraint failure. Re-check both rows
+        # still exist immediately before merging, not just at the top of
+        # this function.
+        if not get_movie(movie_id) or not get_movie(row["id"]):
+            logger.warning(
+                "[auto_merge_movie_by_tmdb] tmdb_id=%s skipping id=%s -> id=%s -- one side no longer exists "
+                "(already merged by a concurrent auto-merge in this cluster)",
+                tmdb_id, row["id"], movie_id,
+            )
+            continue
+
+        # beads-974: tmdb_id equality alone used to be sufficient -- now also
+        # require the two candidates to share at least one source language.
+        # Without this, provider language/dub variants (the exact case this
+        # function was built to merge) collapse into one card whose playback
+        # failover can silently switch the user to an unwanted-language
+        # stream (see _best_source_cte). Untagged sources read as EN (same
+        # default _source_language uses at write time), so this stays
+        # backward-compatible for the common no-language-tag case.
+        #
+        # Deliberately the UNFILTERED source languages, not
+        # config.get_enabled_languages() (KNM: reverted 2026-09-13, user
+        # report -- a 2026-09-12 attempt to filter this to enabled-only
+        # languages made "enabled for playback", a live/orthogonal/user-
+        # configurable query-time setting, silently stand in for "shares no
+        # actual language" whenever a side's only real language wasn't
+        # currently enabled. That let real EN/ES (etc.) variants of the same
+        # tmdb_id merge every enrichment cycle, which is exactly what the
+        # daily language-split maintenance tool exists to undo. Merge safety
+        # must be judged on what language a source actually carries, same as
+        # _shares_a_language already does at import time -- never on whether
+        # that language happens to be enabled for playback right now.
+        gate_conn = _connect()
         try:
-            _merge_movie_row(conn, from_id, into_id)
-            _commit_with_retry(conn)
+            row_langs = _source_languages(gate_conn, "movie_sources", "movie_id", row["id"])
+            movie_langs = _source_languages(gate_conn, "movie_sources", "movie_id", movie_id)
         finally:
-            conn.close()
+            gate_conn.close()
+        if row_langs and movie_langs and not (row_langs & movie_langs):
+            logger.warning(
+                "[auto_merge_movie_by_tmdb] tmdb_id=%s skipping id=%s -> id=%s -- no shared source language "
+                "(languages: %s vs %s)",
+                tmdb_id, row["id"], movie_id, sorted(row_langs), sorted(movie_langs),
+            )
+            continue
+
+        other_year = row["year"]
+        if this_year is None or other_year is None:
+            year_status = "one_missing"
+        elif this_year == other_year:
+            year_status = "agree"
+        else:
+            year_status = "MISMATCH"
+        if year_status != "agree":
+            logger.warning(
+                "[auto_merge_movie_by_tmdb] tmdb_id=%s year_status=%s -- skipping id=%s -> id=%s",
+                tmdb_id, year_status, row["id"], movie_id,
+            )
+            continue
+        logger.warning(
+            "[auto_merge_movie_by_tmdb] tmdb_id=%s year_status=%s -- id=%s (%r, year=%s) auto-merging into id=%s (%r, year=%s)",
+            tmdb_id, year_status, row["id"], row["name"], other_year, movie_id, movie.get("name"), this_year,
+        )
+        merge_events.append({
+            "content_type": "movie",
+            "content_id": movie_id,
+            "title": movie.get("name") or "Movie",
+            "year": this_year,
+            "action": "merged",
+            "detail": {
+                "tmdb_id": tmdb_id,
+                "match_type": match_type,
+                "merged_title": row["name"],
+                "merged_id": row["id"],
+                "survivor_title": movie.get("name"),
+                "survivor_id": movie_id,
+                "year_status": year_status,
+            },
+        })
+        merge_movie(row["id"], movie_id)
+    return merge_events
 
 
 def _merge_series_row(conn: sqlite3.Connection, from_id: int, into_id: int) -> None:
@@ -8549,14 +9489,6 @@ def _merge_series_row(conn: sqlite3.Connection, from_id: int, into_id: int) -> N
     why this exists separately from merge_series (single-item)."""
     from_row = conn.execute("SELECT name, year, tmdb_id FROM series WHERE id=?", (from_id,)).fetchone()
     into_row = conn.execute("SELECT name, year, tmdb_id FROM series WHERE id=?", (into_id,)).fetchone()
-    if not from_row or not into_row:
-        # See _merge_movie_row's identical note -- same concurrent-opposite-
-        # direction-merge race, same atomic no-op guard.
-        logger.warning(
-            "[merge_series] id=%s -> id=%s skipped -- one side no longer exists "
-            "(already merged by a concurrent auto-merge)", from_id, into_id,
-        )
-        return
     # See merge_movie's identical logging comment -- same irreversible-delete risk.
     logger.warning(
         "[merge_series] id=%s (%r, year=%s, tmdb_id=%s) merging into id=%s (%r, year=%s, tmdb_id=%s) -- from_id row will be deleted",
@@ -8610,510 +9542,97 @@ def _merge_series_row(conn: sqlite3.Connection, from_id: int, into_id: int) -> N
 def merge_series(from_id: int, into_id: int) -> None:
     """Holds _WRITE_LOCK for the whole operation -- see delete_provider's
     docstring for why an unlocked `series` delete here can race a concurrent
-    import and cause its inserts to fail with a FOREIGN KEY error.
-
-    conn.close() is in a finally -- see merge_movie's identical note (same
-    live-found leaked-connection-on-exception issue, same fix)."""
+    import and cause its inserts to fail with a FOREIGN KEY error."""
     if from_id == into_id:
         return
     with _WRITE_LOCK:
         conn = _connect()
-        try:
-            _merge_series_row(conn, from_id, into_id)
-            _commit_with_retry(conn)
-        finally:
-            conn.close()
+        _merge_series_row(conn, from_id, into_id)
+        _commit_with_retry(conn)
+        conn.close()
 
 
-def _source_languages(conn: sqlite3.Connection, sources_table: str, fk_column: str, row_id: int) -> set[str]:
-    """Distinct COALESCE(language,'EN') values across a movie's/series'
-    _sources rows -- the merge-gate's view of "what language(s) does this
-    card actually carry", since movies/series themselves have no language
-    column of their own. COALESCE-to-EN matches _source_language's own
-    untagged-source default, so a row with no sources yet (or only untagged
-    ones) reads as {"EN"}, same as a freshly-tagged EN source -- this is what
-    makes an untagged variant merge-compatible with an explicit EN variant
-    per the untagged-defaults-to-EN rule."""
-    rows = conn.execute(
-        f"SELECT DISTINCT COALESCE(language, 'EN') AS lang FROM {sources_table} WHERE {fk_column}=?",
-        (row_id,),
-    ).fetchall()
-    return {row["lang"] for row in rows} or {"EN"}
-
-
-def _group_source_languages_by_conflict(conn: sqlite3.Connection, sources_table: str, fk_column: str, row_id: int) -> list[dict]:
-    """Union-chains a single movie's/series' own movie_sources/series_sources
-    rows by COALESCE(language,'EN') -- the retroactive counterpart to
-    _split_by_language_conflict above (that one splits a set of DUPLICATE
-    CANDIDATE rows apart before a merge; this one splits a single ALREADY-
-    MERGED row's own sources apart, for movie_language_split_dry_run_report/
-    series_language_split_dry_run_report to find catalog entries merged back
-    when auto_merge_movie_by_tmdb/auto_merge_series_by_tmdb gated on tmdb_id
-    alone, before _split_by_language_conflict's language gate existed).
-    Same union-not-exact-set-equality grouping as that function: {EN},
-    {EN,ES}, {ES} sources all end up in one group (the middle one bridges
-    them), not three. Returns one dict per resulting language group:
-    {"langs": set[str], "source_ids": list[int]}, largest group first (ties
-    broken by lowest source id, for determinism) -- callers keep group [0]
-    on the original row and split the rest off into new rows."""
-    rows = conn.execute(
-        f"SELECT id, COALESCE(language, 'EN') AS lang FROM {sources_table} WHERE {fk_column}=?",
-        (row_id,),
-    ).fetchall()
-
-    groups: list[dict] = []
-    for row in rows:
-        row_langs = {row["lang"]}
-        joined = False
-        for g in groups:
-            if g["langs"] & row_langs:
-                g["source_ids"].append(row["id"])
-                g["langs"] |= row_langs
-                joined = True
-                break
-        if not joined:
-            groups.append({"langs": row_langs, "source_ids": [row["id"]]})
-
-    groups.sort(key=lambda g: (-len(g["source_ids"]), min(g["source_ids"])))
-    return groups
-
-
-def _row_columns_to_copy(table: str) -> list[str]:
-    """Every real column on `table` except id/created_at/updated_at -- for
-    cloning a movies/series row when splitting one language group off into
-    a brand-new row. Read from the live schema (PRAGMA table_info) rather
-    than a hardcoded list so a future column addition is copied
-    automatically instead of silently dropped."""
-    conn = _connect()
-    cols = [r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()
-            if r["name"] not in ("id", "created_at", "updated_at")]
-    conn.close()
-    return cols
-
-
-def _movie_language_split_candidates(conn: sqlite3.Connection) -> list[int]:
-    """Cheap first pass: only movies whose sources carry more than one
-    distinct COALESCE(language,'EN') value at all can possibly be a split
-    candidate -- the overwhelming majority of a real catalog has exactly
-    one, so this SQL-side prefilter avoids running the full per-row
-    union-conflict grouping (_group_source_languages_by_conflict) against
-    every movie just to find the rare few actually worth it."""
-    rows = conn.execute("""
-        SELECT movie_id FROM movie_sources
-        GROUP BY movie_id
-        HAVING COUNT(DISTINCT COALESCE(language, 'EN')) > 1
-    """).fetchall()
-    return [r["movie_id"] for r in rows]
-
-
-def movie_language_split_dry_run_report(sample_size: int = 20) -> dict:
-    """Reports every existing movie whose movie_sources span more than one
-    non-overlapping language group (see _group_source_languages_by_conflict)
-    -- these were auto-merged together back when auto_merge_movie_by_tmdb
-    gated on a shared tmdb_id alone, before the language gate
-    (_split_by_language_conflict) existed to keep it from happening for new
-    merges. Read-only -- see apply_movie_language_split for the actual
-    re-split. {"count": N, "sample": [{"movie_id", "name",
-    "groups": [{"languages": [...], "source_count": N}, ...]}, ...]}."""
-    conn = _connect()
-    candidates = []
-    for movie_id in _movie_language_split_candidates(conn):
-        groups = _group_source_languages_by_conflict(conn, "movie_sources", "movie_id", movie_id)
-        if len(groups) <= 1:
-            continue
-        row = conn.execute("SELECT name FROM movies WHERE id=?", (movie_id,)).fetchone()
-        if not row:
-            continue
-        candidates.append({
-            "movie_id": movie_id,
-            "name": row["name"],
-            "groups": [{"languages": sorted(g["langs"]), "source_count": len(g["source_ids"])} for g in groups],
-        })
-    conn.close()
-    return {"count": len(candidates), "sample": candidates[:sample_size]}
-
-
-def apply_movie_language_split() -> dict:
-    """Re-splits every movie found by movie_language_split_dry_run_report:
-    the largest language group stays on the original row, every other group
-    gets a brand-new movie row (cloned from the original -- name/year/
-    tmdb_id/poster/etc, see _row_columns_to_copy) with that group's
-    movie_sources reassigned onto it and the original's category placements
-    copied (not moved -- both language editions belong in whatever
-    categories the merged row was already in). Safe to re-run -- once every
-    movie's sources agree on language, it's a no-op. Returns {"movies_split":
-    N, "rows_created": N}."""
-    copy_cols = _row_columns_to_copy("movies")
-    movies_split = 0
-    rows_created = 0
-    with _WRITE_LOCK:
-        conn = _connect()
-        try:
-            candidate_ids = _movie_language_split_candidates(conn)
-            for movie_id in candidate_ids:
-                groups = _group_source_languages_by_conflict(conn, "movie_sources", "movie_id", movie_id)
-                if len(groups) <= 1:
-                    continue
-                original = conn.execute(f"SELECT {', '.join(copy_cols)} FROM movies WHERE id=?", (movie_id,)).fetchone()
-                if not original:
-                    continue
-                placements = [r["category_id"] for r in conn.execute(
-                    "SELECT category_id FROM movie_category_placements WHERE movie_id=?", (movie_id,)
-                ).fetchall()]
-                for group in groups[1:]:
-                    now = _now()
-                    placeholders = ", ".join("?" * len(copy_cols))
-                    cur = conn.execute(
-                        f"INSERT INTO movies ({', '.join(copy_cols)}, created_at, updated_at) VALUES ({placeholders}, ?, ?)",
-                        (*[original[c] for c in copy_cols], now, now),
-                    )
-                    new_id = cur.lastrowid
-                    placeholders = ",".join("?" * len(group["source_ids"]))
-                    conn.execute(
-                        f"UPDATE movie_sources SET movie_id=? WHERE id IN ({placeholders})",
-                        (new_id, *group["source_ids"]),
-                    )
-                    # place_movie_in_category owns export_stream_id
-                    # generation (a NOT NULL UNIQUE the raw INSERT this
-                    # replaced didn't know how to fill in), but it opens
-                    # its own connection and does its own BEGIN IMMEDIATE --
-                    # which deadlocks against this function's still-open
-                    # transaction on `conn`. Commit first so the new row it
-                    # needs to see (and the write lock it needs to take) are
-                    # both actually available.
-                    _commit_with_retry(conn)
-                    for category_id in placements:
-                        # Its needs-year-review/archived guards can raise
-                        # ValueError -- normally impossible here (an
-                        # archived original strips its own placements
-                        # before this loop ever sees them), but one
-                        # unexpected candidate must not abort every other
-                        # movie's split in the same batch.
-                        try:
-                            place_movie_in_category(new_id, category_id)
-                        except ValueError as exc:
-                            logger.warning("[apply_movie_language_split] movie_id=%s: couldn't place split-off row %s in category %s: %s",
-                                            movie_id, new_id, category_id, exc)
-                    rows_created += 1
-                movies_split += 1
-                if (movies_split % 25) == 0:
-                    _commit_with_retry(conn)
-                    _WRITE_LOCK.release()
-                    _WRITE_LOCK.acquire()
-            _commit_with_retry(conn)
-        finally:
-            conn.close()
-    return {"movies_split": movies_split, "rows_created": rows_created}
-
-
-def _series_language_split_candidates(conn: sqlite3.Connection) -> list[int]:
-    """series_sources counterpart to _movie_language_split_candidates."""
-    rows = conn.execute("""
-        SELECT series_id FROM series_sources
-        GROUP BY series_id
-        HAVING COUNT(DISTINCT COALESCE(language, 'EN')) > 1
-    """).fetchall()
-    return [r["series_id"] for r in rows]
-
-
-def series_language_split_dry_run_report(sample_size: int = 20) -> dict:
-    """series counterpart to movie_language_split_dry_run_report, grouping
-    by series_sources instead of movie_sources. See apply_series_language_
-    split for the actual re-split (episodes included)."""
-    conn = _connect()
-    candidates = []
-    for series_id in _series_language_split_candidates(conn):
-        groups = _group_source_languages_by_conflict(conn, "series_sources", "series_id", series_id)
-        if len(groups) <= 1:
-            continue
-        row = conn.execute("SELECT name FROM series WHERE id=?", (series_id,)).fetchone()
-        if not row:
-            continue
-        candidates.append({
-            "series_id": series_id,
-            "name": row["name"],
-            "groups": [{"languages": sorted(g["langs"]), "source_count": len(g["source_ids"])} for g in groups],
-        })
-    conn.close()
-    return {"count": len(candidates), "sample": candidates[:sample_size]}
-
-
-def apply_series_language_split() -> dict:
-    """Re-splits every series found by series_language_split_dry_run_report.
-    Same shape as apply_movie_language_split (largest group stays, every
-    other group gets a new series row with series_sources reassigned and
-    category placements copied), plus episode handling series_sources alone
-    doesn't need: for every episode of the original series, whichever of
-    its episode_sources belong to a provider in the group being split off
-    move with it -- into a matching (season, episode) row on the new
-    series, created if it doesn't have one yet, same reassign-or-merge
-    pattern _merge_series_row uses in the opposite direction. An episode
-    left with zero remaining episode_sources on the original series (all of
-    them moved) is purged, same as any other now-sourceless episode.
-    import_provider_id/import_provider_series_id are left NULL on the new
-    row rather than guessed -- the normal periodic re-sync re-establishes
-    them the next time that provider's catalog is processed. Safe to
-    re-run. Returns {"series_split": N, "rows_created": N}."""
-    copy_cols = _row_columns_to_copy("series")
-    copy_cols = [c for c in copy_cols if c not in ("import_provider_id", "import_provider_series_id")]
-    series_split = 0
-    rows_created = 0
-    with _WRITE_LOCK:
-        conn = _connect()
-        try:
-            candidate_ids = _series_language_split_candidates(conn)
-            for series_id in candidate_ids:
-                groups = _group_source_languages_by_conflict(conn, "series_sources", "series_id", series_id)
-                if len(groups) <= 1:
-                    continue
-                original = conn.execute(f"SELECT {', '.join(copy_cols)} FROM series WHERE id=?", (series_id,)).fetchone()
-                if not original:
-                    continue
-                placements = [r["category_id"] for r in conn.execute(
-                    "SELECT category_id FROM series_category_placements WHERE series_id=?", (series_id,)
-                ).fetchall()]
-                for group in groups[1:]:
-                    now = _now()
-                    placeholders = ", ".join("?" * len(copy_cols))
-                    cur = conn.execute(
-                        f"INSERT INTO series ({', '.join(copy_cols)}, created_at, updated_at) VALUES ({placeholders}, ?, ?)",
-                        (*[original[c] for c in copy_cols], now, now),
-                    )
-                    new_series_id = cur.lastrowid
-                    source_placeholders = ",".join("?" * len(group["source_ids"]))
-                    moved_provider_ids = {
-                        r["provider_id"] for r in conn.execute(
-                            f"SELECT DISTINCT provider_id FROM series_sources WHERE id IN ({source_placeholders})",
-                            group["source_ids"],
-                        ).fetchall()
-                    }
-                    conn.execute(
-                        f"UPDATE series_sources SET series_id=? WHERE id IN ({source_placeholders})",
-                        (new_series_id, *group["source_ids"]),
-                    )
-                    # See apply_movie_language_split's identical note --
-                    # place_series_in_category opens its own connection/
-                    # transaction, which deadlocks against this one's still
-                    # -open transaction without committing first.
-                    _commit_with_retry(conn)
-                    for category_id in placements:
-                        # One unexpected ValueError must not abort the rest
-                        # of this batch.
-                        try:
-                            place_series_in_category(new_series_id, category_id)
-                        except ValueError as exc:
-                            logger.warning("[apply_series_language_split] series_id=%s: couldn't place split-off row %s in category %s: %s",
-                                            series_id, new_series_id, category_id, exc)
-
-                    provider_placeholders = ",".join("?" * len(moved_provider_ids))
-                    episodes = conn.execute(
-                        "SELECT id, season_number, episode_number FROM episodes WHERE series_id=?", (series_id,)
-                    ).fetchall()
-                    for ep in episodes:
-                        moved_source_ids = [
-                            r["id"] for r in conn.execute(
-                                f"SELECT id FROM episode_sources WHERE episode_id=? AND provider_id IN ({provider_placeholders})",
-                                (ep["id"], *moved_provider_ids),
-                            ).fetchall()
-                        ] if moved_provider_ids else []
-                        if not moved_source_ids:
-                            continue
-                        target_ep = conn.execute(
-                            "SELECT id FROM episodes WHERE series_id=? AND season_number=? AND episode_number=?",
-                            (new_series_id, ep["season_number"], ep["episode_number"]),
-                        ).fetchone()
-                        if target_ep:
-                            target_ep_id = target_ep["id"]
-                        else:
-                            new_ep_cur = conn.execute(
-                                "INSERT INTO episodes (series_id, season_number, episode_number, name, description, duration_secs, created_at) "
-                                "SELECT ?, season_number, episode_number, name, description, duration_secs, ? FROM episodes WHERE id=?",
-                                (new_series_id, now, ep["id"]),
-                            )
-                            target_ep_id = new_ep_cur.lastrowid
-                        moved_es_placeholders = ",".join("?" * len(moved_source_ids))
-                        conn.execute(
-                            f"UPDATE episode_sources SET episode_id=? WHERE id IN ({moved_es_placeholders})",
-                            (target_ep_id, *moved_source_ids),
-                        )
-                        _purge_if_sourceless_episode(conn, ep["id"])
-                    rows_created += 1
-                series_split += 1
-                if (series_split % 25) == 0:
-                    _commit_with_retry(conn)
-                    _WRITE_LOCK.release()
-                    _WRITE_LOCK.acquire()
-            _commit_with_retry(conn)
-        finally:
-            conn.close()
-    return {"series_split": series_split, "rows_created": rows_created}
-
-
-def auto_merge_movie_by_tmdb(movie_id: int) -> None:
-    """Called right after enrichment confirms/refreshes `movie_id`'s tmdb_id
-    (see vod_importer.enrich_movie) -- every OTHER movie row sharing that
-    same non-null tmdb_id gets merged into it automatically, no human click,
-    regardless of how many there are (a same-tmdb_id cluster is commonly 3+
-    rows in practice -- one real film plus several provider language/dub
-    variants).
-
-    tmdb_id equality is the MUST-match gate -- it's independently
-    corroborated by TMDB itself, not derived from our own name-normalization
-    heuristics, so it's trusted enough to skip manual review, at any group
-    size. Year agreement is a reinforcer only, never a requirement -- logged
-    for audit, never blocks the merge.
-
-    The just-enriched row (`movie_id`) is kept as the surviving `into_id`
-    for every merge in the group -- its metadata was just refreshed from
-    TMDB/provider, so it's the freshest -- each other matching row is
-    deleted in turn after its sources/placements move over (see
-    _merge_movie_row). Respects duplicate_ignores per-pair exactly like the
-    manual flow: a pair a human already dismissed is skipped even if the
-    rest of the group still qualifies and merges."""
-    if not get_duplicate_finder_auto_merge_tmdb():
-        return
-
-    movie = get_movie(movie_id)
-    tmdb_id = movie.get("tmdb_id") if movie else None
-    if not tmdb_id:
-        return
-
-    conn = _connect()
-    other_rows = conn.execute(
-        "SELECT id, name, year FROM movies WHERE tmdb_id=? AND id!=?", (tmdb_id, movie_id)
-    ).fetchall()
-    conn.close()
-    if not other_rows:
-        return
-
-    ignored_sigs = set(list_ignored_duplicate_signatures("movie"))
-    this_year = movie.get("year")
-    for row in other_rows:
-        signature = _duplicate_ignore_signature([movie_id, row["id"]])
-        if signature in ignored_sigs:
-            continue
-
-        # other_rows was snapshotted above -- if this tmdb_id cluster has 3+
-        # variants, a DIFFERENT concurrent/prior auto_merge_movie_by_tmdb
-        # call for another member of the same cluster can have already
-        # deleted or re-pointed movie_id or row["id"] by the time we get
-        # here (each variant's own enrichment independently triggers this
-        # function). Merging a stale id causes a merge cycle (A merges into
-        # B while B is simultaneously merging into A) and a FOREIGN KEY
-        # constraint failure. Re-check both rows still exist immediately
-        # before merging, not just at the top of this function.
-        if not get_movie(movie_id) or not get_movie(row["id"]):
-            logger.warning(
-                "[auto_merge_movie_by_tmdb] tmdb_id=%s skipping id=%s -> id=%s -- one side no longer exists "
-                "(already merged by a concurrent auto-merge in this cluster)",
-                tmdb_id, row["id"], movie_id,
-            )
-            continue
-
-        # tmdb_id equality alone used to be sufficient -- now also require
-        # the two candidates to share at least one source language. Without
-        # this, provider language/dub variants (the exact case this
-        # function was built to merge) collapse into one card whose
-        # playback failover can silently switch the user to an
-        # unwanted-language stream (see _best_source_cte). Untagged sources
-        # read as EN (same default _source_language uses at write time), so
-        # this stays backward-compatible for the common no-language-tag
-        # case.
-        #
-        # Deliberately the UNFILTERED source languages, not
-        # config.get_enabled_languages() -- filtering this to enabled-only
-        # languages would let "enabled for playback", a live/orthogonal/
-        # user-configurable query-time setting, silently stand in for
-        # "shares no actual language" whenever a side's only real language
-        # wasn't currently enabled, which would merge real EN/ES (etc.)
-        # variants of the same tmdb_id every enrichment cycle -- exactly
-        # what the language-split maintenance tools exist to undo. Merge
-        # safety must be judged on what language a source actually carries,
-        # never on whether that language happens to be enabled for playback
-        # right now.
-        gate_conn = _connect()
-        try:
-            row_langs = _source_languages(gate_conn, "movie_sources", "movie_id", row["id"])
-            movie_langs = _source_languages(gate_conn, "movie_sources", "movie_id", movie_id)
-        finally:
-            gate_conn.close()
-        if row_langs and movie_langs and not (row_langs & movie_langs):
-            logger.warning(
-                "[auto_merge_movie_by_tmdb] tmdb_id=%s skipping id=%s -> id=%s -- no shared source language "
-                "(languages: %s vs %s)",
-                tmdb_id, row["id"], movie_id, sorted(row_langs), sorted(movie_langs),
-            )
-            continue
-
-        other_year = row["year"]
-        if this_year is None or other_year is None:
-            year_status = "one_missing"
-        elif this_year == other_year:
-            year_status = "agree"
-        else:
-            year_status = "MISMATCH"
-        logger.warning(
-            "[auto_merge_movie_by_tmdb] tmdb_id=%s year_status=%s -- id=%s (%r, year=%s) auto-merging into id=%s (%r, year=%s)",
-            tmdb_id, year_status, row["id"], row["name"], other_year, movie_id, movie.get("name"), this_year,
-        )
-        merge_movie(row["id"], movie_id)
-
-
-def auto_merge_series_by_tmdb(series_id: int) -> None:
+def auto_merge_series_by_tmdb(series_id: int) -> list[dict]:
     """Called right after enrichment confirms/refreshes `series_id`'s tmdb_id
     (see vod_importer.enrich_series) -- every OTHER series row sharing that
     same non-null tmdb_id gets merged into a single survivor automatically,
     no human click, regardless of how many there are. Same design as
-    auto_merge_movie_by_tmdb -- tmdb_id equality is the sole MUST-match
-    gate, trusted at any group size because it's independently corroborated
-    by TMDB, not derived from our own name-normalization heuristics. Year
-    agreement is logged as an audit/reinforcer signal only, never a
-    requirement or blocker.
+    auto_merge_movie_by_tmdb (beads-w80): a same normalized title + exact
+    year card with no TMDB ID may also merge into the sole TMDB-backed card
+    when no competing TMDB ID makes the pairing ambiguous. All merges still
+    require exact year agreement and the source-language guard.
 
-    Survivor tiebreak differs from movies: movies keep the just-enriched
-    row as survivor; series instead prefer whichever row in the cluster has
-    the "cleanest" name -- no leftover provider/language prefix like
-    "EN -"/"NF -" (see _strip_quality_lang_prefix_for_dedup). A prefixed
-    name is very often the result of a raw provider feed field bleeding
-    through un-normalized, so keeping the un-prefixed row's metadata
-    (poster, description, etc.) as the survivor is more likely to already
-    be clean. Ties (all names equally clean, or all equally prefixed) fall
-    back to keeping series_id, the just-enriched row, same as movies.
+    Survivor tiebreak differs from movies (user direction 2026-09-10):
+    movies keep the just-enriched row as survivor; series instead prefer
+    whichever row in the cluster has the "cleanest" name -- no leftover
+    provider/language prefix like "EN -"/"NF -" (see
+    _strip_quality_lang_prefix_for_dedup). A prefixed name is very often the
+    result of a raw provider feed field bleeding through un-normalized, so
+    keeping the un-prefixed row's metadata (poster, description, etc.) as the
+    survivor is more likely to already be clean. Ties (all names equally
+    clean, or all equally prefixed) fall back to keeping series_id, the
+    just-enriched row, same as movies.
 
-    Respects duplicate_ignores per-pair exactly like movies' version and
-    the manual Duplicate Finder flow -- a pair a human already dismissed is
+    Respects duplicate_ignores per-pair exactly like movies' version and the
+    manual Duplicate Finder flow -- a pair a human already dismissed is
     skipped even if the rest of the group still qualifies. Also carries the
-    same concurrency guard: other_rows is snapshotted once, then
+    same beads-3qf concurrency guard: other_rows is snapshotted once, then
     immediately before each individual merge both rows are re-verified to
-    still exist, since a tmdb_id cluster of 3+ variants means each
-    variant's own enrichment independently triggers this function, and a
-    later call in the same batch can find its target/source already
-    deleted by an earlier concurrent call."""
+    still exist, since a tmdb_id cluster of 3+ variants means each variant's
+    own enrichment independently triggers this function, and a later call in
+    the same batch can find its target/source already deleted by an earlier
+    concurrent call.
+
+    No undo path exists for this merge (see _merge_series_row's docstring on
+    why the delete is irreversible outside a DB backup) -- the
+    logger.warning call inside _merge_series_row is the only audit trail,
+    which is why every call site here logs the year-agreement status and the
+    chosen survivor on top of it."""
     if not get_duplicate_finder_auto_merge_tmdb():
-        return
+        return []
 
     series = get_series(series_id)
     tmdb_id = series.get("tmdb_id") if series else None
     if not tmdb_id:
-        return
+        return []
 
     conn = _connect()
-    other_rows = conn.execute(
-        "SELECT id, name, year FROM series WHERE tmdb_id=? AND id!=?", (tmdb_id, series_id)
-    ).fetchall()
+    merge_candidates = [
+        (dict(row), "tmdb_id") for row in conn.execute(
+            "SELECT id, name, year, tmdb_id FROM series WHERE tmdb_id=? AND id!=?",
+            (tmdb_id, series_id),
+        ).fetchall()
+    ]
+    if series.get("year") is not None:
+        same_year_rows = [
+            dict(row) for row in conn.execute(
+                "SELECT id, name, year, tmdb_id FROM series WHERE year=? AND id!=?",
+                (series["year"], series_id),
+            ).fetchall()
+            if _dedup_name_key(row["name"]) == _dedup_name_key(series.get("name") or "")
+        ]
+        same_name_tmdb_ids = {
+            str(row["tmdb_id"]) for row in same_year_rows if row.get("tmdb_id")
+        }
+        if not same_name_tmdb_ids or same_name_tmdb_ids == {str(tmdb_id)}:
+            merge_candidates.extend(
+                (row, "name_year_missing_tmdb")
+                for row in same_year_rows if not row.get("tmdb_id")
+            )
     conn.close()
-    if not other_rows:
-        return
+    if not merge_candidates:
+        return []
 
     ignored_sigs = set(list_ignored_duplicate_signatures("series"))
-    for row in other_rows:
+    merge_events = []
+    for row, match_type in merge_candidates:
         signature = _duplicate_ignore_signature([series_id, row["id"]])
         if signature in ignored_sigs:
             continue
 
-        # See auto_merge_movie_by_tmdb's identical comment -- re-verify
-        # both rows still exist immediately before merging (matters for
-        # 3+-way clusters processed via a batch).
+        # beads-3qf: other_rows was snapshotted above -- re-verify both rows
+        # still exist immediately before merging (see auto_merge_movie_by_
+        # tmdb's identical comment for why this matters for 3+-way clusters).
         current = get_series(series_id)
         other = get_series(row["id"])
         if not current or not other:
@@ -9124,11 +9643,13 @@ def auto_merge_series_by_tmdb(series_id: int) -> None:
             )
             continue
 
-        # See auto_merge_movie_by_tmdb's identical gate for full rationale,
-        # including why this must stay the UNFILTERED source languages
-        # rather than config.get_enabled_languages(). Untagged sources read
-        # as EN, same as _source_language's own default, so this stays
-        # backward-compatible for untagged feeds.
+        # beads-974: tmdb_id equality alone used to be sufficient -- now also
+        # require the two candidates to share at least one source language
+        # (see auto_merge_movie_by_tmdb's identical gate, including its note
+        # on why this must stay the UNFILTERED source languages rather than
+        # config.get_enabled_languages(), for the full rationale). Untagged
+        # sources read as EN, same as _source_language's own default, so this
+        # stays backward-compatible for untagged feeds.
         gate_conn = _connect()
         try:
             row_langs = _source_languages(gate_conn, "series_sources", "series_id", row["id"])
@@ -9152,6 +9673,13 @@ def auto_merge_series_by_tmdb(series_id: int) -> None:
         else:
             year_status = "MISMATCH"
 
+        if year_status != "agree":
+            logger.warning(
+                "[auto_merge_series_by_tmdb] tmdb_id=%s year_status=%s -- skipping id=%s -> id=%s",
+                tmdb_id, year_status, row["id"], series_id,
+            )
+            continue
+
         # Cleanest-name tiebreak: prefer whichever row's name has no
         # provider/language prefix to strip. If both (or neither) are
         # clean, default to keeping series_id (the just-enriched row).
@@ -9159,7 +9687,9 @@ def auto_merge_series_by_tmdb(series_id: int) -> None:
         other_name = other.get("name") or ""
         current_is_clean = _strip_quality_lang_prefix_for_dedup(current_name) == current_name
         other_is_clean = _strip_quality_lang_prefix_for_dedup(other_name) == other_name
-        if other_is_clean and not current_is_clean:
+        if not other.get("tmdb_id"):
+            keep_id, drop_id = series_id, row["id"]
+        elif other_is_clean and not current_is_clean:
             keep_id, drop_id = row["id"], series_id
         else:
             keep_id, drop_id = series_id, row["id"]
@@ -9172,6 +9702,22 @@ def auto_merge_series_by_tmdb(series_id: int) -> None:
             keep_id,
             (current_name if keep_id == series_id else other_name),
         )
+        merge_events.append({
+            "content_type": "series",
+            "content_id": keep_id,
+            "title": current_name if keep_id == series_id else other_name,
+            "year": current.get("year") if keep_id == series_id else other.get("year"),
+            "action": "merged",
+            "detail": {
+                "tmdb_id": tmdb_id,
+                "match_type": match_type,
+                "merged_title": current_name if drop_id == series_id else other_name,
+                "merged_id": drop_id,
+                "survivor_title": current_name if keep_id == series_id else other_name,
+                "survivor_id": keep_id,
+                "year_status": year_status,
+            },
+        })
         merge_series(drop_id, keep_id)
 
         # If series_id itself was the row that got merged away, there's
@@ -9179,252 +9725,137 @@ def auto_merge_series_by_tmdb(series_id: int) -> None:
         # other_rows -- keep_id is now the live survivor going forward.
         if drop_id == series_id:
             series_id = keep_id
+    return merge_events
 
 
-def auto_merge_movies_by_tmdb_batch(movie_ids) -> None:
-    """Bulk-enrich's end-of-run merge sweep used to fan out one
-    asyncio.to_thread(auto_merge_movie_by_tmdb, id) task per affected id via
-    asyncio.gather -- against a full-catalog run that's thousands of OS
-    threads submitted to the executor at once. Each merge is already fully
-    serialized by _WRITE_LOCK internally (merge_movie), so that fan-out
-    bought zero real parallelism -- it only added thread-scheduling and
-    per-call _connect() overhead. Looping sequentially in one thread does
-    the identical merges in the identical order with none of that
-    overhead.
-
-    Per-item try/except (found live 2026-09-16, via auto_merge_series_tmdb_
-    collisions' identical batch below hitting this live): a merge can still
-    hit 'database is locked' under sustained heavy concurrent write load
-    even with _WRITE_LOCK + a 60s busy_timeout -- confirmed via a 20+ minute
-    live test against a real ~160k-row catalog with several providers
-    importing/enriching at once. That's an isolated single-item failure,
-    not a reason to abandon every other id still queued in this batch --
-    the skipped pair simply stays split for now and gets picked up again on
-    the next enrichment cycle that touches either row, same as any other
-    transient miss."""
+def auto_merge_movies_by_tmdb_batch(movie_ids) -> list[dict]:
+    """Bulk-enrich's end-of-run merge sweep (see vod_importer.bulk_enrich_all)
+    used to fan out one asyncio.to_thread(auto_merge_movie_by_tmdb, id) task
+    per affected id via asyncio.gather -- against a full-catalog run that's
+    thousands of OS threads submitted to the executor at once. Each merge is
+    already fully serialized by _WRITE_LOCK internally (merge_movie), so that
+    fan-out bought zero real parallelism -- it only added thread-scheduling
+    and per-call _connect() overhead, which is what drove the live CPU spike
+    to 1200%+/near-total host saturation during the 2026-09-14 dry-run (see
+    the plan doc's "Follow-up: final SQLite contention work"). Looping
+    sequentially in one thread does the identical merges in the identical
+    order with none of that overhead."""
+    events = []
     for movie_id in movie_ids:
-        try:
-            auto_merge_movie_by_tmdb(movie_id)
-        except Exception:
-            logger.exception("[auto_merge_movies_by_tmdb_batch] skipped movie_id=%s", movie_id)
+        events.extend(auto_merge_movie_by_tmdb(movie_id) or [])
+    return events
 
 
-def auto_merge_series_by_tmdb_batch(series_ids) -> None:
+def auto_merge_series_by_tmdb_batch(series_ids) -> list[dict]:
     """Series counterpart to auto_merge_movies_by_tmdb_batch -- same
     single-thread-sequential fix for the same per-id asyncio.gather fan-out
-    problem, and the same per-item try/except, see that function's
-    docstring for both."""
+    problem, see that function's docstring."""
+    events = []
     for series_id in series_ids:
-        try:
-            auto_merge_series_by_tmdb(series_id)
-        except Exception:
-            logger.exception("[auto_merge_series_by_tmdb_batch] skipped series_id=%s", series_id)
+        events.extend(auto_merge_series_by_tmdb(series_id) or [])
+    return events
 
 
-def auto_merge_series_tmdb_collisions() -> None:
-    """Reconcile every current exact-TMDB series collision safely."""
+def _same_name_year_tmdb_holder(conn: sqlite3.Connection, table: str, row: dict) -> int | None:
+    """Find the sole TMDB-backed card matching a scoped missing-ID row."""
+    if row.get("year") is None or row.get("tmdb_id"):
+        return None
+    matches = [
+        dict(candidate) for candidate in conn.execute(
+            f"SELECT id, name, year, tmdb_id FROM {table} WHERE year=? AND id!=?",
+            (row["year"], row["id"]),
+        ).fetchall()
+        if _dedup_name_key(candidate["name"]) == _dedup_name_key(row.get("name") or "")
+    ]
+    tmdb_ids = {str(candidate["tmdb_id"]) for candidate in matches if candidate.get("tmdb_id")}
+    if len(tmdb_ids) != 1:
+        return None
+    holder = next(candidate for candidate in matches if candidate.get("tmdb_id"))
+    return int(holder["id"])
+
+
+def auto_merge_movie_tmdb_collisions(movie_ids: set[int] | list[int] | None = None) -> list[dict]:
+    """Merge every *current* movie TMDB-ID collision safely.
+
+    Supplying IDs limits automatic reconciliation to the changed/new frontier.
+    Omitting IDs is reserved for an explicit maintenance action and retains the
+    full-catalog fallback.
+    """
     if not get_duplicate_finder_auto_merge_tmdb():
-        return
+        return []
     conn = _connect()
-    rows = conn.execute("""
-        SELECT id FROM series
-        WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> ''
-          AND tmdb_id IN (
-              SELECT tmdb_id FROM series
-              WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> ''
-              GROUP BY tmdb_id HAVING COUNT(*) > 1
-          )
-        ORDER BY tmdb_id, id
-    """).fetchall()
-    conn.close()
-    auto_merge_series_by_tmdb_batch([row["id"] for row in rows])
-
-
-def archive_disabled_language_content() -> dict:
-    """One-time (repeatable) catch-up for deployments that were already
-    running before the auto-merge language gate fix (see the merge gate's
-    own comment in auto_merge_movie_by_tmdb/auto_merge_series_by_tmdb).
-    While that bug was live, real different-language tmdb_id siblings kept
-    getting silently re-merged every enrichment cycle instead of staying
-    split, so nothing ever flagged them for review -- they just sat at
-    review_excluded=0, invisible to playback only because
-    _enabled_languages_clause filters them out of _best_source_cte at query
-    time. On a fresh install (merge gate correct from the start), this
-    should have nothing to do; this exists to clean up the backlog on
-    instances upgrading from before the fix.
-
-    This ARCHIVES rather than deletes -- this is legitimately-imported
-    content the user just doesn't currently want for playback, not content
-    that should never have been stored. A row is archived only when NONE of
-    its source languages (the unfiltered _source_languages set, same
-    authority the merge gate uses) are in config.get_enabled_languages(); a
-    row with even one eligible-language source is left alone, mirroring the
-    merge gate's "shares at least one language" standard. A human's manual
-    archive/unarchive (review_excluded_manual=1) is never touched in either
-    direction -- and re-enabling a language later un-archives the same rows
-    it archived, since the check re-evaluates review_excluded both ways
-    instead of only ever setting it.
-
-    Holds _WRITE_LOCK for the whole call (found live 2026-09-15, same
-    reasoning as bulk_place_movies_in_category): called from
-    import_provider_catalog after every provider import, so an unlocked
-    connection here can hold a long-running uncommitted transaction across
-    the whole movies/series pool at the exact same time bulk enrichment's
-    already-_WRITE_LOCK'd writes are running, producing real cross-connection
-    'database is locked' contention."""
-    enabled = set(get_enabled_languages())
-    with _WRITE_LOCK:
-        conn = _connect()
-
-        movies_archived = 0
-        movies_unarchived = 0
-        for row in conn.execute(
-            "SELECT id, review_excluded FROM movies WHERE review_excluded_manual=0"
-        ).fetchall():
-            langs = _source_languages(conn, "movie_sources", "movie_id", row["id"])
-            eligible = bool(langs & enabled)
-            if not eligible and not row["review_excluded"]:
-                conn.execute("UPDATE movies SET review_excluded=1 WHERE id=?", (row["id"],))
-                movies_archived += 1
-            elif eligible and row["review_excluded"]:
-                conn.execute("UPDATE movies SET review_excluded=0 WHERE id=?", (row["id"],))
-                movies_unarchived += 1
-
-        series_archived = 0
-        series_unarchived = 0
-        for row in conn.execute(
-            "SELECT id, review_excluded FROM series WHERE review_excluded_manual=0"
-        ).fetchall():
-            langs = _source_languages(conn, "series_sources", "series_id", row["id"])
-            eligible = bool(langs & enabled)
-            if not eligible and not row["review_excluded"]:
-                conn.execute("UPDATE series SET review_excluded=1 WHERE id=?", (row["id"],))
-                series_archived += 1
-            elif eligible and row["review_excluded"]:
-                conn.execute("UPDATE series SET review_excluded=0 WHERE id=?", (row["id"],))
-                series_unarchived += 1
-
-        _commit_with_retry(conn)
-        conn.close()
-        return {
-            "movies_archived": movies_archived,
-            "movies_unarchived": movies_unarchived,
-            "series_archived": series_archived,
-            "series_unarchived": series_unarchived,
-        }
-
-
-def _group_by_provider(rows) -> list[tuple[int, list]]:
-    grouped: dict[int, list] = {}
-    for r in rows:
-        grouped.setdefault(r["provider_id"], []).append(r)
-    return list(grouped.items())
-
-
-def _row_excluded_by_rule(
-    name: str, category_names: set[str], provider_exclude_categories: list[str],
-    exclude_uncategorized: bool, lang: dict,
-) -> bool:
-    """Same rule vod_importer._should_auto_archive applies per-item at
-    import time, adapted for purge_excluded_archived_content's already-in-DB
-    rows: category_names is every provider_category_name seen across a row's
-    sources (movie_sources/series_sources) rather than one item's single
-    category, since a row can carry sources from more than one provider.
-
-    lang["enabled_languages"] (an include-list, from config.
-    get_enabled_languages()) is the same language gate _should_auto_archive
-    uses -- keep in sync with that function's identical EN fallback, or a
-    purge could delete rows import-time archiving would treat differently."""
-    code = _name_prefix_code(name) or "EN"
-    if code not in lang["enabled_languages"]:
-        return True
-    if lang["exclude_non_latin"] and _is_non_latin_name(name):
-        return True
-    if category_names:
-        if category_names & set(provider_exclude_categories):
-            return True
-    elif exclude_uncategorized:
-        return True
-    return False
-
-
-def purge_excluded_archived_content(provider_exclusions: dict[int, tuple[list[str], bool]], lang: dict) -> dict:
-    """One-time (repeatable) cleanup: deletes movies/series rows that are
-    currently auto-archived (review_excluded=1, review_excluded_manual=0)
-    AND still match a currently active import-exclusion rule -- content
-    that, per the provider's CURRENT category/language exclusion settings,
-    the user doesn't want in their library at all. Ported from knmplace's
-    fork (which pairs this with a bigger "skip excluded content at import"
-    behavior change we have not ported -- our import path still stores then
-    auto-archives via vod_importer._should_auto_archive, so this purge
-    still applies the same way here: it's the delete-instead-of-leave-
-    archived-forever cleanup for whatever _should_auto_archive already
-    flagged). A human's manual archive (review_excluded_manual=1, see
-    bulk_set_review_excluded) is never touched -- same protection every
-    other auto-archive path in this file already gives that flag.
-
-    provider_exclusions: {provider_id: (exclude_categories, exclude_uncategorized)},
-    one entry per provider currently configured with import exclusions --
-    callers build this from providers.import_exclude_categories/
-    import_exclude_uncategorized. A row is only ever evaluated against the
-    exclusion rule(s) of the provider(s) it actually has a source from,
-    mirroring _should_auto_archive's own per-provider scoping at import
-    time.
-
-    Holds _WRITE_LOCK for the whole call, same reasoning as
-    archive_disabled_language_content (called from the same
-    import_provider_catalog post-import step)."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        movie_rows = conn.execute(
-            "SELECT id, name FROM movies WHERE review_excluded=1 AND review_excluded_manual=0"
-        ).fetchall()
-        movies_deleted = 0
-        for row in movie_rows:
-            sources = conn.execute(
-                "SELECT provider_id, provider_category_name FROM movie_sources WHERE movie_id=?", (row["id"],)
-            ).fetchall()
-            excluded = False
-            for provider_id, group in _group_by_provider(sources):
-                rule = provider_exclusions.get(provider_id)
-                if not rule:
-                    continue
-                exclude_categories, exclude_uncategorized = rule
-                category_names = {s["provider_category_name"] for s in group if s["provider_category_name"]}
-                if _row_excluded_by_rule(row["name"], category_names, exclude_categories, exclude_uncategorized, lang):
-                    excluded = True
-                    break
-            if excluded:
-                conn.execute("DELETE FROM movies WHERE id=?", (row["id"],))
-                movies_deleted += 1
-
-        series_rows = conn.execute(
-            "SELECT id, name FROM series WHERE review_excluded=1 AND review_excluded_manual=0"
-        ).fetchall()
-        series_deleted = 0
-        for row in series_rows:
-            sources = conn.execute(
-                "SELECT provider_id, provider_category_name FROM series_sources WHERE series_id=?", (row["id"],)
-            ).fetchall()
-            excluded = False
-            for provider_id, group in _group_by_provider(sources):
-                rule = provider_exclusions.get(provider_id)
-                if not rule:
-                    continue
-                exclude_categories, exclude_uncategorized = rule
-                category_names = {s["provider_category_name"] for s in group if s["provider_category_name"]}
-                if _row_excluded_by_rule(row["name"], category_names, exclude_categories, exclude_uncategorized, lang):
-                    excluded = True
-                    break
-            if excluded:
-                conn.execute("DELETE FROM series WHERE id=?", (row["id"],))
-                series_deleted += 1
-
-        try:
-            _commit_with_retry(conn)
-        finally:
+    if movie_ids is None:
+        rows = conn.execute("""
+            SELECT id, name, year, tmdb_id FROM movies
+            WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> ''
+              AND tmdb_id IN (
+                  SELECT tmdb_id FROM movies
+                  WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> ''
+                  GROUP BY tmdb_id HAVING COUNT(*) > 1
+              )
+            ORDER BY tmdb_id, id
+        """).fetchall()
+    else:
+        ids = sorted({int(item_id) for item_id in movie_ids})
+        if not ids:
             conn.close()
-        return {"movies_deleted": movies_deleted, "series_deleted": series_deleted}
+            return []
+        rows = conn.execute(
+            f"SELECT id, name, year, tmdb_id FROM movies WHERE id IN ({','.join('?' * len(ids))}) ORDER BY id",
+            ids,
+        ).fetchall()
+    merge_ids = [row["id"] for row in rows if row["tmdb_id"] and str(row["tmdb_id"]).strip()]
+    if movie_ids is not None:
+        merge_ids.extend(
+            holder_id for row in rows
+            if not row["tmdb_id"]
+            for holder_id in [_same_name_year_tmdb_holder(conn, "movies", dict(row))]
+            if holder_id is not None
+        )
+    conn.close()
+    return auto_merge_movies_by_tmdb_batch(dict.fromkeys(merge_ids))
+
+
+def auto_merge_series_tmdb_collisions(series_ids: set[int] | list[int] | None = None) -> list[dict]:
+    """Merge every *current* series TMDB-ID collision safely.
+
+    Supplying IDs limits automatic reconciliation to the changed/new frontier.
+    Omitting IDs is reserved for an explicit maintenance action and retains the
+    full-catalog fallback.
+    """
+    if not get_duplicate_finder_auto_merge_tmdb():
+        return []
+    conn = _connect()
+    if series_ids is None:
+        rows = conn.execute("""
+            SELECT id, name, year, tmdb_id FROM series
+            WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> ''
+              AND tmdb_id IN (
+                  SELECT tmdb_id FROM series
+                  WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> ''
+                  GROUP BY tmdb_id HAVING COUNT(*) > 1
+              )
+            ORDER BY tmdb_id, id
+        """).fetchall()
+    else:
+        ids = sorted({int(item_id) for item_id in series_ids})
+        if not ids:
+            conn.close()
+            return []
+        rows = conn.execute(
+            f"SELECT id, name, year, tmdb_id FROM series WHERE id IN ({','.join('?' * len(ids))}) ORDER BY id",
+            ids,
+        ).fetchall()
+    merge_ids = [row["id"] for row in rows if row["tmdb_id"] and str(row["tmdb_id"]).strip()]
+    if series_ids is not None:
+        merge_ids.extend(
+            holder_id for row in rows
+            if not row["tmdb_id"]
+            for holder_id in [_same_name_year_tmdb_holder(conn, "series", dict(row))]
+            if holder_id is not None
+        )
+    conn.close()
+    return auto_merge_series_by_tmdb_batch(dict.fromkeys(merge_ids))
 
 
 def list_needs_year_review(content_type: str | None = None) -> dict:
@@ -9481,21 +9912,18 @@ def list_needs_year_review(content_type: str | None = None) -> dict:
     return out
 
 
+# KNM: added 2026-09-14 -- a title missing both provider TMDB ID and year is
+# reviewable even when it was never marked by the narrower ambiguity detector.
 def list_metadata_review(content_type: str | None = None) -> dict:
     """Returns active pool items a person should identify in TMDB.
 
-    This deliberately includes more than the older needs_year_review hold
-    queue: a provider can supply a title with neither a TMDB id nor a year
-    (the common duplicate-looking case), without ever having been through
-    the ambiguity detector. A missing year alone is normal in provider
-    catalogs, so it is deliberately not a review condition on its own. These
+    This deliberately includes more than the older ``needs_year_review``
+    hold queue: a provider can supply a title with neither a TMDB id nor a
+    year (the common duplicate-looking case), without ever having been
+    through the ambiguity detector.  A missing year *alone* is normal in
+    provider catalogs, so it is deliberately not a review condition. These
     are still review-only; this function never guesses or changes metadata.
-
-    Doesn't populate sample_source_id/sample_episode_id/sample_episode_source_id
-    the way list_needs_year_review does -- the frontend's NeedsReviewRow (shared
-    between both queues) degrades to "no preview available" for a row missing
-    those, so this is a correctness no-op, just a narrower feature than the
-    older queue's preview support."""
+    """
     conn = _connect()
     out: dict = {}
     for requested_type, table, key in (
@@ -9504,21 +9932,10 @@ def list_metadata_review(content_type: str | None = None) -> dict:
     ):
         if content_type not in (None, requested_type):
             continue
-        # UNION, not a single OR'd WHERE clause: SQLite's query planner
-        # doesn't split an OR across two separate indexes on its own (the
-        # "OR optimization" needs each side written as its own indexable
-        # term), so the OR form was a full table scan even with
-        # idx_*_metadata_review_flag/_missing in place (confirmed live via
-        # EXPLAIN QUERY PLAN 2026-09-15). Written as a UNION of the same two
-        # conditions those partial indexes were built for, each branch scans
-        # its own tiny index instead of the whole table; UNION also
-        # naturally dedupes the (rare) row matching both branches.
         rows = [dict(r) for r in conn.execute(
-            f"""SELECT * FROM (
-                    SELECT * FROM {table} WHERE review_excluded=0 AND needs_year_review=1
-                    UNION
-                    SELECT * FROM {table} WHERE review_excluded=0 AND tmdb_id IS NULL AND year IS NULL
-                )
+            f"""SELECT * FROM {table}
+                WHERE review_excluded=0
+                  AND (needs_year_review=1 OR (tmdb_id IS NULL AND year IS NULL))
                 ORDER BY needs_year_review DESC, name"""
         ).fetchall()]
         out[key] = rows
@@ -9526,10 +9943,87 @@ def list_metadata_review(content_type: str | None = None) -> dict:
     return out
 
 
+def find_existing_metadata_matches(content_type: str, item_id: int) -> list[dict]:
+    """Return possible active catalog matches for an expanded review row.
+
+    Title matching is only a reviewer hint; an explicit action is still
+    required.  Existing TMDB ids can be passed through the normal merge-safe
+    TMDB setter instead of introducing a second merge path.
+    """
+    if content_type not in ("movie", "series"):
+        raise ValueError("content_type must be 'movie' or 'series'")
+    table = "movies" if content_type == "movie" else "series"
+    source_table = "movie_sources" if content_type == "movie" else "series_sources"
+    source_key = "movie_id" if content_type == "movie" else "series_id"
+    conn = _connect()
+    item = conn.execute(f"SELECT id, name, year FROM {table} WHERE id=?", (item_id,)).fetchone()
+    if not item:
+        conn.close()
+        raise ValueError(f"{content_type} {item_id} not found")
+    normalized = _normalize_title_for_dedup(item["name"])
+    rows = conn.execute(
+        f"""SELECT t.id, t.name, t.year, t.tmdb_id,
+                   COUNT(DISTINCT s.provider_id) AS source_count
+              FROM {table} t
+              LEFT JOIN {source_table} s ON s.{source_key}=t.id
+             WHERE t.id != ? AND t.review_excluded=0
+             GROUP BY t.id
+             ORDER BY t.id""",
+        (item_id,),
+    ).fetchall()
+    conn.close()
+    matches = [dict(row) for row in rows if _normalize_title_for_dedup(row["name"]) == normalized]
+    year = item["year"]
+    matches.sort(key=lambda row: (
+        0 if year is not None and row["year"] == year else 1,
+        0 if row["tmdb_id"] is not None else 1,
+        -(row["source_count"] or 0),
+        row["id"],
+    ))
+    for row in matches:
+        row["match_reason"] = "same title and year" if year is not None and row["year"] == year else "same normalized title"
+    return matches[:5]
+
+
+def get_review_summary() -> dict:
+    """Small, poll-safe counts for the post-import review handoff.
+
+    The full Metadata Review endpoint can legitimately contain thousands of
+    adult rows. The application header needs only the same non-adult counts
+    a reviewer sees with Hide adult titles enabled, so keep this as aggregate
+    queries instead of loading every review record on each status poll.
+    """
+    conn = _connect()
+
+    def identity_count(table: str) -> int:
+        return conn.execute(
+            f"""SELECT COUNT(*) AS c FROM {table}
+                WHERE review_excluded=0 AND COALESCE(is_adult, 0)=0
+                  AND (needs_year_review=1 OR (tmdb_id IS NULL AND year IS NULL))"""
+        ).fetchone()["c"]
+
+    def invalid_tmdb_count(content_type: str, table: str) -> int:
+        return conn.execute(
+            f"""SELECT COUNT(*) AS c FROM tmdb_lookup_failures f
+                JOIN {table} t ON t.id=f.item_id
+                WHERE f.content_type=? AND t.review_excluded=0
+                  AND COALESCE(t.is_adult, 0)=0""",
+            (content_type,),
+        ).fetchone()["c"]
+
+    result = {
+        "missing_identity": {"movies": identity_count("movies"), "series": identity_count("series")},
+        "invalid_tmdb": {
+            "movies": invalid_tmdb_count("movie", "movies"),
+            "series": invalid_tmdb_count("series", "series"),
+        },
+    }
+    conn.close()
+    return result
+
+
 def record_tmdb_lookup_failure(content_type: str, item_id: int, tmdb_id: str, error: str = "TMDB returned 404 Not Found") -> None:
-    """Persist a confirmed invalid TMDB identity for reviewer correction --
-    called when tmdb_sync raises TmdbNotFoundError for an id already stored
-    on this item (see enrich_movie / reconcile_known_series_identities)."""
+    """Persist a confirmed invalid TMDB identity for reviewer correction."""
     now = _now()
     with _WRITE_LOCK:
         conn = _connect()
@@ -9547,19 +10041,14 @@ def record_tmdb_lookup_failure(content_type: str, item_id: int, tmdb_id: str, er
 
 
 def clear_tmdb_lookup_failure(content_type: str, item_id: int) -> None:
-    """Drop a tracked lookup failure once its tmdb_id is corrected/cleared
-    (set_tmdb_id, clear_tmdb_id) or a later lookup for the same id succeeds."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        conn.execute("DELETE FROM tmdb_lookup_failures WHERE content_type=? AND item_id=?", (content_type, item_id))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute("DELETE FROM tmdb_lookup_failures WHERE content_type=? AND item_id=?", (content_type, item_id))
+    _commit_with_retry(conn)
+    conn.close()
 
 
 def list_tmdb_lookup_failures(content_type: str | None = None) -> dict:
-    """Reviewer queue for stored TMDB IDs that TMDB confirmed no longer
-    exist -- distinct from list_metadata_review (no id at all / ambiguous),
-    this is an id that WAS valid and now 404s."""
+    """Reviewer queue for stored TMDB IDs that TMDB confirmed no longer exist."""
     conn = _connect()
     out: dict = {}
     for requested_type, table, key in (("movie", "movies", "movies"), ("series", "series", "series")):
@@ -9574,6 +10063,15 @@ def list_tmdb_lookup_failures(content_type: str | None = None) -> dict:
                 ORDER BY f.last_failed_at DESC, t.name""",
             (requested_type,),
         ).fetchall()]
+        for row in rows:
+            if requested_type == "movie":
+                src = conn.execute("SELECT id FROM movie_sources WHERE movie_id=? LIMIT 1", (row["id"],)).fetchone()
+                row["sample_source_id"] = src["id"] if src else None
+            else:
+                ep = conn.execute("SELECT id FROM episodes WHERE series_id=? ORDER BY season_number, episode_number LIMIT 1", (row["id"],)).fetchone()
+                row["sample_episode_id"] = ep["id"] if ep else None
+                src = conn.execute("SELECT id FROM episode_sources WHERE episode_id=? LIMIT 1", (ep["id"],)).fetchone() if ep else None
+                row["sample_episode_source_id"] = src["id"] if src else None
         out[key] = rows
     conn.close()
     return out
@@ -9582,44 +10080,47 @@ def list_tmdb_lookup_failures(content_type: str | None = None) -> dict:
 def resolve_year_review(content_type: str, item_id: int, year: int, tmdb_id: str | None = None) -> dict:
     """Sets the correct year (and tmdb_id, if known) on a flagged item and
     clears the flag. If that year now exactly matches an existing item of
-    the same name, merges into it instead of leaving two rows around."""
-    with _WRITE_LOCK:
-        table = "movies" if content_type == "movie" else "series"
-        conn = _connect()
-        row = conn.execute(f"SELECT * FROM {table} WHERE id=?", (item_id,)).fetchone()
-        if not row:
-            conn.close()
-            raise ValueError(f"{content_type} {item_id} not found")
-
-        existing = conn.execute(
-            f"SELECT id FROM {table} WHERE name=? AND year=? AND id != ?", (row["name"], year, item_id),
-        ).fetchone()
+    the same name, merges into it instead of leaving two rows around. A
+    reviewer-selected TMDB ID also immediately takes the normal safe
+    same-TMDB merge path, so a provider alias with a different card name
+    does not wait for another import/enrichment cycle."""
+    table = "movies" if content_type == "movie" else "series"
+    conn = _connect()
+    row = conn.execute(f"SELECT * FROM {table} WHERE id=?", (item_id,)).fetchone()
+    if not row:
         conn.close()
+        raise ValueError(f"{content_type} {item_id} not found")
 
-        if existing:
-            if content_type == "movie":
-                merge_movie(item_id, existing["id"])
-            else:
-                merge_series(item_id, existing["id"])
-            if tmdb_id:
-                clear_tmdb_lookup_failure(content_type, item_id)
-            return {"merged_into": existing["id"]}
+    existing = conn.execute(
+        f"SELECT id FROM {table} WHERE name=? AND year=? AND id != ?", (row["name"], year, item_id),
+    ).fetchone()
+    conn.close()
 
-        conn = _connect()
-        fields = {"year": year, "needs_year_review": 0}
-        if tmdb_id:
-            fields["tmdb_id"] = tmdb_id
-        sets = ", ".join(f"{k}=?" for k in fields)
-        conn.execute(f"UPDATE {table} SET {sets}, updated_at=? WHERE id=?", (*fields.values(), _now(), item_id))
-        _commit_with_retry(conn)
-        conn.close()
-        if tmdb_id:
-            clear_tmdb_lookup_failure(content_type, item_id)
-            if content_type == "movie":
-                auto_merge_movie_by_tmdb(item_id)
-            else:
-                auto_merge_series_by_tmdb(item_id)
-        return {"resolved_id": item_id}
+    if existing:
+        if content_type == "movie":
+            merge_movie(item_id, existing["id"])
+        else:
+            merge_series(item_id, existing["id"])
+        return {"merged_into": existing["id"]}
+
+    conn = _connect()
+    fields = {"year": year, "needs_year_review": 0}
+    if tmdb_id:
+        fields["tmdb_id"] = tmdb_id
+    sets = ", ".join(f"{k}=?" for k in fields)
+    conn.execute(f"UPDATE {table} SET {sets}, updated_at=? WHERE id=?", (*fields.values(), _now(), item_id))
+    if tmdb_id:
+        source_table = "movie_sources" if content_type == "movie" else "series_sources"
+        source_key = "movie_id" if content_type == "movie" else "series_id"
+        conn.execute(f"UPDATE {source_table} SET provider_detail_deferred=0 WHERE {source_key}=?", (item_id,))
+    _commit_with_retry(conn)
+    conn.close()
+    if tmdb_id:
+        if content_type == "movie":
+            auto_merge_movie_by_tmdb(item_id)
+        else:
+            auto_merge_series_by_tmdb(item_id)
+    return {"resolved_id": item_id}
 
 
 # ── Missing artwork ──────────────────────────────────────────────────────────
@@ -9670,6 +10171,9 @@ _LANG_PREFIX_COLON_RE = re.compile(r"^([A-Z]{2,6}):\s")
 # as colon below: a bare dash is common enough in real titles ("Spider-Man",
 # "Stars 80, la suite") that fuzzy-matching any 2-6 capital letters would
 # misdetect them, so this only fires for a KNOWN language code too.
+# KNM: added 2026-09-08 -- pipe/colon detection alone missed real "FR -
+# Title" provider naming, so FR/RU items using this format weren't being
+# auto-archived and were showing up in the catalog/Duplicate Finder.
 _LANG_PREFIX_DASH_RE = re.compile(r"^([A-Z]{2,6})\s-\s")
 _KNOWN_LANGUAGE_CODES = {
     "EN", "AR", "FR", "ES", "DE", "IT", "PT", "BR", "RU", "TR", "PL", "NL",
@@ -9685,14 +10189,16 @@ _KNOWN_LANGUAGE_CODES = {
 # (Italian); add further entries here if another known code ever turns out
 # to collide with a real title.
 _LANG_PREFIX_COLON_EXCEPTIONS = {"it: chapter two"}
-# KNM: "HI" (2014 Telugu/Bollywood horror-comedy) and "PK" (2014 Aamir Khan
-# Bollywood comedy) are real bare titles; some providers tag them
-# "HI - 2014" / "PK - 2014" (title + year, no separate title text), which
-# the dash-prefix pattern misreads as a language-tagged foreign title.
-# "SC - 3 Bed, 2 Bath, 1 Ghost (2023)" is a real EN title colliding with SC
-# (Seychellois Creole), found via DB aggregate language counts. Matched as
-# a startswith prefix (like the colon exceptions) so a real language-tagged
-# title using the same bare code plus more text still detects correctly.
+# KNM: added 2026-09-11 -- "HI" (2014 Telugu/Bollywood horror-comedy) and
+# "PK" (2014 Aamir Khan Bollywood comedy) are real bare titles; WarpTV tags
+# them "HI - 2014" / "PK - 2014" (title + year, no separate title text),
+# which the dash-prefix pattern misreads as a language-tagged foreign title.
+# Matched as a startswith prefix (like the colon exceptions) so a real
+# language-tagged title using the same bare code plus more text still
+# detects correctly -- see test_real_hi/pk_language_prefix_still_detected.
+# KNM: added 2026-09-12 -- "SC - 3 Bed, 2 Bath, 1 Ghost (2023)" is a real EN
+# title colliding with SC (Seychellois Creole); same class of bug, found via
+# DB aggregate language counts. See test_sc_title_collision.py.
 _LANG_PREFIX_DASH_EXCEPTIONS: set[str] = {"hi - 2014", "pk - 2014", "sc - 3 bed, 2 bath, 1 ghost"}
 
 
@@ -9726,27 +10232,6 @@ def _name_prefix_code(name: str) -> str | None:
     return _dash_prefix_code(name)
 
 
-# Some providers only tag language at the category level ("[FR] NETFLIX")
-# rather than per-title -- or per-title tagging exists but is malformed in a
-# way _name_prefix_code doesn't catch (stray leading whitespace, a zero-width
-# character before the code, lowercase, a typo'd separator). This is checked
-# only as a fallback, never in place of a detected title prefix: ~2% of real
-# rows carry a title prefix that legitimately disagrees with their category
-# (e.g. a Kurdish-tagged title filed under an "Africa Movies" category) --
-# the per-item tag is the more specific, more trustworthy signal when present.
-_CATEGORY_PREFIX_BRACKET_RE = re.compile(r"^\[([A-Z]{2,6})\]")
-
-
-def _category_prefix_code(category_name: str | None) -> str | None:
-    if not category_name:
-        return None
-    m = _CATEGORY_PREFIX_BRACKET_RE.match(category_name.strip())
-    if not m:
-        return None
-    code = m.group(1)
-    return code if code in _KNOWN_LANGUAGE_CODES else None
-
-
 def _strip_one_lang_prefix(name: str) -> str | None:
     """One leading language-style prefix removed, or None if there isn't
     one -- see _name_prefix_code for why colon/dash-matching is
@@ -9761,51 +10246,24 @@ def _strip_one_lang_prefix(name: str) -> str | None:
     return None
 
 
-def _strip_lang_prefixes(name: str) -> str:
-    """Repeated -- some providers double-tag (e.g. "IN| TELUGU| Apex") --
-    strip every leading language-style layer to get the bare title, used to
-    match a language-tagged row against its same-content sibling in another
-    language (see smart_bulk_exclude)."""
-    while True:
-        new_name = _strip_one_lang_prefix(name)
-        if new_name is None or new_name == name:
-            return name
-        name = new_name
-
-
-def _source_language(raw_name: str | None, category_name: str | None = None) -> str:
-    """Per-source language for movie_sources/episode_sources/series_sources,
+def _source_language(raw_name: str | None) -> str:
+    """Per-source language for movie_sources/series_sources/episode_sources,
     computed from the provider's raw_name via the same prefix-detection used
-    for import-time archiving (_name_prefix_code). Falls back to the
-    provider category's own "[XX]" bracket tag (_category_prefix_code) when
-    the title has no detected prefix -- catches titles under a
-    correctly-tagged category whose own tag is missing or malformed.
-    Defaults to "EN" when neither signal is present -- an untagged title
-    under an untagged/generic category is treated as English/Spanish-safe,
-    matching how providers actually tag things (the absence of a prefix is
-    the common case for EN/ES content, not a sign of unknown language)."""
-    code = _name_prefix_code(raw_name) if raw_name else None
-    if code:
-        return code
-    return _category_prefix_code(category_name) or "EN"
-
-
-def _enabled_languages_clause(column: str) -> tuple[str, list[str]]:
-    """SQL fragment + bind params gating `column` to config.get_enabled_languages()
-    (default EN+ES, user-adjustable). Sources whose language isn't in that
-    set are excluded from playback/export/failover entirely -- rows stay in
-    the DB untouched, just filtered out of read paths that opt into this
-    clause. See config.get_enabled_languages for why this is separate from
-    the import-time language exclusion."""
-    codes = get_enabled_languages()
-    placeholders = ",".join("?" * len(codes))
-    return f"COALESCE({column}, 'EN') IN ({placeholders})", codes
+    for import-time archiving (_name_prefix_code). Defaults to "EN" when no
+    known foreign-language prefix is present -- an untagged title is treated
+    as English/Spanish-safe, matching how providers actually tag things (the
+    absence of a prefix is the common case for EN/ES content, not a sign of
+    unknown language)."""
+    if not raw_name:
+        return "EN"
+    code = _name_prefix_code(raw_name)
+    return code or "EN"
 
 
 _BACKFILL_TABLES = [
     ("movie_sources", "movie_id", "movies"),
-    ("episode_sources", "episode_id", "episodes"),
     ("series_sources", "series_id", "series"),
+    ("episode_sources", "episode_id", "episodes"),
 ]
 
 
@@ -9814,16 +10272,17 @@ def language_backfill_dry_run_report(sample_size: int = 5) -> dict:
     write path not yet updated to populate it) still have language IS NULL.
     Reports what apply_language_backfill would set each of them to -- per
     table, per detected code, a count and a few sample parent titles --
-    so the change can be sanity-checked before touching any data."""
+    so the change can be sanity-checked before touching any data. See
+    beads-974."""
     conn = _connect()
     report = {}
     for table, fk_col, parent_table in _BACKFILL_TABLES:
         rows = conn.execute(
-            f"SELECT raw_name, provider_category_name, {fk_col} AS parent_id FROM {table} WHERE language IS NULL"
+            f"SELECT raw_name, {fk_col} AS parent_id FROM {table} WHERE language IS NULL"
         ).fetchall()
         by_code: dict[str, dict] = {}
         for row in rows:
-            code = _source_language(row["raw_name"], row["provider_category_name"])
+            code = _source_language(row["raw_name"])
             bucket = by_code.setdefault(code, {"count": 0, "sample_titles": [], "_parent_ids": set()})
             bucket["count"] += 1
             bucket["_parent_ids"].add(row["parent_id"])
@@ -9842,44 +10301,29 @@ def language_backfill_dry_run_report(sample_size: int = 5) -> dict:
 
 def apply_language_backfill() -> int:
     """Writes the computed language (see language_backfill_dry_run_report)
-    onto every existing movie_sources/episode_sources/series_sources row
-    that doesn't have one yet. Can touch well over a million rows on a real
-    catalog, so -- same reasoning as merge_duplicate_groups_bulk's identical
-    pattern (see its docstring) -- this commits and releases/reacquires
-    _WRITE_LOCK every batch_size rows rather than holding one giant
-    transaction + the write lock for the whole run, which would starve
-    every other writer (imports, enrichment) and balloon the WAL file for
-    however many minutes the full pass takes. Returns the total number of
-    rows updated."""
-    batch_size = 25
+    onto every existing movie_sources/series_sources/episode_sources row
+    that doesn't have one yet. Returns the total number of rows updated."""
     total = 0
-    for table, _fk_col, _parent_table in _BACKFILL_TABLES:
-        rows = _connect().execute(f"SELECT id, raw_name, provider_category_name FROM {table} WHERE language IS NULL").fetchall()
-        _WRITE_LOCK.acquire()
-        try:
-            conn = _connect()
-            for i, row in enumerate(rows):
+    with _WRITE_LOCK:
+        conn = _connect()
+        for table, _fk_col, _parent_table in _BACKFILL_TABLES:
+            rows = conn.execute(f"SELECT id, raw_name FROM {table} WHERE language IS NULL").fetchall()
+            for row in rows:
                 conn.execute(
                     f"UPDATE {table} SET language = ? WHERE id = ?",
-                    (_source_language(row["raw_name"], row["provider_category_name"]), row["id"]),
+                    (_source_language(row["raw_name"]), row["id"]),
                 )
-                if (i + 1) % batch_size == 0:
-                    _commit_with_retry(conn)
-                    _WRITE_LOCK.release()
-                    _WRITE_LOCK.acquire()
-            _commit_with_retry(conn)
-            conn.close()
-        finally:
-            _WRITE_LOCK.release()
-        total += len(rows)
+            total += len(rows)
+        _commit_with_retry(conn)
+        conn.close()
     return total
 
 
 def language_recompute_dry_run_report(sample_size: int = 5) -> dict:
     """Rows that already have a language set, but whose stored value no
     longer matches what _source_language would compute today -- i.e. they
-    were classified by a since-fixed bug (e.g. a missing prefix code)
-    rather than never classified at all. Distinct from
+    were classified by a since-fixed bug (e.g. beads-d2t's missing "IR"
+    prefix code) rather than never classified at all. Distinct from
     language_backfill_dry_run_report, which only covers language IS NULL
     rows. Reports what apply_language_recompute would change, per table,
     per newly-detected code, so it can be sanity-checked before touching
@@ -9888,11 +10332,11 @@ def language_recompute_dry_run_report(sample_size: int = 5) -> dict:
     report = {}
     for table, fk_col, parent_table in _BACKFILL_TABLES:
         rows = conn.execute(
-            f"SELECT raw_name, provider_category_name, language, {fk_col} AS parent_id FROM {table} WHERE language IS NOT NULL"
+            f"SELECT raw_name, language, {fk_col} AS parent_id FROM {table} WHERE language IS NOT NULL"
         ).fetchall()
         by_code: dict[str, dict] = {}
         for row in rows:
-            recomputed = _source_language(row["raw_name"], row["provider_category_name"])
+            recomputed = _source_language(row["raw_name"])
             if recomputed == row["language"]:
                 continue
             bucket = by_code.setdefault(recomputed, {"count": 0, "sample_titles": [], "_parent_ids": set()})
@@ -9914,38 +10358,353 @@ def language_recompute_dry_run_report(sample_size: int = 5) -> dict:
 
 def apply_language_recompute() -> int:
     """Writes the recomputed language (see language_recompute_dry_run_report)
-    onto every existing movie_sources/episode_sources/series_sources row
+    onto every existing movie_sources/series_sources/episode_sources row
     whose stored value disagrees with what _source_language computes now.
-    Safe to re-run -- once nothing disagrees, it becomes a no-op. The
-    scan/recompute over every already-classified row (can be well over a
-    million) runs without the write lock, since only real mismatches need
-    one; those are then written in batches, releasing/reacquiring
-    _WRITE_LOCK every batch_size rows -- same reasoning as
-    apply_language_backfill (see its docstring). Returns the total number
-    of rows updated."""
-    batch_size = 25
+    Safe to re-run -- once nothing disagrees, it becomes a no-op. Returns
+    the total number of rows updated."""
     total = 0
-    for table, _fk_col, _parent_table in _BACKFILL_TABLES:
-        rows = _connect().execute(f"SELECT id, raw_name, provider_category_name, language FROM {table} WHERE language IS NOT NULL").fetchall()
-        mismatches = [(row["id"], recomputed) for row in rows
-                      if (recomputed := _source_language(row["raw_name"], row["provider_category_name"])) != row["language"]]
-        if not mismatches:
-            continue
-        _WRITE_LOCK.acquire()
-        try:
-            conn = _connect()
-            for i, (row_id, recomputed) in enumerate(mismatches):
-                conn.execute(f"UPDATE {table} SET language = ? WHERE id = ?", (recomputed, row_id))
-                if (i + 1) % batch_size == 0:
-                    _commit_with_retry(conn)
-                    _WRITE_LOCK.release()
-                    _WRITE_LOCK.acquire()
-            _commit_with_retry(conn)
-            conn.close()
-        finally:
-            _WRITE_LOCK.release()
-        total += len(mismatches)
+    with _WRITE_LOCK:
+        conn = _connect()
+        for table, _fk_col, _parent_table in _BACKFILL_TABLES:
+            rows = conn.execute(f"SELECT id, raw_name, language FROM {table} WHERE language IS NOT NULL").fetchall()
+            for row in rows:
+                recomputed = _source_language(row["raw_name"])
+                if recomputed != row["language"]:
+                    conn.execute(
+                        f"UPDATE {table} SET language = ? WHERE id = ?",
+                        (recomputed, row["id"]),
+                    )
+                    total += 1
+        _commit_with_retry(conn)
+        conn.close()
     return total
+
+
+def _group_source_languages_by_conflict(conn: sqlite3.Connection, sources_table: str, fk_column: str, row_id: int) -> list[dict]:
+    """beads-974 (Step 3): union-chains a single movie's/series' own
+    movie_sources/series_sources rows by COALESCE(language,'EN') -- the same
+    grouping rule as _split_by_language_conflict, just applied to one row's
+    own sources instead of a duplicate-candidate cluster, since Step 3 is
+    the retroactive inverse of the merge Step 1/2 now block going forward.
+    Returns one dict per resulting language group: {"langs": set[str],
+    "source_ids": list[int]}, largest group first (ties broken by lowest
+    source id, for determinism) -- callers keep group [0] on the original
+    row and split the rest off."""
+    rows = conn.execute(
+        f"SELECT id, COALESCE(language, 'EN') AS lang FROM {sources_table} WHERE {fk_column}=?",
+        (row_id,),
+    ).fetchall()
+
+    groups: list[dict] = []
+    for row in rows:
+        row_langs = {row["lang"]}
+        joined = False
+        for g in groups:
+            if g["langs"] & row_langs:
+                g["source_ids"].append(row["id"])
+                g["langs"] |= row_langs
+                joined = True
+                break
+        if not joined:
+            groups.append({"langs": row_langs, "source_ids": [row["id"]]})
+
+    groups.sort(key=lambda g: (-len(g["source_ids"]), min(g["source_ids"])))
+    return groups
+
+
+def movie_language_split_dry_run_report() -> dict:
+    """beads-974 (Step 3): reports every existing movie whose movie_sources
+    span more than one language group (see _group_source_languages_by_
+    conflict) -- these were merged back when auto_merge_movie_by_tmdb gated
+    on tmdb_id alone, before Step 1's language gate existed. Read-only --
+    see apply_movie_language_split for the actual re-split."""
+    conn = _connect()
+    movie_ids = [row["movie_id"] for row in conn.execute("SELECT DISTINCT movie_id FROM movie_sources").fetchall()]
+    movies = []
+    for movie_id in movie_ids:
+        groups = _group_source_languages_by_conflict(conn, "movie_sources", "movie_id", movie_id)
+        if len(groups) > 1:
+            movies.append({
+                "movie_id": movie_id,
+                "language_groups": len(groups),
+                "languages": [sorted(g["langs"]) for g in groups],
+            })
+    conn.close()
+    return {"movies": movies}
+
+
+def apply_movie_language_split() -> dict:
+    """beads-974 (Step 3): retroactively re-splits every movie found by
+    movie_language_split_dry_run_report. The largest language group keeps
+    the original movie_id (and all its existing metadata, untouched) --
+    same "most-sourced stays put" convention the rest of the merge/dedup
+    code already follows. Each other language group is split off into a
+    brand-new movies row that's a full metadata copy of the original (per
+    user direction 2026-09-10, not a minimal stub left for re-enrichment),
+    with that group's movie_sources reassigned to the new id and the
+    original's category placements copied onto the new row via
+    place_movie_in_category (which already allocates a fresh, unique
+    export_stream_id -- see that function) so the split-off row's sources
+    stay independently browsable. Idempotent: a movie with only one
+    language group left (e.g. on a second run) is left untouched."""
+    movies_split = 0
+    new_rows_created = 0
+    with _WRITE_LOCK:
+        conn = _connect()
+        movie_ids = [row["movie_id"] for row in conn.execute("SELECT DISTINCT movie_id FROM movie_sources").fetchall()]
+        for movie_id in movie_ids:
+            groups = _group_source_languages_by_conflict(conn, "movie_sources", "movie_id", movie_id)
+            if len(groups) <= 1:
+                continue
+
+            original = conn.execute("SELECT * FROM movies WHERE id=?", (movie_id,)).fetchone()
+            if original is None:
+                continue
+            category_ids = [
+                row["category_id"]
+                for row in conn.execute(
+                    "SELECT category_id FROM movie_category_placements WHERE movie_id=?", (movie_id,)
+                ).fetchall()
+            ]
+
+            movies_split += 1
+            for group in groups[1:]:
+                cur = conn.execute(
+                    """INSERT INTO movies (name, year, tmdb_id, imdb_id, genre, description, duration_secs,
+                       poster_url, cast_list, director, country, rating, release_date, is_adult, is_adult_manual,
+                       created_at, updated_at, last_enriched_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        original["name"], original["year"], original["tmdb_id"], original["imdb_id"],
+                        original["genre"], original["description"], original["duration_secs"],
+                        original["poster_url"], original["cast_list"], original["director"],
+                        original["country"], original["rating"], original["release_date"],
+                        original["is_adult"], original["is_adult_manual"], _now(), _now(),
+                        original["last_enriched_at"],
+                    ),
+                )
+                new_movie_id = cur.lastrowid
+                new_rows_created += 1
+
+                placeholders = ",".join("?" for _ in group["source_ids"])
+                conn.execute(
+                    f"UPDATE movie_sources SET movie_id=? WHERE id IN ({placeholders})",
+                    (new_movie_id, *group["source_ids"]),
+                )
+                _commit_with_retry(conn)
+
+                for category_id in category_ids:
+                    place_movie_in_category(new_movie_id, category_id)
+        conn.close()
+    return {"movies_split": movies_split, "new_rows_created": new_rows_created}
+
+
+def series_language_split_dry_run_report() -> dict:
+    """beads-974 (Step 3, series): reports every existing series whose
+    series_sources span more than one language group (see
+    _group_source_languages_by_conflict) -- the series-side equivalent of
+    movie_language_split_dry_run_report. Episode-level mixed-language
+    episodes (see apply_series_language_split's docstring for why those can
+    exist independently of the series-level grouping) are handled entirely
+    inside apply -- there is no separate "episode dry run" here since an
+    episode's own episode_sources.language is authoritative on its own and
+    doesn't need a preview to sanity-check. Read-only."""
+    conn = _connect()
+    series_ids = [row["series_id"] for row in conn.execute("SELECT DISTINCT series_id FROM series_sources").fetchall()]
+    series_list = []
+    for series_id in series_ids:
+        groups = _group_source_languages_by_conflict(conn, "series_sources", "series_id", series_id)
+        if len(groups) > 1:
+            series_list.append({
+                "series_id": series_id,
+                "language_groups": len(groups),
+                "languages": [sorted(g["langs"]) for g in groups],
+            })
+    conn.close()
+    return {"series": series_list}
+
+
+def apply_series_language_split() -> dict:
+    """beads-974 (Step 3, series): retroactively re-splits every series found
+    by series_language_split_dry_run_report, and independently re-splits
+    every episode whose OWN episode_sources span more than one language.
+
+    Series are harder than movies because _merge_series_row can collapse two
+    already-distinct episode rows together whenever both series carried the
+    same (season_number, episode_number) -- the "from" episode's
+    episode_sources get reassigned onto the "into" episode's existing row and
+    the "from" episode itself is deleted (see _merge_series_row). So a single
+    post-merge `episodes` row can carry episode_sources spanning more than
+    one language even when nothing else about it looks unusual. But since
+    episode_sources.language is set independently per source from that
+    source's own raw_name (see _add_episode_source_row), never inherited from
+    the parent series/episode, there's no lost pre-merge lineage to recover:
+    grouping each episode's own episode_sources by language is sufficient on
+    its own, done independently of (and after) the series-level split below.
+
+    Series-level: the largest series_sources language group stays on the
+    original series_id (metadata untouched). Each other group is split off
+    into a brand-new series row -- full metadata copy of the original, per
+    user direction 2026-09-10 -- with that group's series_sources reassigned,
+    and the original's category placements copied over via
+    place_series_in_category (already idempotent, already allocates a fresh
+    export_series_id).
+
+    Episode-level: for every episode under a series touched above (or any
+    series at all, since an episode can be mixed-language even when its
+    parent series_sources are single-language), each language group's
+    episode_sources are moved onto the (season_number, episode_number)
+    episode row of whichEVER series -- original or newly split-off --
+    now holds that language's series_sources; that episode row is created
+    if it doesn't exist yet. Idempotent: a series/episode with only one
+    language group left is skipped."""
+    series_split = 0
+    new_rows_created = 0
+    with _WRITE_LOCK:
+        conn = _connect()
+
+        # -- Series-level split first, so the episode-level pass below has
+        # the right (possibly brand-new) series_id to target per language.
+        series_ids = [row["series_id"] for row in conn.execute("SELECT DISTINCT series_id FROM series_sources").fetchall()]
+        series_id_by_lang: dict[int, dict[str, int]] = {}  # original_series_id -> {lang: series_id}
+        for series_id in series_ids:
+            groups = _group_source_languages_by_conflict(conn, "series_sources", "series_id", series_id)
+            lang_map = {lang: series_id for lang in groups[0]["langs"]} if groups else {}
+            if len(groups) > 1:
+                original = conn.execute("SELECT * FROM series WHERE id=?", (series_id,)).fetchone()
+                category_ids = [
+                    row["category_id"]
+                    for row in conn.execute(
+                        "SELECT category_id FROM series_category_placements WHERE series_id=?", (series_id,)
+                    ).fetchall()
+                ]
+                series_split += 1
+                for group in groups[1:]:
+                    cur = conn.execute(
+                        """INSERT INTO series (name, year, tmdb_id, imdb_id, genre, description, poster_url,
+                           cast_list, director, country, rating, release_date, is_adult, is_adult_manual,
+                           import_provider_id, import_provider_series_id, provider_category_name,
+                           created_at, updated_at, last_enriched_at)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            original["name"], original["year"], original["tmdb_id"], original["imdb_id"],
+                            original["genre"], original["description"], original["poster_url"],
+                            original["cast_list"], original["director"], original["country"],
+                            original["rating"], original["release_date"], original["is_adult"],
+                            original["is_adult_manual"], original["import_provider_id"],
+                            original["import_provider_series_id"], original["provider_category_name"],
+                            _now(), _now(), original["last_enriched_at"],
+                        ),
+                    )
+                    new_series_id = cur.lastrowid
+                    new_rows_created += 1
+                    for lang in group["langs"]:
+                        lang_map[lang] = new_series_id
+
+                    placeholders = ",".join("?" for _ in group["source_ids"])
+                    conn.execute(
+                        f"UPDATE series_sources SET series_id=? WHERE id IN ({placeholders})",
+                        (new_series_id, *group["source_ids"]),
+                    )
+                    _commit_with_retry(conn)
+
+                    for category_id in category_ids:
+                        place_series_in_category(new_series_id, category_id)
+            series_id_by_lang[series_id] = lang_map
+
+        # -- Episode-level split: independent of whether the parent series
+        # was itself split above (see docstring) -- so this runs for every
+        # series that has a lang_map (i.e. every series with any sources).
+        for original_series_id, lang_map in series_id_by_lang.items():
+            episodes = conn.execute(
+                "SELECT id, season_number, episode_number FROM episodes WHERE series_id=?", (original_series_id,)
+            ).fetchall()
+            for ep in episodes:
+                groups = _group_source_languages_by_conflict(conn, "episode_sources", "episode_id", ep["id"])
+                if len(groups) <= 1:
+                    continue
+                for group in groups[1:]:
+                    # All sources in one group share overlapping languages by
+                    # construction -- any single one resolves the target series.
+                    target_lang = next(iter(group["langs"]))
+                    target_series_id = lang_map.get(target_lang, original_series_id)
+                    if target_series_id == original_series_id:
+                        continue
+                    existing_target = conn.execute(
+                        "SELECT id FROM episodes WHERE series_id=? AND season_number=? AND episode_number=?",
+                        (target_series_id, ep["season_number"], ep["episode_number"]),
+                    ).fetchone()
+                    if existing_target:
+                        target_ep_id = existing_target["id"]
+                    else:
+                        src_name = conn.execute("SELECT name FROM episodes WHERE id=?", (ep["id"],)).fetchone()["name"]
+                        target_ep_id = _add_episode_row(
+                            conn, target_series_id, ep["season_number"], ep["episode_number"], src_name,
+                        )
+
+                    placeholders = ",".join("?" for _ in group["source_ids"])
+                    conn.execute(
+                        f"UPDATE episode_sources SET episode_id=? WHERE id IN ({placeholders})",
+                        (target_ep_id, *group["source_ids"]),
+                    )
+                    _commit_with_retry(conn)
+
+        conn.close()
+    return {"series_split": series_split, "new_rows_created": new_rows_created}
+
+
+def preview_enabled_languages_impact(proposed_codes: list[str]) -> dict:
+    """Counts movies/episodes that currently have an eligible source under
+    config.get_enabled_languages() but would lose all eligible sources under
+    `proposed_codes` -- lets the Providers tab warn with a real number before
+    the user removes a language, instead of just silently dropping catalog
+    coverage. Adding a language never loses anything, so callers only need
+    to call this (and show the confirm dialog) when narrowing the set."""
+    movie_current_clause, movie_current_params = _enabled_languages_clause("ms.language")
+    episode_current_clause, episode_current_params = _enabled_languages_clause("es.language")
+    placeholders = ",".join("?" * len(proposed_codes))
+    proposed_params = [c.strip().upper() for c in proposed_codes if c.strip()]
+
+    conn = _connect()
+    movies_losing_access = conn.execute(f"""
+        SELECT COUNT(DISTINCT ms.movie_id) FROM movie_sources ms
+        JOIN providers p ON p.id = ms.provider_id
+        WHERE p.is_active = 1 AND {movie_current_clause}
+          AND ms.movie_id NOT IN (
+              SELECT ms2.movie_id FROM movie_sources ms2
+              JOIN providers p2 ON p2.id = ms2.provider_id
+              WHERE p2.is_active = 1 AND COALESCE(ms2.language, 'EN') IN ({placeholders})
+          )
+    """, (*movie_current_params, *proposed_params)).fetchone()[0]
+
+    episodes_losing_access = conn.execute(f"""
+        SELECT COUNT(DISTINCT es.episode_id) FROM episode_sources es
+        JOIN providers p ON p.id = es.provider_id
+        WHERE p.is_active = 1 AND {episode_current_clause}
+          AND es.episode_id NOT IN (
+              SELECT es2.episode_id FROM episode_sources es2
+              JOIN providers p2 ON p2.id = es2.provider_id
+              WHERE p2.is_active = 1 AND COALESCE(es2.language, 'EN') IN ({placeholders})
+          )
+    """, (*episode_current_params, *proposed_params)).fetchone()[0]
+    conn.close()
+
+    return {
+        "movies_losing_access": movies_losing_access,
+        "episodes_losing_access": episodes_losing_access,
+    }
+
+
+def _strip_lang_prefixes(name: str) -> str:
+    """Repeated -- some providers double-tag (e.g. "IN| TELUGU| Apex") --
+    strip every leading language-style layer to get the bare title, used to
+    match a language-tagged row against its same-content sibling in another
+    language (see smart_bulk_exclude)."""
+    while True:
+        new_name = _strip_one_lang_prefix(name)
+        if new_name is None or new_name == name:
+            return name
+        name = new_name
 
 
 def _missing_artwork_clause(search: str | None, excluded: bool) -> tuple[str, list]:
@@ -10047,19 +10806,209 @@ def bulk_set_poster_url(content_type: str, ids: list[int], poster_url: str) -> i
     """Blanket-apply one poster/placeholder image to many items at once --
     e.g. a generic logo for a whole batch of items a real per-title poster
     will never exist for (stock/creator content, local recordings)."""
-    with _WRITE_LOCK:
-        if not ids:
-            return 0
-        table = "movies" if content_type == "movie" else "series"
-        conn = _connect()
-        placeholders = ",".join("?" for _ in ids)
-        conn.execute(
-            f"UPDATE {table} SET poster_url=?, updated_at=? WHERE id IN ({placeholders})",
-            (poster_url, _now(), *ids),
-        )
-        _commit_with_retry(conn)
-        conn.close()
-        return len(ids)
+    if not ids:
+        return 0
+    table = "movies" if content_type == "movie" else "series"
+    conn = _connect()
+    placeholders = ",".join("?" for _ in ids)
+    conn.execute(
+        f"UPDATE {table} SET poster_url=?, updated_at=? WHERE id IN ({placeholders})",
+        (poster_url, _now(), *ids),
+    )
+    _commit_with_retry(conn)
+    conn.close()
+    return len(ids)
+
+
+def _row_excluded_by_rule(
+    name: str, category_names: set[str], provider_exclude_categories: list[str],
+    exclude_uncategorized: bool, lang: dict,
+) -> bool:
+    """Same rule vod_importer._should_exclude_from_import applies per-item at
+    import time, adapted for purge_excluded_archived_content's already-in-DB
+    rows: category_names is every provider_category_name seen across a row's
+    sources (movie_sources/series_sources) rather than one item's single
+    category, since a row can carry sources from more than one provider.
+
+    2026-09-11: lang["enabled_languages"] (an include-list, from
+    config.get_enabled_languages()) replaces lang["exclude_prefixes"] (an
+    explicit exclude-list) for the language-prefix gate -- see
+    vod_importer._should_exclude_from_import's identical change for the full
+    rationale. Keep in sync with that function's identical EN fallback --
+    purge and import-time filtering must agree on what "EN" means, or a
+    purge could leave behind (or delete) rows the import-time filter would
+    treat differently."""
+    code = _name_prefix_code(name) or "EN"
+    if code not in lang["enabled_languages"]:
+        return True
+    if lang["exclude_non_latin"] and _is_non_latin_name(name):
+        return True
+    if category_names:
+        if category_names & set(provider_exclude_categories):
+            return True
+    elif exclude_uncategorized:
+        return True
+    return False
+
+
+def purge_excluded_archived_content(provider_exclusions: dict[int, tuple[list[str], bool]], lang: dict) -> dict:
+    """One-time (repeatable) cleanup companion to the skip-at-import change:
+    deletes movies/series rows that are currently auto-archived
+    (review_excluded=1, review_excluded_manual=0) AND still match a currently
+    active exclusion rule -- content that, under the new "skip at import,
+    never store" model (see vod_importer._should_exclude_from_import), should
+    never have been imported in the first place. A human's manual archive
+    (review_excluded_manual=1, see bulk_set_review_excluded) is never
+    touched -- same protection every other auto-archive path in this file
+    already gives that flag.
+
+    provider_exclusions: {provider_id: (exclude_categories, exclude_uncategorized)},
+    one entry per provider currently configured with import exclusions --
+    callers build this from providers.import_exclude_categories/
+    import_exclude_uncategorized (see vod_importer.import_provider_catalog).
+    A row is only ever evaluated against the exclusion rule(s) of the
+    provider(s) it actually has a source from, mirroring the per-provider
+    scoping _should_exclude_from_import already has at import time."""
+    conn = _connect()
+    movie_rows = conn.execute(
+        "SELECT id, name FROM movies WHERE review_excluded=1 AND review_excluded_manual=0"
+    ).fetchall()
+    movies_deleted = 0
+    for row in movie_rows:
+        sources = conn.execute(
+            "SELECT provider_id, provider_category_name FROM movie_sources WHERE movie_id=?", (row["id"],)
+        ).fetchall()
+        excluded = False
+        for provider_id, group in _group_by_provider(sources):
+            rule = provider_exclusions.get(provider_id)
+            if not rule:
+                continue
+            exclude_categories, exclude_uncategorized = rule
+            category_names = {s["provider_category_name"] for s in group if s["provider_category_name"]}
+            if _row_excluded_by_rule(row["name"], category_names, exclude_categories, exclude_uncategorized, lang):
+                excluded = True
+                break
+        if excluded:
+            conn.execute("DELETE FROM movies WHERE id=?", (row["id"],))
+            movies_deleted += 1
+
+    series_rows = conn.execute(
+        "SELECT id, name FROM series WHERE review_excluded=1 AND review_excluded_manual=0"
+    ).fetchall()
+    series_deleted = 0
+    for row in series_rows:
+        sources = conn.execute(
+            "SELECT provider_id, provider_category_name FROM series_sources WHERE series_id=?", (row["id"],)
+        ).fetchall()
+        excluded = False
+        for provider_id, group in _group_by_provider(sources):
+            rule = provider_exclusions.get(provider_id)
+            if not rule:
+                continue
+            exclude_categories, exclude_uncategorized = rule
+            category_names = {s["provider_category_name"] for s in group if s["provider_category_name"]}
+            if _row_excluded_by_rule(row["name"], category_names, exclude_categories, exclude_uncategorized, lang):
+                excluded = True
+                break
+        if excluded:
+            conn.execute("DELETE FROM series WHERE id=?", (row["id"],))
+            series_deleted += 1
+
+    _commit_with_retry(conn)
+    conn.close()
+    return {"movies_deleted": movies_deleted, "series_deleted": series_deleted}
+
+
+def archive_disabled_language_content(movie_ids: set[int] | None = None, series_ids: set[int] | None = None) -> dict:
+    """KNM: added 2026-09-13, user report -- one-time (repeatable) catch-up
+    for deployments that were already running before the same-day auto-merge
+    language gate fix (see the merge gate's own comment in
+    auto_merge_movie_by_tmdb/auto_merge_series_by_tmdb). While that bug was
+    live, real different-language tmdb_id siblings kept getting silently
+    re-merged every enrichment cycle instead of staying split, so nothing
+    ever flagged them for review -- they just sat at review_excluded=0,
+    invisible to playback only because _enabled_languages_clause filters
+    them out of _best_source_cte at query time. On a fresh install (merge
+    gate correct from the start), this should have nothing to do; this
+    exists to clean up the backlog on instances upgrading from before the
+    fix.
+
+    Unlike purge_excluded_archived_content (which deletes rows matching an
+    active import-time exclusion rule), this ARCHIVES rather than deletes --
+    the user's explicit direction was that this is legitimately-imported
+    content the user just doesn't currently want for playback, not content
+    that should never have been stored. A row is archived only when NONE of
+    its source languages (the unfiltered _source_languages set, same
+    authority the merge gate uses) are in config.get_enabled_languages(); a
+    row with even one eligible-language source is left alone, mirroring the
+    merge gate's "shares at least one language" standard. A human's manual
+    archive/unarchive (review_excluded_manual=1) is never touched in either
+    direction, same protection every other auto-archive path in this file
+    already gives that flag -- and re-enabling a language later un-archives
+    the same rows it archived, since the check re-evaluates review_excluded
+    both ways instead of only ever setting it."""
+    enabled = set(get_enabled_languages())
+    conn = _connect()
+
+    movies_archived = 0
+    movies_unarchived = 0
+    movie_where = "review_excluded_manual=0"
+    movie_params = []
+    if movie_ids is not None:
+        if not movie_ids:
+            movie_where += " AND 0"
+        else:
+            movie_where += f" AND id IN ({','.join('?' * len(movie_ids))})"
+            movie_params = list(movie_ids)
+    for row in conn.execute(
+        f"SELECT id, review_excluded FROM movies WHERE {movie_where}", movie_params
+    ).fetchall():
+        langs = _source_languages(conn, "movie_sources", "movie_id", row["id"])
+        eligible = bool(langs & enabled)
+        if not eligible and not row["review_excluded"]:
+            conn.execute("UPDATE movies SET review_excluded=1 WHERE id=?", (row["id"],))
+            movies_archived += 1
+        elif eligible and row["review_excluded"]:
+            conn.execute("UPDATE movies SET review_excluded=0 WHERE id=?", (row["id"],))
+            movies_unarchived += 1
+
+    series_archived = 0
+    series_unarchived = 0
+    series_where = "review_excluded_manual=0"
+    series_params = []
+    if series_ids is not None:
+        if not series_ids:
+            series_where += " AND 0"
+        else:
+            series_where += f" AND id IN ({','.join('?' * len(series_ids))})"
+            series_params = list(series_ids)
+    for row in conn.execute(
+        f"SELECT id, review_excluded FROM series WHERE {series_where}", series_params
+    ).fetchall():
+        langs = _source_languages(conn, "series_sources", "series_id", row["id"])
+        eligible = bool(langs & enabled)
+        if not eligible and not row["review_excluded"]:
+            conn.execute("UPDATE series SET review_excluded=1 WHERE id=?", (row["id"],))
+            series_archived += 1
+        elif eligible and row["review_excluded"]:
+            conn.execute("UPDATE series SET review_excluded=0 WHERE id=?", (row["id"],))
+            series_unarchived += 1
+
+    _commit_with_retry(conn)
+    conn.close()
+    return {
+        "movies_archived": movies_archived,
+        "movies_unarchived": movies_unarchived,
+        "series_archived": series_archived,
+        "series_unarchived": series_unarchived,
+    }
+
+
+def _group_by_provider(rows) -> list[tuple[int, list]]:
+    grouped: dict[int, list] = {}
+    for r in rows:
+        grouped.setdefault(r["provider_id"], []).append(r)
+    return list(grouped.items())
 
 
 def bulk_set_review_excluded(content_type: str, ids: list[int], excluded: bool) -> int:
@@ -10072,33 +11021,32 @@ def bulk_set_review_excluded(content_type: str, ids: list[int], excluded: bool) 
 
     Every caller of this is a human clicking an archive/un-archive control,
     so this always stamps review_excluded_manual=1 too -- the signal that
-    stops import-time auto-archive (see vod_importer._should_auto_archive)
-    from silently re-archiving something a human deliberately restored, the
+    stops import-time auto-archive (see bulk_import_movies' auto_archive
+    param) from silently re-archiving something a human deliberately restored, the
     same is_adult/is_adult_manual pattern already used for adult-content
     auto-detection."""
-    with _WRITE_LOCK:
-        if not ids:
-            return 0
-        table = "movies" if content_type == "movie" else "series"
-        id_col = "movie_id" if content_type == "movie" else "series_id"
-        placements_table = "movie_category_placements" if content_type == "movie" else "series_category_placements"
-        conn = _connect()
-        placeholders = ",".join("?" for _ in ids)
-        conn.execute(
-            f"UPDATE {table} SET review_excluded=?, review_excluded_manual=1, updated_at=? WHERE id IN ({placeholders})",
-            (1 if excluded else 0, _now(), *ids),
-        )
-        if excluded:
-            # Archiving must be a TRUE archive: pull it out of every category
-            # placement (manual AND smart) immediately, not just flip the flag
-            # and wait for the next smart-category re-evaluation -- a manually
-            # placed item would otherwise keep exporting to Dispatcharr forever,
-            # the same visibility bug already fixed for import-time auto-archive
-            # (see evaluate_smart_category's review_excluded filter).
-            conn.execute(f"DELETE FROM {placements_table} WHERE {id_col} IN ({placeholders})", ids)
-        _commit_with_retry(conn)
-        conn.close()
-        return len(ids)
+    if not ids:
+        return 0
+    table = "movies" if content_type == "movie" else "series"
+    id_col = "movie_id" if content_type == "movie" else "series_id"
+    placements_table = "movie_category_placements" if content_type == "movie" else "series_category_placements"
+    conn = _connect()
+    placeholders = ",".join("?" for _ in ids)
+    conn.execute(
+        f"UPDATE {table} SET review_excluded=?, review_excluded_manual=1, updated_at=? WHERE id IN ({placeholders})",
+        (1 if excluded else 0, _now(), *ids),
+    )
+    if excluded:
+        # Archiving must be a TRUE archive: pull it out of every category
+        # placement (manual AND smart) immediately, not just flip the flag
+        # and wait for the next smart-category re-evaluation -- a manually
+        # placed item would otherwise keep exporting to Dispatcharr forever,
+        # the same visibility bug already fixed for import-time auto-archive
+        # (see evaluate_smart_category's review_excluded filter).
+        conn.execute(f"DELETE FROM {placements_table} WHERE {id_col} IN ({placeholders})", ids)
+    _commit_with_retry(conn)
+    conn.close()
+    return len(ids)
 
 
 def smart_bulk_exclude(content_type: str, ids: list[int], keep_codes: list[str] | None, dry_run: bool = False) -> dict:
@@ -10183,7 +11131,10 @@ def _library_rows(table: str, search: str | None, excluded: bool | None, script:
         rows = [r for r in rows if _is_non_latin_name(r["name"])]
     if prefixes:
         wanted = set(prefixes)
-        rows = [r for r in rows if _name_prefix_code(r["name"]) in wanted]
+        # Keep in sync with list_library_prefixes' identical EN fallback --
+        # otherwise "EN" is listed as a selectable filter option but
+        # selecting it silently returns zero rows.
+        rows = [r for r in rows if (_name_prefix_code(r["name"]) or "EN") in wanted]
     return rows
 
 
@@ -10266,32 +11217,21 @@ def list_all_pool_prefixes() -> list[dict]:
     a fixed ISO list, so the only reliable source of "what codes exist" is
     the pool itself. Backs the Import Language Exclusion picker so an admin
     can select real, currently-seen codes instead of guessing/typing them
-    blind."""
+    blind.
+
+    A name with no recognized prefix is counted as "EN", matching
+    _source_language's/_should_exclude_from_import's identical fallback --
+    without this, the vast majority of untagged EN/ES-convention titles
+    were invisible here, making the pool look almost empty and making "EN"
+    impossible to select/exclude even though it's the actual language most
+    untagged content is in."""
     conn = _connect()
     counts: dict[str, int] = {}
     for table in ("movies", "series"):
         rows = conn.execute(f"SELECT name FROM {table}").fetchall()
         for r in rows:
-            code = _name_prefix_code(r["name"])
-            if code and code not in _NON_LANGUAGE_PIPE_TAGS:
-                counts[code] = counts.get(code, 0) + 1
-    conn.close()
-    return sorted(({"code": c, "count": n} for c, n in counts.items()), key=lambda x: -x["count"])
-
-
-def list_all_pool_country_suffixes() -> list[dict]:
-    """Every known trailing "(<country code>)" tag (_country_suffix_code,
-    allowlist-only against _KNOWN_COUNTRY_SUFFIX_CODES) actually present
-    across the WHOLE pool right now, with live counts -- same shape and
-    reasoning as list_all_pool_prefixes above, just for Import Country
-    Exclusion's picker instead of Import Language Exclusion's."""
-    conn = _connect()
-    counts: dict[str, int] = {}
-    for table in ("movies", "series"):
-        rows = conn.execute(f"SELECT name FROM {table}").fetchall()
-        for r in rows:
-            code = _country_suffix_code(r["name"])
-            if code:
+            code = _name_prefix_code(r["name"]) or "EN"
+            if code not in _NON_LANGUAGE_PIPE_TAGS:
                 counts[code] = counts.get(code, 0) + 1
     conn.close()
     return sorted(({"code": c, "count": n} for c, n in counts.items()), key=lambda x: -x["count"])
@@ -10302,9 +11242,8 @@ def list_library_prefixes(content_type: str, search: str | None = None, excluded
     rows = _library_rows(table, search, excluded, script, None)
     counts: dict[str, int] = {}
     for r in rows:
-        code = _name_prefix_code(r["name"])
-        if code:
-            counts[code] = counts.get(code, 0) + 1
+        code = _name_prefix_code(r["name"]) or "EN"
+        counts[code] = counts.get(code, 0) + 1
     return sorted(({"code": c, "count": n} for c, n in counts.items()), key=lambda x: -x["count"])
 
 
@@ -10319,47 +11258,46 @@ def resolve_missing_artwork(
     merge-on-collision safety as resolve_year_review: if the corrected
     name/year now matches an existing pool entry exactly, merge into it
     rather than leaving two rows with the same identity."""
-    with _WRITE_LOCK:
-        table = "movies" if content_type == "movie" else "series"
-        conn = _connect()
-        row = conn.execute(f"SELECT * FROM {table} WHERE id=?", (item_id,)).fetchone()
-        if not row:
-            conn.close()
-            raise ValueError(f"{content_type} {item_id} not found")
+    table = "movies" if content_type == "movie" else "series"
+    conn = _connect()
+    row = conn.execute(f"SELECT * FROM {table} WHERE id=?", (item_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise ValueError(f"{content_type} {item_id} not found")
 
-        final_name = name.strip() if name and name.strip() else row["name"]
-        final_year = year if year is not None else row["year"]
+    final_name = name.strip() if name and name.strip() else row["name"]
+    final_year = year if year is not None else row["year"]
 
-        existing = None
-        if (final_name, final_year) != (row["name"], row["year"]):
-            existing = conn.execute(
-                f"SELECT id FROM {table} WHERE name=? AND year IS ? AND id != ?", (final_name, final_year, item_id),
-            ).fetchone()
+    existing = None
+    if (final_name, final_year) != (row["name"], row["year"]):
+        existing = conn.execute(
+            f"SELECT id FROM {table} WHERE name=? AND year IS ? AND id != ?", (final_name, final_year, item_id),
+        ).fetchone()
 
-        if existing:
-            # Give the surviving row the poster/tmdb_id before folding this one
-            # into it, in case it was ALSO missing artwork.
-            conn.execute(
-                f"UPDATE {table} SET poster_url=COALESCE(NULLIF(poster_url,''), ?), "
-                f"tmdb_id=COALESCE(tmdb_id, ?), updated_at=? WHERE id=?",
-                (poster_url, tmdb_id, _now(), existing["id"]),
-            )
-            _commit_with_retry(conn)
-            conn.close()
-            if content_type == "movie":
-                merge_movie(item_id, existing["id"])
-            else:
-                merge_series(item_id, existing["id"])
-            return {"merged_into": existing["id"]}
-
-        fields = {"poster_url": poster_url, "name": final_name, "year": final_year}
-        if tmdb_id:
-            fields["tmdb_id"] = tmdb_id
-        sets = ", ".join(f"{k}=?" for k in fields)
-        conn.execute(f"UPDATE {table} SET {sets}, updated_at=? WHERE id=?", (*fields.values(), _now(), item_id))
+    if existing:
+        # Give the surviving row the poster/tmdb_id before folding this one
+        # into it, in case it was ALSO missing artwork.
+        conn.execute(
+            f"UPDATE {table} SET poster_url=COALESCE(NULLIF(poster_url,''), ?), "
+            f"tmdb_id=COALESCE(tmdb_id, ?), updated_at=? WHERE id=?",
+            (poster_url, tmdb_id, _now(), existing["id"]),
+        )
         _commit_with_retry(conn)
         conn.close()
-        return {"resolved_id": item_id}
+        if content_type == "movie":
+            merge_movie(item_id, existing["id"])
+        else:
+            merge_series(item_id, existing["id"])
+        return {"merged_into": existing["id"]}
+
+    fields = {"poster_url": poster_url, "name": final_name, "year": final_year}
+    if tmdb_id:
+        fields["tmdb_id"] = tmdb_id
+    sets = ", ".join(f"{k}=?" for k in fields)
+    conn.execute(f"UPDATE {table} SET {sets}, updated_at=? WHERE id=?", (*fields.values(), _now(), item_id))
+    _commit_with_retry(conn)
+    conn.close()
+    return {"resolved_id": item_id}
 
 
 def backfill_tmdb_id_if_missing(content_type: str, item_id: int, tmdb_id: str) -> None:
@@ -10388,16 +11326,15 @@ def clear_tmdb_id(content_type: str, item_id: int) -> dict:
     anything a merge already did -- if the item was already merged into
     another row (see merge_movie/merge_series), the pre-merge row is gone
     and this can't bring it back; that needs a backup restore."""
-    with _WRITE_LOCK:
-        table = "movies" if content_type == "movie" else "series"
-        conn = _connect()
-        row = conn.execute(f"SELECT id, name, tmdb_id FROM {table} WHERE id=?", (item_id,)).fetchone()
-        if not row:
-            conn.close()
-            raise ValueError(f"{content_type} {item_id} not found")
-        conn.execute(f"UPDATE {table} SET tmdb_id=NULL, updated_at=? WHERE id=?", (_now(), item_id))
-        _commit_with_retry(conn)
+    table = "movies" if content_type == "movie" else "series"
+    conn = _connect()
+    row = conn.execute(f"SELECT id, name, tmdb_id FROM {table} WHERE id=?", (item_id,)).fetchone()
+    if not row:
         conn.close()
+        raise ValueError(f"{content_type} {item_id} not found")
+    conn.execute(f"UPDATE {table} SET tmdb_id=NULL, updated_at=? WHERE id=?", (_now(), item_id))
+    _commit_with_retry(conn)
+    conn.close()
     clear_tmdb_lookup_failure(content_type, item_id)
     logger.info("[clear_tmdb_id] %s id=%s (%r) tmdb_id %s -> NULL", content_type, item_id, row["name"], row["tmdb_id"])
     return {"cleared_id": item_id}
@@ -10411,30 +11348,32 @@ def set_tmdb_id(content_type: str, item_id: int, tmdb_id: int) -> dict:
     the right match on its own. Same merge-on-collision safety as
     rename_item: if another item already carries this exact tmdb_id, merge
     into it rather than leaving two rows claiming the same real title."""
-    with _WRITE_LOCK:
-        table = "movies" if content_type == "movie" else "series"
-        conn = _connect()
-        row = conn.execute(f"SELECT id, name, tmdb_id FROM {table} WHERE id=?", (item_id,)).fetchone()
-        if not row:
-            conn.close()
-            raise ValueError(f"{content_type} {item_id} not found")
-        existing = conn.execute(
-            f"SELECT id FROM {table} WHERE tmdb_id=? AND id != ?", (tmdb_id, item_id),
-        ).fetchone()
+    table = "movies" if content_type == "movie" else "series"
+    conn = _connect()
+    row = conn.execute(f"SELECT id, name, tmdb_id FROM {table} WHERE id=?", (item_id,)).fetchone()
+    if not row:
         conn.close()
+        raise ValueError(f"{content_type} {item_id} not found")
+    existing = conn.execute(
+        f"SELECT id FROM {table} WHERE tmdb_id=? AND id != ?", (tmdb_id, item_id),
+    ).fetchone()
+    conn.close()
 
-        if existing:
-            if content_type == "movie":
-                merge_movie(item_id, existing["id"])
-            else:
-                merge_series(item_id, existing["id"])
-            clear_tmdb_lookup_failure(content_type, item_id)
-            return {"merged_into": existing["id"]}
+    if existing:
+        clear_tmdb_lookup_failure(content_type, item_id)
+        if content_type == "movie":
+            merge_movie(item_id, existing["id"])
+        else:
+            merge_series(item_id, existing["id"])
+        return {"merged_into": existing["id"]}
 
-        conn = _connect()
-        conn.execute(f"UPDATE {table} SET tmdb_id=?, updated_at=? WHERE id=?", (tmdb_id, _now(), item_id))
-        _commit_with_retry(conn)
-        conn.close()
+    conn = _connect()
+    conn.execute(f"UPDATE {table} SET tmdb_id=?, updated_at=? WHERE id=?", (tmdb_id, _now(), item_id))
+    source_table = "movie_sources" if content_type == "movie" else "series_sources"
+    source_key = "movie_id" if content_type == "movie" else "series_id"
+    conn.execute(f"UPDATE {source_table} SET provider_detail_deferred=0 WHERE {source_key}=?", (item_id,))
+    _commit_with_retry(conn)
+    conn.close()
     clear_tmdb_lookup_failure(content_type, item_id)
     logger.info("[set_tmdb_id] %s id=%s (%r) tmdb_id %s -> %s", content_type, item_id, row["name"], row["tmdb_id"], tmdb_id)
     return {"resolved_id": item_id}
@@ -10484,40 +11423,39 @@ def rename_item(content_type: str, item_id: int, name: str, year: int | None) ->
     merge-on-collision safety as resolve_missing_artwork/resolve_year_review:
     if the corrected name+year now matches an existing pool entry exactly,
     merge into it rather than leaving two rows with the same identity."""
-    with _WRITE_LOCK:
-        table = "movies" if content_type == "movie" else "series"
-        name = name.strip()
-        if not name:
-            raise ValueError("name is required")
+    table = "movies" if content_type == "movie" else "series"
+    name = name.strip()
+    if not name:
+        raise ValueError("name is required")
 
-        conn = _connect()
-        row = conn.execute(f"SELECT * FROM {table} WHERE id=?", (item_id,)).fetchone()
-        if not row:
-            conn.close()
-            raise ValueError(f"{content_type} {item_id} not found")
-
-        existing = None
-        if (name, year) != (row["name"], row["year"]):
-            existing = conn.execute(
-                f"SELECT id FROM {table} WHERE name=? AND year IS ? AND id != ?", (name, year, item_id),
-            ).fetchone()
+    conn = _connect()
+    row = conn.execute(f"SELECT * FROM {table} WHERE id=?", (item_id,)).fetchone()
+    if not row:
         conn.close()
+        raise ValueError(f"{content_type} {item_id} not found")
 
-        if existing:
-            if content_type == "movie":
-                merge_movie(item_id, existing["id"])
-            else:
-                merge_series(item_id, existing["id"])
-            return {"merged_into": existing["id"]}
+    existing = None
+    if (name, year) != (row["name"], row["year"]):
+        existing = conn.execute(
+            f"SELECT id FROM {table} WHERE name=? AND year IS ? AND id != ?", (name, year, item_id),
+        ).fetchone()
+    conn.close()
 
-        conn = _connect()
-        conn.execute(
-            f"UPDATE {table} SET name=?, year=?, needs_year_review=0, updated_at=? WHERE id=?",
-            (name, year, _now(), item_id),
-        )
-        _commit_with_retry(conn)
-        conn.close()
-        return {"renamed_id": item_id}
+    if existing:
+        if content_type == "movie":
+            merge_movie(item_id, existing["id"])
+        else:
+            merge_series(item_id, existing["id"])
+        return {"merged_into": existing["id"]}
+
+    conn = _connect()
+    conn.execute(
+        f"UPDATE {table} SET name=?, year=?, needs_year_review=0, updated_at=? WHERE id=?",
+        (name, year, _now(), item_id),
+    )
+    _commit_with_retry(conn)
+    conn.close()
+    return {"renamed_id": item_id}
 
 
 # ── Content-mismatch flagging ────────────────────────────────────────────────
@@ -10743,46 +11681,41 @@ def set_catchall_include_adult(include_adult: bool) -> list[dict]:
     category (there are exactly two, seeded together) and re-evaluates them
     immediately so the change is visible right away instead of waiting for
     the next periodic refresh cycle."""
-    with _WRITE_LOCK:
-        import json
-        conn = _connect()
-        rows = conn.execute("SELECT id, rule_json FROM categories WHERE is_smart=1 AND rule_json IS NOT NULL").fetchall()
-        results = []
-        for r in rows:
-            try:
-                rule = json.loads(r["rule_json"])
-            except (ValueError, TypeError):
-                continue
-            if not rule.get("match_all"):
-                continue
-            rule["exclude_adult"] = not include_adult
-            conn.execute("UPDATE categories SET rule_json=? WHERE id=?", (json.dumps(rule), r["id"]))
-            results.append(r["id"])
-        _commit_with_retry(conn)
-        conn.close()
-        return [evaluate_smart_category(cid) for cid in results]
+    import json
+    conn = _connect()
+    rows = conn.execute("SELECT id, rule_json FROM categories WHERE is_smart=1 AND rule_json IS NOT NULL").fetchall()
+    results = []
+    for r in rows:
+        try:
+            rule = json.loads(r["rule_json"])
+        except (ValueError, TypeError):
+            continue
+        if not rule.get("match_all"):
+            continue
+        rule["exclude_adult"] = not include_adult
+        conn.execute("UPDATE categories SET rule_json=? WHERE id=?", (json.dumps(rule), r["id"]))
+        results.append(r["id"])
+    _commit_with_retry(conn)
+    conn.close()
+    return [evaluate_smart_category(cid) for cid in results]
 
 
-def evaluate_smart_category(category_id: int, ids: set[int] | None = None) -> dict:
+def evaluate_smart_category(category_id: int, item_ids: list[int] | set[int] | None = None) -> dict:
     """Evaluate a smart category's rule_json against the whole pool (movies or
     series, per the category's content_type) and auto-place every match.
     Never un-places existing matches — same additive semantics as manual
     placement. Returns counts for the caller to surface in the UI.
 
     Excludes review_excluded=1 rows from the candidate pool entirely --
-    without this, an archived item (see _should_auto_archive) still gets
+    without this, an archived item (see bulk_import_movies' auto_archive
+    param) still gets
     auto-placed into any smart category whose rule it happens to match,
     including the match_all catch-all categories, which defeats the whole
     point of archiving it: "archived" only means "hidden from VOD Manager's
     own review queues" at the row level (see bulk_set_review_excluded), it
     was never wired into category placement/export visibility on its own --
     this filter is what actually makes an archived item invisible to
-    Dispatcharr, since visibility is governed by placement, not the flag.
-
-    ids: optional scoping to just this set of movie/series ids instead of
-    the whole table (see resweep_smart_categories' matching parameter) --
-    None (every caller today) means the full-pool scan, unchanged. An empty
-    (but not None) set means nothing to evaluate; skip the query entirely."""
+    Dispatcharr, since visibility is governed by placement, not the flag."""
     category = get_category(category_id)
     if not category:
         raise ValueError(f"category {category_id} not found")
@@ -10794,54 +11727,43 @@ def evaluate_smart_category(category_id: int, ids: set[int] | None = None) -> di
     import json
     rule = json.loads(category["rule_json"])
 
-    if ids is not None and not ids:
-        rows: list[dict] = []
+    ids = list(item_ids) if item_ids is not None else None
+    if ids == []:
+        return {"evaluated": 0, "matched": 0, "newly_placed": 0}
+
+    conn = _connect()
+    rows = []
+    id_chunks = [ids[i:i + 900] for i in range(0, len(ids), 900)] if ids is not None else [None]
+    if category["content_type"] == "movie":
+        for chunk in id_chunks:
+            where = "m.review_excluded=0"
+            params = []
+            if chunk is not None:
+                where += f" AND m.id IN ({','.join('?' * len(chunk))})"
+                params = chunk
+            rows.extend(dict(r) for r in conn.execute(f"""
+                SELECT m.*, (
+                    SELECT GROUP_CONCAT(DISTINCT ms.provider_category_name) FROM movie_sources ms
+                    WHERE ms.movie_id = m.id AND ms.provider_category_name IS NOT NULL
+                ) AS provider_category
+                FROM movies m WHERE {where}
+            """, params).fetchall())
     else:
-        conn = _connect()
-        id_list = list(ids) if ids is not None else None
-        if category["content_type"] == "movie":
-            if id_list is None:
-                rows = [dict(r) for r in conn.execute("""
-                    SELECT m.*, (
-                        SELECT GROUP_CONCAT(DISTINCT ms.provider_category_name) FROM movie_sources ms
-                        WHERE ms.movie_id = m.id AND ms.provider_category_name IS NOT NULL
-                    ) AS provider_category
-                    FROM movies m WHERE m.review_excluded=0
-                """).fetchall()]
-            else:
-                rows = []
-                for chunk in _chunked(id_list):
-                    placeholders = ",".join("?" for _ in chunk)
-                    rows.extend(dict(r) for r in conn.execute(f"""
-                        SELECT m.*, (
-                            SELECT GROUP_CONCAT(DISTINCT ms.provider_category_name) FROM movie_sources ms
-                            WHERE ms.movie_id = m.id AND ms.provider_category_name IS NOT NULL
-                        ) AS provider_category
-                        FROM movies m WHERE m.review_excluded=0 AND m.id IN ({placeholders})
-                    """, chunk).fetchall())
-        else:
-            if id_list is None:
-                rows = [dict(r) for r in conn.execute("""
-                    SELECT s.*, (
-                        SELECT GROUP_CONCAT(DISTINCT es.provider_category_name) FROM episode_sources es
-                        JOIN episodes e ON e.id = es.episode_id
-                        WHERE e.series_id = s.id AND es.provider_category_name IS NOT NULL
-                    ) AS provider_category
-                    FROM series s WHERE s.review_excluded=0
-                """).fetchall()]
-            else:
-                rows = []
-                for chunk in _chunked(id_list):
-                    placeholders = ",".join("?" for _ in chunk)
-                    rows.extend(dict(r) for r in conn.execute(f"""
-                        SELECT s.*, (
-                            SELECT GROUP_CONCAT(DISTINCT es.provider_category_name) FROM episode_sources es
-                            JOIN episodes e ON e.id = es.episode_id
-                            WHERE e.series_id = s.id AND es.provider_category_name IS NOT NULL
-                        ) AS provider_category
-                        FROM series s WHERE s.review_excluded=0 AND s.id IN ({placeholders})
-                    """, chunk).fetchall())
-        conn.close()
+        for chunk in id_chunks:
+            where = "s.review_excluded=0"
+            params = []
+            if chunk is not None:
+                where += f" AND s.id IN ({','.join('?' * len(chunk))})"
+                params = chunk
+            rows.extend(dict(r) for r in conn.execute(f"""
+                SELECT s.*, (
+                    SELECT GROUP_CONCAT(DISTINCT es.provider_category_name) FROM episode_sources es
+                    JOIN episodes e ON e.id = es.episode_id
+                    WHERE e.series_id = s.id AND es.provider_category_name IS NOT NULL
+                ) AS provider_category
+                FROM series s WHERE {where}
+            """, params).fetchall())
+    conn.close()
 
     matched_ids = [row["id"] for row in rows if _rule_matches(row, rule)]
     if category["content_type"] == "movie":
@@ -10954,24 +11876,23 @@ def close_stale_watch_sessions(dispatcharr_connection_id: int, active_client_ids
     Dispatcharr only ever reports current state, so a session dropping out
     of that list is the only signal we get that it ended (no explicit
     'stopped' event to listen for)."""
-    with _WRITE_LOCK:
-        conn = _connect()
-        now = _now()
-        if active_client_ids:
-            placeholders = ",".join("?" for _ in active_client_ids)
-            cur = conn.execute(
-                f"""UPDATE watch_sessions SET ended_at=? WHERE dispatcharr_connection_id=? AND ended_at IS NULL
-                    AND client_id NOT IN ({placeholders})""",
-                (now, dispatcharr_connection_id, *active_client_ids),
-            )
-        else:
-            cur = conn.execute(
-                "UPDATE watch_sessions SET ended_at=? WHERE dispatcharr_connection_id=? AND ended_at IS NULL",
-                (now, dispatcharr_connection_id),
-            )
-        _commit_with_retry(conn)
-        conn.close()
-        return cur.rowcount
+    conn = _connect()
+    now = _now()
+    if active_client_ids:
+        placeholders = ",".join("?" for _ in active_client_ids)
+        cur = conn.execute(
+            f"""UPDATE watch_sessions SET ended_at=? WHERE dispatcharr_connection_id=? AND ended_at IS NULL
+                AND client_id NOT IN ({placeholders})""",
+            (now, dispatcharr_connection_id, *active_client_ids),
+        )
+    else:
+        cur = conn.execute(
+            "UPDATE watch_sessions SET ended_at=? WHERE dispatcharr_connection_id=? AND ended_at IS NULL",
+            (now, dispatcharr_connection_id),
+        )
+    _commit_with_retry(conn)
+    conn.close()
+    return cur.rowcount
 
 
 def list_watch_sessions(
