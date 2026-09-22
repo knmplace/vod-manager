@@ -15,6 +15,17 @@ auto_merge_* as two separate rows at all."""
 import config
 
 
+def _insert_missing_card(db, table, name, year):
+    conn = db._connect()
+    cur = conn.execute(
+        f"INSERT INTO {table} (name, year, created_at) VALUES (?, ?, ?)",
+        (name, year, db._now()),
+    )
+    db._commit_with_retry(conn)
+    conn.close()
+    return int(cur.lastrowid)
+
+
 def _import_movie(db, provider_id, name, year, stream_id, raw_name, tmdb_id):
     db.bulk_import_movies(provider_id, [
         {
@@ -220,6 +231,40 @@ def test_auto_merge_series_skips_same_tmdb_id_when_year_differs(db):
     db.auto_merge_series_by_tmdb(rows[0]["id"])
 
     assert all(db.get_series(row["id"]) is not None for row in rows)
+
+
+def test_auto_merge_movie_missing_tmdb_same_name_year_into_known_card(db):
+    config.save_duplicate_finder_auto_merge_tmdb(True)
+    known_id = db.upsert_movie("The Cage", 2024, tmdb_id="287230")
+    missing_id = _insert_missing_card(db, "movies", "The Cage", 2024)
+
+    events = db.auto_merge_movie_tmdb_collisions([missing_id])
+
+    assert db.get_movie(known_id) is not None
+    assert db.get_movie(missing_id) is None
+    assert events[0]["detail"]["match_type"] == "name_year_missing_tmdb"
+
+
+def test_auto_merge_movie_missing_tmdb_does_not_cross_years(db):
+    config.save_duplicate_finder_auto_merge_tmdb(True)
+    known_id = db.upsert_movie("The Cage", 2026, tmdb_id="287230")
+    missing_id = _insert_missing_card(db, "movies", "The Cage", 2024)
+
+    assert db.auto_merge_movie_tmdb_collisions([missing_id]) == []
+    assert db.get_movie(known_id) is not None
+    assert db.get_movie(missing_id) is not None
+
+
+def test_auto_merge_series_missing_tmdb_same_name_year_into_known_card(db):
+    config.save_duplicate_finder_auto_merge_tmdb(True)
+    known_id = db.upsert_series("Pose", 2018, tmdb_id="79084")
+    missing_id = _insert_missing_card(db, "series", "Pose", 2018)
+
+    events = db.auto_merge_series_tmdb_collisions([missing_id])
+
+    assert db.get_series(known_id) is not None
+    assert db.get_series(missing_id) is None
+    assert events[0]["detail"]["match_type"] == "name_year_missing_tmdb"
 
 
 def test_auto_merge_movies_by_tmdb_batch_merges_each_id_sequentially(db):

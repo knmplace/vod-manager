@@ -3958,6 +3958,18 @@ def _strip_country_suffix_for_dedup(name: str) -> str:
     return name
 
 
+def _dedup_name_key(name: str) -> str:
+    """Use the same conservative title key as Duplicate Finder."""
+    raw_name = name or ""
+    if get_duplicate_finder_quality_prefix_matching():
+        raw_name = _strip_quality_lang_prefix_for_dedup(raw_name)
+        raw_name = _strip_country_suffix_for_dedup(raw_name)
+    key = _normalize_title_for_dedup(raw_name)
+    if get_duplicate_finder_quality_prefix_matching():
+        key = _strip_quality_prefix_for_dedup(key)
+    return key
+
+
 # Trailing "(YYYY)" year suffix some providers append to the title itself
 # ("Crashing (2016)") while others leave it off the same series' name
 # entirely ("Crashing") -- a distinct artifact from the actual `year` column
@@ -4293,10 +4305,10 @@ def find_duplicate_groups(content_type: str) -> list[dict]:
     # find_duplicate_groups). Grouped here purely on year-stripped base name
     # (_base_name_for_dedup) since there's no tmdb_id to prove the match --
     # this is NOT proof the way a shared tmdb_id is, so unlike pass 4 this
-    # can only ever surface a manual-review candidate, never feed an
-    # auto-merge path (see auto_merge_series_by_tmdb / auto_merge_movie_by_
-    # tmdb, both of which require BOTH sides to already share a confirmed
-    # tmdb_id and never call this function at all).
+    # can only ever surface a manual-review candidate. The automatic path has
+    # a separate, stricter exact normalized-name + exact-year rule for a
+    # missing-TMDB card when there is exactly one TMDB-backed holder; it does
+    # not consume these broader year-stripped candidates.
     still_unclustered = [i for i in unclustered if i["id"] not in pass4_grouped_ids]
     by_base_name: dict[str, list[dict]] = {}
     for i in still_unclustered:
@@ -9314,18 +9326,12 @@ def auto_merge_movie_by_tmdb(movie_id: int) -> list[dict]:
     identical tmdb_id).
 
     Design (user direction 2026-09-10, see beads-w80): tmdb_id equality is
-    the MUST-match gate -- it's independently corroborated by TMDB itself,
-    not derived from our own name-normalization heuristics, so it's trusted
-    enough to skip manual review, at any group size. Year agreement is a
-    reinforcer only, never a requirement -- logged for audit, never blocks
-    the merge. A row with no tmdb_id at all can never appear in this
-    function's query (it only ever looks up OTHER rows sharing a specific
-    non-null id), so there's no "questionable" member to strand mid-group --
-    by the time a row shares this tmdb_id, agreement is total by
-    construction, same guarantee _split_by_tmdb_conflict already relies on.
-    A row that's merely name/year-clustered without a confirmed tmdb_id
-    match stays in the manual Duplicate Finder queue untouched (see
-    beads-sru's Tier 2) -- that case never reaches this function.
+    the primary MUST-match gate -- it's independently corroborated by TMDB
+    itself, not derived from our own name-normalization heuristics. The one
+    deliberate partial-identity exception is a same normalized title + exact
+    year card with no TMDB ID: it is merged into the sole TMDB-backed card
+    only when no competing TMDB ID makes that pairing ambiguous. All merges
+    still require exact year agreement and the source-language guard.
 
     The just-enriched row (`movie_id`) is kept as the surviving `into_id`
     for every merge in the group -- its metadata was just refreshed from
@@ -9348,17 +9354,41 @@ def auto_merge_movie_by_tmdb(movie_id: int) -> list[dict]:
         return []
 
     conn = _connect()
-    other_rows = conn.execute(
-        "SELECT id, name, year FROM movies WHERE tmdb_id=? AND id!=?", (tmdb_id, movie_id)
-    ).fetchall()
+    merge_candidates = [
+        (dict(row), "tmdb_id") for row in conn.execute(
+            "SELECT id, name, year, tmdb_id FROM movies WHERE tmdb_id=? AND id!=?",
+            (tmdb_id, movie_id),
+        ).fetchall()
+    ]
+    # A provider can create a second card before TMDB enrichment runs. If its
+    # title/year exactly corroborates the already-known card, it is safe to
+    # fold the missing-ID card into the TMDB-backed survivor. Require that no
+    # competing TMDB ID exists for this same normalized title/year, otherwise
+    # a same-name remake would make the automatic choice ambiguous.
+    if movie.get("year") is not None:
+        same_year_rows = [
+            dict(row) for row in conn.execute(
+                "SELECT id, name, year, tmdb_id FROM movies WHERE year=? AND id!=?",
+                (movie["year"], movie_id),
+            ).fetchall()
+            if _dedup_name_key(row["name"]) == _dedup_name_key(movie.get("name") or "")
+        ]
+        same_name_tmdb_ids = {
+            str(row["tmdb_id"]) for row in same_year_rows if row.get("tmdb_id")
+        }
+        if not same_name_tmdb_ids or same_name_tmdb_ids == {str(tmdb_id)}:
+            merge_candidates.extend(
+                (row, "name_year_missing_tmdb")
+                for row in same_year_rows if not row.get("tmdb_id")
+            )
     conn.close()
-    if not other_rows:
+    if not merge_candidates:
         return []
 
     ignored_sigs = set(list_ignored_duplicate_signatures("movie"))
     this_year = movie.get("year")
     merge_events = []
-    for row in other_rows:
+    for row, match_type in merge_candidates:
         signature = _duplicate_ignore_signature([movie_id, row["id"]])
         if signature in ignored_sigs:
             continue
@@ -9441,6 +9471,7 @@ def auto_merge_movie_by_tmdb(movie_id: int) -> list[dict]:
             "action": "merged",
             "detail": {
                 "tmdb_id": tmdb_id,
+                "match_type": match_type,
                 "merged_title": row["name"],
                 "merged_id": row["id"],
                 "survivor_title": movie.get("name"),
@@ -9526,13 +9557,10 @@ def auto_merge_series_by_tmdb(series_id: int) -> list[dict]:
     (see vod_importer.enrich_series) -- every OTHER series row sharing that
     same non-null tmdb_id gets merged into a single survivor automatically,
     no human click, regardless of how many there are. Same design as
-    auto_merge_movie_by_tmdb (beads-w80) -- tmdb_id equality is the sole
-    MUST-match gate, trusted at any group size because it's independently
-    corroborated by TMDB, not derived from our own name-normalization
-    heuristics. Year agreement is logged as an audit/reinforcer signal only,
-    never a requirement or blocker. A row with no tmdb_id can never appear in
-    this function's lookup query at all, so there's no "partial" member to
-    strand -- agreement is total by construction (beads-91l).
+    auto_merge_movie_by_tmdb (beads-w80): a same normalized title + exact
+    year card with no TMDB ID may also merge into the sole TMDB-backed card
+    when no competing TMDB ID makes the pairing ambiguous. All merges still
+    require exact year agreement and the source-language guard.
 
     Survivor tiebreak differs from movies (user direction 2026-09-10):
     movies keep the just-enriched row as survivor; series instead prefer
@@ -9569,16 +9597,35 @@ def auto_merge_series_by_tmdb(series_id: int) -> list[dict]:
         return []
 
     conn = _connect()
-    other_rows = conn.execute(
-        "SELECT id, name, year FROM series WHERE tmdb_id=? AND id!=?", (tmdb_id, series_id)
-    ).fetchall()
+    merge_candidates = [
+        (dict(row), "tmdb_id") for row in conn.execute(
+            "SELECT id, name, year, tmdb_id FROM series WHERE tmdb_id=? AND id!=?",
+            (tmdb_id, series_id),
+        ).fetchall()
+    ]
+    if series.get("year") is not None:
+        same_year_rows = [
+            dict(row) for row in conn.execute(
+                "SELECT id, name, year, tmdb_id FROM series WHERE year=? AND id!=?",
+                (series["year"], series_id),
+            ).fetchall()
+            if _dedup_name_key(row["name"]) == _dedup_name_key(series.get("name") or "")
+        ]
+        same_name_tmdb_ids = {
+            str(row["tmdb_id"]) for row in same_year_rows if row.get("tmdb_id")
+        }
+        if not same_name_tmdb_ids or same_name_tmdb_ids == {str(tmdb_id)}:
+            merge_candidates.extend(
+                (row, "name_year_missing_tmdb")
+                for row in same_year_rows if not row.get("tmdb_id")
+            )
     conn.close()
-    if not other_rows:
+    if not merge_candidates:
         return []
 
     ignored_sigs = set(list_ignored_duplicate_signatures("series"))
     merge_events = []
-    for row in other_rows:
+    for row, match_type in merge_candidates:
         signature = _duplicate_ignore_signature([series_id, row["id"]])
         if signature in ignored_sigs:
             continue
@@ -9640,7 +9687,9 @@ def auto_merge_series_by_tmdb(series_id: int) -> list[dict]:
         other_name = other.get("name") or ""
         current_is_clean = _strip_quality_lang_prefix_for_dedup(current_name) == current_name
         other_is_clean = _strip_quality_lang_prefix_for_dedup(other_name) == other_name
-        if other_is_clean and not current_is_clean:
+        if not other.get("tmdb_id"):
+            keep_id, drop_id = series_id, row["id"]
+        elif other_is_clean and not current_is_clean:
             keep_id, drop_id = row["id"], series_id
         else:
             keep_id, drop_id = series_id, row["id"]
@@ -9661,6 +9710,7 @@ def auto_merge_series_by_tmdb(series_id: int) -> list[dict]:
             "action": "merged",
             "detail": {
                 "tmdb_id": tmdb_id,
+                "match_type": match_type,
                 "merged_title": current_name if drop_id == series_id else other_name,
                 "merged_id": drop_id,
                 "survivor_title": current_name if keep_id == series_id else other_name,
@@ -9706,6 +9756,24 @@ def auto_merge_series_by_tmdb_batch(series_ids) -> list[dict]:
     return events
 
 
+def _same_name_year_tmdb_holder(conn: sqlite3.Connection, table: str, row: dict) -> int | None:
+    """Find the sole TMDB-backed card matching a scoped missing-ID row."""
+    if row.get("year") is None or row.get("tmdb_id"):
+        return None
+    matches = [
+        dict(candidate) for candidate in conn.execute(
+            f"SELECT id, name, year, tmdb_id FROM {table} WHERE year=? AND id!=?",
+            (row["year"], row["id"]),
+        ).fetchall()
+        if _dedup_name_key(candidate["name"]) == _dedup_name_key(row.get("name") or "")
+    ]
+    tmdb_ids = {str(candidate["tmdb_id"]) for candidate in matches if candidate.get("tmdb_id")}
+    if len(tmdb_ids) != 1:
+        return None
+    holder = next(candidate for candidate in matches if candidate.get("tmdb_id"))
+    return int(holder["id"])
+
+
 def auto_merge_movie_tmdb_collisions(movie_ids: set[int] | list[int] | None = None) -> list[dict]:
     """Merge every *current* movie TMDB-ID collision safely.
 
@@ -9718,7 +9786,7 @@ def auto_merge_movie_tmdb_collisions(movie_ids: set[int] | list[int] | None = No
     conn = _connect()
     if movie_ids is None:
         rows = conn.execute("""
-            SELECT id FROM movies
+            SELECT id, name, year, tmdb_id FROM movies
             WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> ''
               AND tmdb_id IN (
                   SELECT tmdb_id FROM movies
@@ -9733,12 +9801,19 @@ def auto_merge_movie_tmdb_collisions(movie_ids: set[int] | list[int] | None = No
             conn.close()
             return []
         rows = conn.execute(
-            f"SELECT id FROM movies WHERE id IN ({','.join('?' * len(ids))}) "
-            "AND tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> '' ORDER BY id",
+            f"SELECT id, name, year, tmdb_id FROM movies WHERE id IN ({','.join('?' * len(ids))}) ORDER BY id",
             ids,
         ).fetchall()
+    merge_ids = [row["id"] for row in rows if row["tmdb_id"] and str(row["tmdb_id"]).strip()]
+    if movie_ids is not None:
+        merge_ids.extend(
+            holder_id for row in rows
+            if not row["tmdb_id"]
+            for holder_id in [_same_name_year_tmdb_holder(conn, "movies", dict(row))]
+            if holder_id is not None
+        )
     conn.close()
-    return auto_merge_movies_by_tmdb_batch([row["id"] for row in rows])
+    return auto_merge_movies_by_tmdb_batch(dict.fromkeys(merge_ids))
 
 
 def auto_merge_series_tmdb_collisions(series_ids: set[int] | list[int] | None = None) -> list[dict]:
@@ -9753,7 +9828,7 @@ def auto_merge_series_tmdb_collisions(series_ids: set[int] | list[int] | None = 
     conn = _connect()
     if series_ids is None:
         rows = conn.execute("""
-            SELECT id FROM series
+            SELECT id, name, year, tmdb_id FROM series
             WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> ''
               AND tmdb_id IN (
                   SELECT tmdb_id FROM series
@@ -9768,12 +9843,19 @@ def auto_merge_series_tmdb_collisions(series_ids: set[int] | list[int] | None = 
             conn.close()
             return []
         rows = conn.execute(
-            f"SELECT id FROM series WHERE id IN ({','.join('?' * len(ids))}) "
-            "AND tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> '' ORDER BY id",
+            f"SELECT id, name, year, tmdb_id FROM series WHERE id IN ({','.join('?' * len(ids))}) ORDER BY id",
             ids,
         ).fetchall()
+    merge_ids = [row["id"] for row in rows if row["tmdb_id"] and str(row["tmdb_id"]).strip()]
+    if series_ids is not None:
+        merge_ids.extend(
+            holder_id for row in rows
+            if not row["tmdb_id"]
+            for holder_id in [_same_name_year_tmdb_holder(conn, "series", dict(row))]
+            if holder_id is not None
+        )
     conn.close()
-    return auto_merge_series_by_tmdb_batch([row["id"] for row in rows])
+    return auto_merge_series_by_tmdb_batch(dict.fromkeys(merge_ids))
 
 
 def list_needs_year_review(content_type: str | None = None) -> dict:

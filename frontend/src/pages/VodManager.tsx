@@ -63,6 +63,9 @@ function syncDuration(start: string | null | undefined, finish: string | null | 
 function syncEventDescription(event: CatalogSyncEvent): string {
   const detail = event.detail ?? {}
   if (event.action === 'merged') {
+    if (detail.match_type === 'name_year_missing_tmdb') {
+      return `Merged “${detail.merged_title ?? 'duplicate'}” into “${detail.survivor_title ?? event.title}” after matching the normalized title and exact year; the duplicate had no TMDB ID.`
+    }
     return `Merged “${detail.merged_title ?? 'duplicate'}” into “${detail.survivor_title ?? event.title}”.`
   }
   if (event.action === 'episodes_synced') {
