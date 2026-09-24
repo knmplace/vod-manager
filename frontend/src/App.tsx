@@ -266,7 +266,7 @@ export default function App() {
             <div className="text-sm font-bold tracking-tight leading-tight">VOD & DVR Manager - KNM</div>
             {versionQuery.data && (
               <div className="text-[11px] text-foreground/80 font-mono font-medium truncate" title={`ref: ${versionQuery.data.ref}`}>
-                <span className="text-foreground">v{versionQuery.data.version}</span> <span className="text-primary/80">· {versionQuery.data.commit}</span>
+                <span className="text-foreground">v{versionQuery.data.version}</span> <span className="text-primary">· {versionQuery.data.commit}</span>
               </div>
             )}
           </div>
@@ -300,7 +300,7 @@ export default function App() {
               Catalog status
             </div>
             {runtimeStatusQuery.data?.import.queued ? (
-              <p className="mt-1">{runtimeStatusQuery.data.import.provider_name ?? 'Provider'} import queued{runtimeStatusQuery.data.import.queue_position && runtimeStatusQuery.data.import.queue_position > 1 ? ` (${runtimeStatusQuery.data.import.queue_position} ahead)` : ''}â€¦</p>
+              <p className="mt-1">{runtimeStatusQuery.data.import.provider_name ?? 'Provider'} import queued{runtimeStatusQuery.data.import.queue_position && runtimeStatusQuery.data.import.queue_position > 1 ? ` (${runtimeStatusQuery.data.import.queue_position - 1} ahead)` : ''}â€¦</p>
             ) : runtimeStatusQuery.data?.import.running ? (
               <p className="mt-1">Importing {runtimeStatusQuery.data.import.provider_name ?? 'provider'}…</p>
             ) : runtimeStatusQuery.data?.bulk_ai.running ? (
@@ -347,21 +347,21 @@ export default function App() {
       </aside>
 
       <div className="flex flex-col min-w-0">
-        <header className="sticky top-0 z-10 relative flex items-center gap-3.5 px-5 py-2.5 border-b border-border bg-card">
+        <header className="sticky top-0 z-10 flex flex-wrap items-center gap-3.5 px-5 py-2.5 border-b border-border bg-card">
           <div className="flex-1 max-w-[380px] flex items-center gap-2 rounded-md border border-border bg-background px-2.5 py-1.5 text-xs text-muted-foreground/70">
             <Search size={13} className="flex-shrink-0" />
             Search coming soon…
           </div>
           {workflow && workflow.state !== 'idle' && (
-            <div className={`pointer-events-none absolute left-1/2 top-1/2 w-[min(46rem,52vw)] -translate-x-1/2 -translate-y-1/2 rounded-md border px-4 py-1.5 ${
+            <div className={`order-last min-w-0 basis-full flex-1 rounded-md border px-4 py-1.5 text-center 2xl:order-none 2xl:basis-auto ${
               workflowIsReady ? 'border-emerald-500/35 bg-emerald-500/10' : workflowHasFailed ? 'border-destructive/40 bg-destructive/10' : 'border-primary/35 bg-primary/10'
             }`}>
-              <div className="flex items-center justify-center gap-1.5 text-[12px] font-semibold">
+              <div className="flex items-center justify-center gap-1.5 text-[12px] font-semibold text-foreground">
                 {workflowIsReady ? <CheckCircle2 size={14} className="text-emerald-400" /> : workflowHasFailed ? <CircleAlert size={14} className="text-destructive" /> : <Loader2 size={14} className="animate-spin text-primary" />}
                 <span>{workflowIsReady ? 'Import complete · Catalog ready for review' : workflowHasFailed ? 'Automatic catalog work needs attention' : activeWorkflowDetail}</span>
               </div>
               {workflowIsReady && (
-                <div className="mt-0.5 text-center text-[11px] text-foreground/75">
+                <div className="mt-0.5 break-words text-center text-[11px] text-foreground/75">
                   {workflowDurationSeconds != null ? `Import ${workflowDurationSeconds}s` : 'Import duration pending'}
                   {enrichmentDurationSeconds != null ? ` · Enrichment ${enrichmentDurationSeconds}s` : ''}
                   {reconciliationDurationSeconds != null ? ` · Reconciliation ${reconciliationDurationSeconds}s` : ''} ·
