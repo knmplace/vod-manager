@@ -31,6 +31,13 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-09-24
+
+- ✅ Provider Sync History now separates catalog change events into Movies and
+  Series tabs below the unchanged run summary, with per-tab counts and
+  independent scrolling. Import “matched” counters remain source/catalog
+  match counts; automatic merges remain separate canonical-card merge actions.
+
 ## 2026-09-22
 
 - ✅🔀 Provider imports now retain a deleteable, per-run catalog report. Each
