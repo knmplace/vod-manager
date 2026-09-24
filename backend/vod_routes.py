@@ -68,6 +68,12 @@ router = APIRouter(prefix="/api/vod", tags=["vod-manager"])
 
 _GUARDS = [Depends(require_auth)]
 
+# Manual imports used to keep the HTTP request open for the entire catalog
+# pull.  Queue them instead: a browser can keep using the app, and large XC
+# providers never compete for SQLite's one writer.
+_MANUAL_IMPORT_QUEUE: list[int] = []
+_MANUAL_IMPORT_TASK: asyncio.Task | None = None
+
 vod_db.init_db()
 
 
@@ -115,6 +121,10 @@ class ImportLanguageExclusionRequest(BaseModel):
 
 
 class EnabledLanguagesRequest(BaseModel):
+    codes: list[str] = []
+
+
+class EnabledLanguagesImpactRequest(BaseModel):
     codes: list[str] = []
 
 
@@ -753,6 +763,14 @@ async def clear_stream_failures():
     return {"ok": True}
 
 
+@router.get("/stream-recovery/movies/", dependencies=_GUARDS)
+async def list_blocked_movies():
+    """Movies hidden after every playable source reached the failure limit.
+    The returned source IDs are used by the existing authenticated preview
+    route, whose successful playback clears the block automatically."""
+    return vod_db.list_blocked_movies()
+
+
 # ── Content-mismatch flagging ────────────────────────────────────────────────
 # "This isn't actually what its label says" -- see vod_db.py's own section
 # docstring for the full reasoning and the 5 supported granularities.
@@ -904,17 +922,6 @@ async def answer_default_categories_prompt(body: DefaultCategoriesAdultRequest):
     return {"ok": True, "results": results}
 
 
-@router.get("/enabled-languages/", dependencies=_GUARDS)
-async def get_enabled_languages_setting():
-    return {"codes": get_enabled_languages()}
-
-
-@router.post("/enabled-languages/", dependencies=_GUARDS)
-async def save_enabled_languages_setting(body: EnabledLanguagesRequest):
-    save_enabled_languages(body.codes)
-    return {"ok": True}
-
-
 @router.get("/import-language-exclusion/", dependencies=_GUARDS)
 async def get_import_language_exclusion_settings():
     return get_import_language_exclusion()
@@ -929,6 +936,26 @@ async def save_import_language_exclusion_settings(body: ImportLanguageExclusionR
 @router.get("/import-language-exclusion/prefixes/", dependencies=_GUARDS)
 async def list_import_language_exclusion_prefixes():
     return vod_db.list_all_pool_prefixes()
+
+
+@router.get("/enabled-languages/", dependencies=_GUARDS)
+async def get_enabled_languages_settings():
+    return {"codes": get_enabled_languages()}
+
+
+@router.post("/enabled-languages/", dependencies=_GUARDS)
+async def save_enabled_languages_settings(body: EnabledLanguagesRequest):
+    save_enabled_languages(body.codes)
+    return {"ok": True}
+
+
+@router.post("/enabled-languages/impact/", dependencies=_GUARDS)
+async def preview_enabled_languages_impact_endpoint(body: EnabledLanguagesImpactRequest):
+    """Real counts of movies/episodes that would lose all playback-eligible
+    sources under the proposed set, vs. what's currently enabled -- lets the
+    Curation tab warn with an accurate number before the user removes a
+    language. See vod_db.preview_enabled_languages_impact."""
+    return await asyncio.to_thread(vod_db.preview_enabled_languages_impact, body.codes)
 
 
 @router.post("/import-exclusions/apply-now/", dependencies=_GUARDS)
@@ -1195,6 +1222,10 @@ async def upsert_provider(body: ProviderRequest):
     provider_id = vod_db.upsert_provider(
         body.name, body.base_url, body.username, password, body.max_streams, body.priority, body.provider_type,
     )
+    # Connection settings (base_url/username/password) may have just changed;
+    # evict any pooled client built under the old ones so the next call opens
+    # a genuinely fresh connection instead of reusing stale credentials.
+    await vod_importer.evict_provider_client(provider_id)
 
     sync_error = None
     try:
@@ -1589,24 +1620,12 @@ async def sync_provider(provider_id: int):
     return {"results_by_connection": results}
 
 
-# Manual imports used to keep the HTTP request open for the entire catalog
-# pull. Queue them instead: a browser can keep using the app (Metadata
-# Review and every other page stay responsive), and large XC providers
-# never compete with each other or the periodic refresher for SQLite's one
-# writer -- found live 2026-09-15/16 as one of the dominant sources of
-# "database is locked" under sustained concurrent load.
-_MANUAL_IMPORT_QUEUE: list[int] = []
-_MANUAL_IMPORT_TASK: asyncio.Task | None = None
-
-
 async def _run_provider_catalog_import(provider_id: int) -> dict:
     provider = vod_db.get_provider(provider_id)
     if not provider:
         raise ValueError("provider not found")
-    # vod_importer.import_provider_catalog tracks XC lifecycle itself
-    # (_IMPORT_PROGRESS); the other adapters don't touch that state at all,
-    # so publish their queued -> running transition here instead of leaving
-    # the sidebar stuck on "queued" for the whole import.
+    # XC updates the shared sidebar lifecycle itself.  The other adapters do
+    # not, so publish their transition from queued -> running here.
     track_lifecycle = provider.get("provider_type") != "xc"
     if track_lifecycle:
         vod_importer.mark_import_running(provider_id, provider["name"])
@@ -1618,9 +1637,8 @@ async def _run_provider_catalog_import(provider_id: int) -> dict:
         elif provider.get("provider_type") == "dispatcharr_dvr":
             result = await dispatcharr_dvr_importer.import_dvr_recordings(provider_id)
         else:
-            # The queue schedules identity reconciliation once it drains,
-            # not once per provider in the batch -- see
-            # vod_importer.import_provider_catalog's docstring.
+            # The queue schedules post-import enrichment once it drains, not
+            # between two user-queued provider imports.
             result = await vod_importer.import_provider_catalog(provider_id, schedule_enrichment=False)
     except Exception as exc:
         if track_lifecycle:
@@ -1639,37 +1657,44 @@ async def _run_provider_catalog_import(provider_id: int) -> dict:
     # a manual import's content shows up in Dispatcharr-visible categories
     # right away instead of up to a full refresh interval later.
     await asyncio.to_thread(vod_db.mark_provider_catalog_refreshed, provider_id)
-    await vod_importer.resweep_smart_categories()
+    if result.get("catalog_changed", True):
+        movie_ids = set(result.get("changed_movie_ids", [])) if "changed_movie_ids" in result else None
+        series_ids = set(result.get("changed_series_ids", [])) if "changed_series_ids" in result else None
+        await vod_importer.resweep_smart_categories(movie_ids, series_ids)
     if track_lifecycle:
         vod_importer.mark_import_finished(provider_id)
     return result
 
 
 async def _manual_import_worker() -> None:
-    """Drain user-requested imports one at a time, then reconcile identities
-    once the whole queue is empty instead of once per provider."""
+    """Drain user-requested imports one at a time, then enrich once."""
     global _MANUAL_IMPORT_TASK
+    catalog_changed = False
     try:
         while _MANUAL_IMPORT_QUEUE:
             provider_id = _MANUAL_IMPORT_QUEUE.pop(0)
             try:
-                await _run_provider_catalog_import(provider_id)
+                result = await _run_provider_catalog_import(provider_id)
+                catalog_changed = catalog_changed or result.get("catalog_changed", True)
             except Exception:
-                # _run_provider_catalog_import already logged the specific
-                # failure; this is just so one queued provider's error
-                # can't silently stop the worker task from draining the
-                # rest of the queue behind it.
+                # The import module records XC status for the sidebar; retain
+                # a traceback for the non-XC importer paths as well.
                 logger.exception("[vod_routes] queued provider import %s failed", provider_id)
-        vod_importer.schedule_known_series_identity_reconciliation()
+        if catalog_changed:
+            if vod_importer.schedule_post_import_enrichment():
+                logger.info("[vod_routes] queued post-import enrichment after manual import queue drained")
+        else:
+            # An unchanged catalog has no automatic reconciliation work to
+            # schedule. Still hand the user a definitive ready state rather
+            # than leaving the header on the earlier import phase forever.
+            vod_importer.mark_catalog_workflow_ready()
     finally:
         _MANUAL_IMPORT_TASK = None
 
 
 @router.post("/providers/{provider_id}/import/", dependencies=_GUARDS, status_code=202)
 async def import_provider_catalog(provider_id: int):
-    """Queue a catalog import and return immediately instead of holding the
-    UI's HTTP request open for the whole catalog pull (see
-    _manual_import_worker)."""
+    """Queue a catalog import and return immediately instead of holding UI HTTP open."""
     global _MANUAL_IMPORT_TASK
     provider = await asyncio.to_thread(vod_db.get_provider, provider_id)
     if not provider:
@@ -1681,13 +1706,15 @@ async def import_provider_catalog(provider_id: int):
         return {"queued": True, "already_queued": True, "provider": provider["name"]}
 
     worker_running = _MANUAL_IMPORT_TASK is not None and not _MANUAL_IMPORT_TASK.done()
-    # Count the import already in flight (if any) in the position shown to
-    # the caller, but don't overwrite its live sidebar status with a later
-    # queued provider -- the worker switches the status when it actually
-    # starts each one.
+    # Include the import currently in flight in the position shown to the
+    # caller, but don't replace its live sidebar status with a later queued
+    # provider. The worker switches the status when it actually starts each.
     position = len(_MANUAL_IMPORT_QUEUE) + (1 if worker_running else 0) + 1
     _MANUAL_IMPORT_QUEUE.append(provider_id)
     if not worker_running:
+        # Do not leave the previous provider's completed enrichment totals in
+        # the UI while this new catalog workflow is being imported.
+        vod_importer.reset_enrichment_progress()
         vod_importer.mark_import_queued(provider_id, provider["name"], position)
         _MANUAL_IMPORT_TASK = asyncio.create_task(_manual_import_worker())
     return {"queued": True, "already_queued": False, "position": position, "provider": provider["name"]}
@@ -2143,15 +2170,12 @@ async def resolve_missing_episode(series_id: int, body: MissingEpisodeResolveReq
                 await dispatcharr_dvr_importer._apply_download_backfill(match, body.provider_id)
             else:
                 await dispatcharr_dvr_importer._apply_pointer_backfill(match)
-            # Checked before calling placement, not caught via the ValueError
-            # place_series_in_category now raises for an archived row (see
-            # its docstring) -- the pointer/download transfer above already
-            # succeeded, so an archived pool match should still count as
-            # resolved/handled, not surface as "backfill failed" via the
-            # broad except below just because its category placement was
-            # skipped.
-            series_row = vod_db.get_series(match["series_id"])
-            if target_category_id and series_row and not series_row.get("review_excluded"):
+            # beads-4o6: don't re-surface an archived (review_excluded) series
+            # by placing it in a category -- the backfill itself (episode/
+            # pointer data) still succeeded and should count as resolved,
+            # only the category placement is skipped.
+            matched_series = vod_db.get_series(match["series_id"])
+            if target_category_id and matched_series and not matched_series.get("review_excluded"):
                 vod_db.place_series_in_category(match["series_id"], target_category_id)
         except Exception as exc:
             raise HTTPException(502, detail=f"Found in the pool but backfill failed: {exc}")
@@ -2300,13 +2324,12 @@ async def backfill_series_past_seasons(series_id: int, provider_id: int, schedul
                     await dispatcharr_dvr_importer._apply_download_backfill(match, provider_id)
                 else:
                     await dispatcharr_dvr_importer._apply_pointer_backfill(match)
+                # beads-4o6: skip category placement for an archived
+                # (review_excluded) series -- see the matching comment in
+                # backfill_missing_episode above.
                 target_category_id = (rule or {}).get("target_series_category_id")
-                # See resolve_missing_episode's identical comment -- the
-                # backfill above already succeeded, so an archived pool
-                # match should still count as resolved rather than a skipped
-                # placement surfacing as a failure via the except below.
-                match_series = vod_db.get_series(match["series_id"])
-                if target_category_id and match_series and not match_series.get("review_excluded"):
+                matched_series = vod_db.get_series(match["series_id"])
+                if target_category_id and matched_series and not matched_series.get("review_excluded"):
                     vod_db.place_series_in_category(match["series_id"], target_category_id)
                 vod_db.clear_unresolved_missing_episode(series_id, season, episode)
                 results.append({"season_number": season, "episode_number": episode, "name": name, "status": "already_in_pool"})
@@ -2691,39 +2714,6 @@ async def list_needs_year_review(content_type: Optional[str] = None):
     return vod_db.list_needs_year_review(content_type)
 
 
-@router.get("/metadata-review/", dependencies=_GUARDS)
-async def list_metadata_review(content_type: Optional[str] = None):
-    """Human-review queue for missing or ambiguous TMDB identity fields."""
-    if content_type not in (None, "movie", "series"):
-        raise HTTPException(400, detail="content_type must be 'movie' or 'series'")
-    return vod_db.list_metadata_review(content_type)
-
-
-@router.get("/tmdb-lookup-failures/", dependencies=_GUARDS)
-async def list_tmdb_lookup_failures(content_type: Optional[str] = None):
-    """Review queue for a stored TMDB id that TMDB confirmed no longer
-    exists (404) -- distinct from metadata-review above (no id at all)."""
-    if content_type not in (None, "movie", "series"):
-        raise HTTPException(400, detail="content_type must be 'movie' or 'series'")
-    return vod_db.list_tmdb_lookup_failures(content_type)
-
-
-@router.post("/tmdb-lookup-failures/bulk-resolve/", dependencies=_GUARDS, status_code=202)
-async def bulk_resolve_tmdb_lookup_failures(body: BulkAiResolveRequest):
-    if body.content_type not in ("movie", "series"):
-        raise HTTPException(400, detail="content_type must be 'movie' or 'series'")
-    job_id = await vod_bulk_ai_service.start_tmdb_lookup_failure_bulk_resolve(body.content_type, body.ids)
-    return {"job_id": job_id}
-
-
-@router.get("/tmdb-lookup-failures/bulk-resolve/{job_id}/", dependencies=_GUARDS)
-async def bulk_resolve_tmdb_lookup_failures_progress(job_id: str):
-    job = vod_bulk_ai_service.get_bulk_ai_job(job_id)
-    if job is None:
-        raise HTTPException(404, detail="job not found")
-    return job
-
-
 # ── Orphan checker ───────────────────────────────────────────────────────────
 # Self-service scan/purge for dead rows a provider deletion (or a bug
 # elsewhere) can leave behind -- see vod_db.find_orphans/purge_orphans.
@@ -2930,6 +2920,51 @@ async def year_review_suggestions(content_type: str, item_id: int, q: Optional[s
         raise HTTPException(502, detail=f"TMDB search failed: {exc}")
 
 
+@router.get("/metadata-review/", dependencies=_GUARDS)
+async def list_metadata_review(content_type: Optional[str] = None):
+    """Human-review queue for missing or ambiguous TMDB identity fields."""
+    if content_type not in (None, "movie", "series"):
+        raise HTTPException(400, detail="content_type must be 'movie' or 'series'")
+    # Imports can hold SQLite's writer while reconciling a large catalog.
+    # Keep this read off the event loop so the rest of the API remains
+    # responsive even if the read has to wait briefly for the database.
+    return await asyncio.to_thread(vod_db.list_metadata_review, content_type)
+
+
+@router.get("/needs-review/{content_type}/{item_id}/existing-matches/", dependencies=_GUARDS)
+async def needs_review_existing_matches(content_type: str, item_id: int):
+    """Return possible existing catalog matches for an expanded review row."""
+    if content_type not in ("movie", "series"):
+        raise HTTPException(400, detail="content_type must be 'movie' or 'series'")
+    try:
+        return await asyncio.to_thread(vod_db.find_existing_metadata_matches, content_type, item_id)
+    except ValueError as exc:
+        raise HTTPException(404, detail=str(exc))
+
+
+@router.get("/tmdb-lookup-failures/", dependencies=_GUARDS)
+async def list_tmdb_lookup_failures(content_type: Optional[str] = None):
+    if content_type not in (None, "movie", "series"):
+        raise HTTPException(400, detail="content_type must be 'movie' or 'series'")
+    return await asyncio.to_thread(vod_db.list_tmdb_lookup_failures, content_type)
+
+
+@router.post("/tmdb-lookup-failures/scan/", dependencies=_GUARDS, status_code=202)
+async def scan_tmdb_lookup_failures():
+    """Re-check pending known IDs to seed the Incorrect TMDB IDs queue."""
+    if not vod_importer.schedule_post_import_enrichment(track_catalog_workflow=False):
+        return {"started": False, "detail": "TMDB enrichment is already running"}
+    return {"started": True}
+
+
+@router.post("/tmdb-lookup-failures/bulk-resolve/", dependencies=_GUARDS, status_code=202)
+async def bulk_resolve_tmdb_lookup_failures(body: BulkAiResolveRequest):
+    if body.content_type not in ("movie", "series"):
+        raise HTTPException(400, detail="content_type must be 'movie' or 'series'")
+    job_id = await vod_bulk_ai_service.start_tmdb_lookup_failure_bulk_resolve(body.content_type, body.ids)
+    return {"job_id": job_id}
+
+
 @router.get("/needs-review/{content_type}/{item_id}/ai-suggest/", dependencies=_GUARDS)
 async def year_review_ai_suggest(content_type: str, item_id: int, q: Optional[str] = None):
     """Asks Claude to pick the most likely correct match among the same TMDB
@@ -2963,7 +2998,9 @@ async def resolve_year_review(content_type: str, item_id: int, body: ResolveYear
     if content_type not in ("movie", "series"):
         raise HTTPException(400, detail="content_type must be 'movie' or 'series'")
     try:
-        return vod_db.resolve_year_review(content_type, item_id, body.year, body.tmdb_id)
+        result = vod_db.resolve_year_review(content_type, item_id, body.year, body.tmdb_id)
+        vod_db.clear_tmdb_lookup_failure(content_type, item_id)
+        return result
     except ValueError as exc:
         raise HTTPException(404, detail=str(exc))
 
@@ -3088,6 +3125,56 @@ async def bulk_exclude_library(body: BulkLibraryExcludeRequest):
         return {"changed": result["archived"], "skipped": result["skipped"], "skipped_examples": result["skipped_examples"]}
     changed = vod_db.bulk_set_review_excluded(body.content_type, ids, body.set_excluded)
     return {"changed": changed}
+
+
+# ── Language backfill / retroactive split (beads-974 Step 3) ──
+# Three maintenance actions, each following the same preview-then-apply shape
+# as library-language/bulk-exclude above: a GET .../preview/ that runs the
+# existing read-only *_dry_run_report() function, and a POST .../apply/ that
+# runs the matching apply_*() function. Full-catalog scans, so both run off
+# the event loop via asyncio.to_thread (same reasoning as the Duplicate
+# Finder scan below).
+
+@router.get("/language-backfill/preview/", dependencies=_GUARDS)
+async def language_backfill_preview():
+    return await asyncio.to_thread(vod_db.language_backfill_dry_run_report)
+
+
+@router.post("/language-backfill/apply/", dependencies=_GUARDS)
+async def language_backfill_apply():
+    updated = await asyncio.to_thread(vod_db.apply_language_backfill)
+    return {"updated": updated}
+
+
+@router.get("/language-recompute/preview/", dependencies=_GUARDS)
+async def language_recompute_preview():
+    return await asyncio.to_thread(vod_db.language_recompute_dry_run_report)
+
+
+@router.post("/language-recompute/apply/", dependencies=_GUARDS)
+async def language_recompute_apply():
+    updated = await asyncio.to_thread(vod_db.apply_language_recompute)
+    return {"updated": updated}
+
+
+@router.get("/movie-language-split/preview/", dependencies=_GUARDS)
+async def movie_language_split_preview():
+    return await asyncio.to_thread(vod_db.movie_language_split_dry_run_report)
+
+
+@router.post("/movie-language-split/apply/", dependencies=_GUARDS)
+async def movie_language_split_apply():
+    return await asyncio.to_thread(vod_db.apply_movie_language_split)
+
+
+@router.get("/series-language-split/preview/", dependencies=_GUARDS)
+async def series_language_split_preview():
+    return await asyncio.to_thread(vod_db.series_language_split_dry_run_report)
+
+
+@router.post("/series-language-split/apply/", dependencies=_GUARDS)
+async def series_language_split_apply():
+    return await asyncio.to_thread(vod_db.apply_series_language_split)
 
 
 @router.get("/missing-artwork/{content_type}/{item_id}/suggestions/", dependencies=_GUARDS)
@@ -3679,15 +3766,6 @@ async def enrich_series(series_id: int, force: bool = False):
     except vod_importer.ProviderBackoffError as exc:
         raise HTTPException(503, detail=str(exc))
     series = vod_db.get_series(series_id)
-    if not series:
-        # Found live 2026-09-15: a concurrent auto-merge (see
-        # auto_merge_series_by_tmdb, which enrich_series above can itself
-        # trigger) can delete this exact series_id as a merge's from_id
-        # between the 404 check above and here -- the merge already moved
-        # its episodes/placements onto the survivor, so this isn't an
-        # error, just the same "no longer here" outcome as the pre-enrich
-        # check, surfaced consistently as 404 instead of a raw 500.
-        raise HTTPException(404, detail="series not found (merged into another series during enrichment)")
     series["episodes"] = vod_db.list_episodes(series_id)
     episode_sources_by_id = vod_db.list_episode_sources_for_episode_ids([e["id"] for e in series["episodes"]])
     for e in series["episodes"]:
@@ -3710,19 +3788,29 @@ async def enrich_all_status():
     return vod_importer.get_enrich_progress()
 
 
+@router.post("/enrich-all/cancel/", dependencies=_GUARDS)
+async def enrich_all_cancel():
+    if not vod_importer.cancel_bulk_enrichment():
+        raise HTTPException(409, detail="bulk enrichment is not running")
+    return {"cancel_requested": True}
+
+
+@router.get("/enrich-tmdb/status/", dependencies=_GUARDS)
+async def enrich_tmdb_status():
+    """Progress for automatic provider-free metadata ingestion."""
+    return vod_importer.get_tmdb_enrich_progress()
+
+
 @router.get("/runtime-status/", dependencies=_GUARDS)
 async def runtime_status():
-    """Compact live state for the sidebar status indicator. `tmdb` is a
-    placeholder (always idle) -- knmplace-main's separate provider-free TMDB
-    metadata pipeline (856a953) wasn't ported in this branch, so there's no
-    real progress to report there yet; kept in the shape so the frontend's
-    existing optional-chaining checks against it stay harmless rather than
-    needing a frontend change if/when that pipeline lands."""
+    """Compact live state for the sidebar status indicator."""
     return {
         "import": vod_importer.get_import_progress(),
         "enrichment": vod_importer.get_enrich_progress(),
-        "tmdb": {"running": False, "done": 0, "total": 0},
+        "tmdb": vod_importer.get_tmdb_enrich_progress(),
         "bulk_ai": vod_bulk_ai_service.get_active_bulk_ai_status(),
+        "catalog_workflow": vod_importer.get_catalog_workflow_progress(),
+        "review_summary": await asyncio.to_thread(vod_db.get_review_summary),
         "process_cpu_percent": vod_importer.get_process_cpu_percent(),
     }
 

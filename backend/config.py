@@ -14,7 +14,7 @@ APP_PORT    = int(os.environ.get("APP_PORT", "8282"))
 # of sync once before (main.py's FastAPI(version=...) vs. routes.py's /version/
 # endpoint each having their own independent hardcoded literal), so both now
 # import this instead of repeating the string.
-APP_VERSION = "0.2.17"
+APP_VERSION = "0.2.13"
 
 # Persisted log file for main.py's rotating file handler -- the app previously
 # only logged to stdout, so a container restart (or just not having docker
@@ -259,6 +259,19 @@ def save_duplicate_finder_quality_prefix_matching(enabled: bool) -> None:
     _write_raw(data)
 
 
+# ── Duplicate Finder: auto-merge on tmdb_id match ────────────────────────────
+# User request 2026-09-10: enrichment can confirm a tmdb_id on a movie row
+# that turns out to match an existing row's tmdb_id exactly -- a signal that
+# comes from TMDB itself, not from our own name-normalization heuristics, so
+# it's trusted enough to merge without a human click (see
+# vod_db.auto_merge_movie_by_tmdb). Default ON, unlike the quality-prefix
+# flag above -- that flag changes what gets SUGGESTED for manual review
+# (low stakes to leave on), this flag changes what gets MERGED automatically
+# (an irreversible delete, see _merge_movie_row), so the two defaults look
+# inconsistent but are deliberately opposite: this one is gated on an
+# independently-corroborated exact-id match, which is a strong enough signal
+# to default-enable even though the action itself is destructive.
+
 def get_duplicate_finder_auto_merge_tmdb() -> bool:
     return bool(_read_raw().get("duplicate_finder_auto_merge_tmdb", True))
 
@@ -306,7 +319,7 @@ def save_ai_provider(provider: str, model: str | None = None) -> None:
 def get_import_language_exclusion() -> dict:
     """Global (not per-provider) since the same admin almost always wants the
     same languages excluded everywhere -- unlike categories, which genuinely
-    differ provider to provider. See vod_importer._should_auto_archive."""
+    differ provider to provider. See vod_importer._should_exclude_from_import."""
     data = _read_raw()
     return {
         "exclude_prefixes": data.get("import_exclude_language_prefixes") or [],

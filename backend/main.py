@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 import ai_assist
 from backup import router as backup_router
-from config import APP_VERSION, LOG_BACKUP_COUNT, LOG_FILE, get_last_enrichment_run, save_last_enrichment_run
+from config import APP_VERSION, LOG_BACKUP_COUNT, LOG_FILE, save_last_enrichment_run
 from diagnostics import router as diagnostics_router
 import dispatcharr_dvr_importer
 import emby_vod_importer
@@ -135,20 +135,26 @@ async def _vod_catalog_refresher() -> None:
             ]
             if due:
                 logger.info("[vod_catalog_refresher] refreshing %d of %d active provider(s)…", len(due), len(providers))
+                changed_movie_ids: set[int] = set()
+                changed_series_ids: set[int] = set()
+                catalog_changed = False
+                requires_full_resweep = False
                 for p in due:
                     try:
                         if p.get("provider_type") == "plex":
                             result = await plex_importer.import_plex_library(p["id"])
+                            requires_full_resweep = True
                         elif p.get("provider_type") in ("emby", "jellyfin"):
                             result = await emby_vod_importer.import_emby_library(p["id"])
+                            requires_full_resweep = True
                         else:
-                            # Deferred (schedule_enrichment=False): firing
-                            # identity reconciliation once per provider here
-                            # would have each new pass compete with the
-                            # NEXT due provider's import for SQLite's one
-                            # writer -- run it once after the whole batch
-                            # below instead.
+                            # Defer enrichment until every due provider's
+                            # delta has landed; otherwise it competes with
+                            # the next refresh for SQLite's writer.
                             result = await vod_importer.import_provider_catalog(p["id"], schedule_enrichment=False)
+                        catalog_changed = catalog_changed or result.get("catalog_changed", True)
+                        changed_movie_ids.update(result.get("changed_movie_ids", []))
+                        changed_series_ids.update(result.get("changed_series_ids", []))
                         await asyncio.to_thread(vod_db.mark_provider_catalog_refreshed, p["id"])
                         logger.info("[vod_catalog_refresher] %s: %s", p["name"], result)
                     except Exception as exc:
@@ -161,8 +167,12 @@ async def _vod_catalog_refresher() -> None:
                 # reasoning). (Also called directly after a manual "Import
                 # catalog" click -- see vod_routes.py -- so that doesn't have
                 # to wait for this loop's next cycle either.)
-                await vod_importer.resweep_smart_categories()
-                vod_importer.schedule_known_series_identity_reconciliation()
+                if catalog_changed:
+                    if requires_full_resweep:
+                        await vod_importer.resweep_smart_categories()
+                    else:
+                        await vod_importer.resweep_smart_categories(changed_movie_ids, changed_series_ids)
+                    vod_importer.schedule_post_import_enrichment()
         except Exception as exc:
             logger.warning("[vod_catalog_refresher] cycle failed: %s", exc)
 
@@ -261,26 +271,20 @@ async def _watch_session_poller() -> None:
 
 
 async def _vod_enrichment_scheduler() -> None:
-    """Background task: periodically runs bulk_enrich_all so newly-imported or
-    stale (past ENRICHMENT_TTL_SECONDS) items get enriched without a manual
-    click. Cheap to run on this interval — anything still fresh is skipped
-    by enrich_movie/enrich_series's own TTL check, so most runs are a no-op
-    scan rather than a real re-fetch.
+    """Recover pending ingestion after startup without re-polling providers.
 
-    The due time is anchored to the last real run (persisted in config), not
-    to when this process happened to start — otherwise every container
-    restart resets the clock and fires a full pass ~45s later regardless of
-    how recently it last ran, which is exactly the kind of background write
-    load that competes with anything else the app is doing at that moment."""
-    last_run = get_last_enrichment_run()
-    if last_run is not None:
-        due_in = vod_db.get_enrichment_ttl_seconds() - (time.time() - last_run)
-        await asyncio.sleep(max(due_in, 45))
-    else:
-        await asyncio.sleep(45)
+    Normal catalog imports queue this immediately.  This delayed pass only
+    catches content that was already present during an upgrade/restart; the
+    per-item gates limit it to missing TMDB metadata, provider fallback, and
+    never-fetched episode sources.
+
+    This is a pending-work check rather than a blanket provider re-fetch, so
+    it is safe to run shortly after every startup. Completed metadata and
+    episode sources are skipped by their ingestion gates."""
+    await asyncio.sleep(45)
     while True:
         try:
-            await vod_importer.bulk_enrich_all()
+            vod_importer.schedule_post_import_enrichment()
             save_last_enrichment_run(time.time())
         except Exception as exc:
             logger.warning("[vod_enrichment_scheduler] run failed: %s", exc)

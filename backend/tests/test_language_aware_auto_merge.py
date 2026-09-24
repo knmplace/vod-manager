@@ -194,6 +194,34 @@ def test_auto_merge_series_merges_same_tmdb_id_same_language(db):
     assert len(remaining) == 1
 
 
+def test_auto_merge_movie_skips_same_tmdb_id_when_year_differs(db):
+    config.save_duplicate_finder_auto_merge_tmdb(True)
+    provider_id = db.upsert_provider("prov1", "http://example.com", "user", "pass")
+    first = _import_movie(db, provider_id, "Example Movie", 2020, "one", "Example Movie", tmdb_id=777)
+    second = _import_movie(db, provider_id, "Example Movie", 2021, "two", "Example Movie", tmdb_id=777)
+
+    db.auto_merge_movie_by_tmdb(first["id"])
+
+    assert db.get_movie(first["id"]) is not None
+    assert db.get_movie(second["id"]) is not None
+
+
+def test_auto_merge_series_skips_same_tmdb_id_when_year_differs(db):
+    config.save_duplicate_finder_auto_merge_tmdb(True)
+    provider_id = db.upsert_provider("prov1", "http://example.com", "user", "pass")
+    db.bulk_import_series(provider_id, [
+        {"name": "Example Show", "year": 2020, "provider_series_id": "one",
+         "raw_name": "Example Show", "tmdb_id": 778, "_has_detail": True},
+        {"name": "Example Show", "year": 2021, "provider_series_id": "two",
+         "raw_name": "Example Show", "tmdb_id": 778, "_has_detail": True},
+    ])
+    rows = [s for s in db.list_series(limit=1000) if s["tmdb_id"] == "778"]
+
+    db.auto_merge_series_by_tmdb(rows[0]["id"])
+
+    assert all(db.get_series(row["id"]) is not None for row in rows)
+
+
 def test_auto_merge_movies_by_tmdb_batch_merges_each_id_sequentially(db):
     """2026-09-14 CPU-spike fix: bulk enrich's end-of-run sweep used to fan
     out one asyncio.to_thread(auto_merge_movie_by_tmdb, id) task per affected
@@ -238,4 +266,40 @@ def test_auto_merge_series_by_tmdb_batch_merges_each_id_sequentially(db):
     db.auto_merge_series_by_tmdb_batch([rows[0]["id"]])
 
     remaining = [s for s in db.list_series(limit=1000) if s["name"] in ("Show A", "Show A Dup")]
+    assert len(remaining) == 1
+
+
+def test_collision_sweep_merges_exact_tmdb_series_omitted_from_work_list(db):
+    """A final DB-derived sweep catches siblings missed by a coalesced run."""
+    config.save_duplicate_finder_auto_merge_tmdb(True)
+    provider_id = db.upsert_provider("prov1", "http://example.com", "user", "pass")
+    db.bulk_import_series(provider_id, [
+        {"name": "Canonical Show", "year": 2020, "provider_series_id": "canonical",
+         "raw_name": "Canonical Show", "tmdb_id": 602, "_has_detail": True,
+         "provider_category_name": None, "genre": None, "description": None, "cast_list": None,
+         "director": None, "poster_url": None, "rating": None, "release_date": None,
+         "provider_last_modified": None},
+        {"name": "Provider Alias", "year": 2020, "provider_series_id": "alias",
+         "raw_name": "Provider Alias", "tmdb_id": 602, "_has_detail": True,
+         "provider_category_name": None, "genre": None, "description": None, "cast_list": None,
+         "director": None, "poster_url": None, "rating": None, "release_date": None,
+         "provider_last_modified": None},
+    ])
+
+    db.auto_merge_series_tmdb_collisions()
+
+    remaining = [s for s in db.list_series(limit=1000) if s["tmdb_id"] == "602"]
+    assert len(remaining) == 1
+
+
+def test_collision_sweep_merges_exact_tmdb_movies_omitted_from_work_list(db):
+    """Known-ID movies may skip detail enrichment but must still reconcile."""
+    config.save_duplicate_finder_auto_merge_tmdb(True)
+    provider_id = db.upsert_provider("prov1", "http://example.com", "user", "pass")
+    first = _import_movie(db, provider_id, "Canonical Movie", 2020, "canonical", "Canonical Movie", tmdb_id=701)
+    second = _import_movie(db, provider_id, "Provider Movie Alias", 2020, "alias", "Provider Movie Alias", tmdb_id=701)
+
+    db.auto_merge_movie_tmdb_collisions()
+
+    remaining = [movie_id for movie_id in (first["id"], second["id"]) if db.get_movie(movie_id)]
     assert len(remaining) == 1
