@@ -5907,25 +5907,8 @@ def apply_provider_trailers(provider_id: int, content_type: str, items: list[dic
 
 
 def list_movie_ids_pending_provider_enrichment(provider_id: int | None = None) -> list[int]:
-    """New movies with no imported TMDB identity left for provider fallback."""
-    conn = _connect()
-    provider_clause = ""
-    params: tuple = ()
-    if provider_id is not None:
-        provider_clause = """AND EXISTS (
-            SELECT 1 FROM movie_sources ms
-            WHERE ms.movie_id=movies.id AND ms.provider_id=?
-        )"""
-        params = (provider_id,)
-    rows = conn.execute(f"""
-        SELECT id FROM movies
-        WHERE (tmdb_id IS NULL OR TRIM(tmdb_id) = '')
-          AND last_enriched_at IS NULL
-          {provider_clause}
-        ORDER BY id
-    """, params).fetchall()
-    conn.close()
-    return [r["id"] for r in rows]
+    """Provider metadata fallback was removed; return no automatic work."""
+    return []
 
 
 def list_movie_sources_for_ids(movie_ids: list[int]) -> dict[int, list[dict]]:

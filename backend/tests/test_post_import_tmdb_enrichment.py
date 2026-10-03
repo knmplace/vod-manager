@@ -14,12 +14,25 @@ def _movie(stream_id: str, tmdb_id: str | None) -> dict:
     }
 
 
-def test_pending_movie_selectors_split_tmdb_from_provider_fallback(db):
+def test_pending_movie_selector_has_no_provider_metadata_fallback(db):
     provider_id = db.upsert_provider("Example Provider", "http://example.invalid", "user", "pass")
     db.bulk_import_movies(provider_id, [_movie("known", "123"), _movie("unknown", None)])
 
     assert len(db.list_movie_ids_pending_tmdb_enrichment()) == 1
-    assert len(db.list_movie_ids_pending_provider_enrichment(provider_id)) == 1
+    assert db.list_movie_ids_pending_provider_enrichment(provider_id) == []
+
+
+def test_movie_enrichment_never_calls_provider_detail(db, monkeypatch):
+    provider_id = db.upsert_provider("Example Provider", "http://example.invalid", "user", "pass")
+    db.bulk_import_movies(provider_id, [_movie("unknown", None)])
+    movie_id = db.list_movies(limit=10)[0]["id"]
+
+    class ExplodingClient:
+        def __init__(self, _provider):
+            raise AssertionError("provider movie detail must not be requested")
+
+    monkeypatch.setattr(vod_importer, "XCProviderClient", ExplodingClient)
+    assert asyncio.run(vod_importer.enrich_movie(movie_id)) is False
 
 
 def test_tmdb_job_writes_known_identity_without_provider_client(db, monkeypatch):
@@ -197,7 +210,7 @@ def test_episode_only_series_phase_preserves_tmdb_metadata(db, monkeypatch):
 
     monkeypatch.setattr(vod_importer, "XCProviderClient", FakeClient)
     result = asyncio.run(vod_importer.enrich_series_source_only(
-        series_id, provider_id, episodes_only=True,
+        series_id, provider_id, episodes_only=False,
     ))
 
     assert result["fetched"] is True

@@ -1428,30 +1428,13 @@ async def enrich_movie(
         return True
 
     if provider.get("provider_type") in ("emby", "jellyfin"):
-        # Emby/Jellyfin's library listing already hands back everything
-        # except People (see emby_vod_client.list_movies's docstring for why
-        # that field is excluded from the bulk import) -- so this is the one
-        # thing left to lazily backfill here, one item at a time instead of
-        # for the whole library up front.
-        async with emby_vod_client.EmbyVodClient(provider) as client:
-            item = await client.get_movie_people(source["provider_stream_id"])
-        fields = emby_vod_client.extract_common_fields(item)
-        movie_fields = _apply_field_rules("movie", {
-            "director": fields["director"],
-            "cast_list": fields["cast_list"],
-        })
-        if skip_write:
-            return {"movie_id": movie_id, "fields": movie_fields, "source_id": None, "bitrate": None}
-        await asyncio.to_thread(vod_db.set_movie_enrichment, movie_id, **movie_fields)
-        return True
+        # Catalog import already supplies the fields used by the app. Do not
+        # make a provider People request just to fill optional metadata.
+        return False
 
-    # If this movie already carries a confirmed tmdb_id (set by a previous
-    # provider enrichment, or backfilled via Duplicate Finder's merge flow),
-    # prefer TMDB directly over the provider -- same detail fields, but
-    # against TMDB's own rate limit instead of this provider account's,
-    # which is what bulk_enrich_all's backoff/adaptive-concurrency machinery
-    # exists to protect. Only bitrate is skipped this way, since that's
-    # per-SOURCE and only the provider's get_vod_info call can supply it.
+    # Imported catalog rows already contain provider metadata, and movie
+    # stream IDs are captured during catalog import. Known identities are
+    # resolved through TMDB; never request per-movie provider metadata.
     movie_row = await asyncio.to_thread(vod_db.get_movie, movie_id)
     existing_tmdb_id = movie_row.get("tmdb_id") if movie_row else None
     if existing_tmdb_id:
@@ -1463,60 +1446,11 @@ async def enrich_movie(
             if not skip_auto_merge:
                 await asyncio.to_thread(vod_db.auto_merge_movie_by_tmdb, movie_id)
             return True
-        # TMDB lookup failed (no API key configured, bad id, TMDB down) --
-        # fall through to the provider so this movie still gets enriched.
+        # A failed TMDB lookup stays in the manual review path; it must not
+        # fall through to a provider metadata request.
+        return False
 
-    client = XCProviderClient(provider)
-
-    info = _as_dict(await client.get_vod_info(source["provider_stream_id"]))
-    detail = _as_dict(info.get("info"))
-
-    # Overwriting name with the provider's own clean title (e.g. "L.A.
-    # Confidential (1997)" instead of the raw imported filename "123.L.A.
-    # Confidential.1997") is only safe as of 2026-07-29's bulk_import_movies
-    # rewrite: re-imports now match primarily by movie_sources.
-    # (provider_id, provider_stream_id), not by re-deriving identity from
-    # (name, year) every pass -- so changing name here no longer risks the
-    # next scheduled refresh failing to find this row and creating a
-    # duplicate. Applies the same user-configured title cleanup rules
-    # (Title & Metadata Rules) that a fresh import already runs the name
-    # through, so e.g. a "4K:" prefix-strip rule still applies here too.
-    name_fields = {}
-    if detail.get("name"):
-        name_rules = await asyncio.to_thread(vod_db.get_active_rules_for_field, "movie", "name")
-        name_fields["name"] = vod_db.apply_rules_to_value(detail["name"], name_rules)
-
-    movie_fields = {
-        **name_fields,
-        **_apply_field_rules("movie", {
-            "genre": detail.get("genre") or None,
-            "description": detail.get("plot") or detail.get("description") or None,
-            "cast_list": detail.get("cast") or detail.get("actors") or None,
-            "director": detail.get("director") or None,
-            "country": detail.get("country") or None,
-        }),
-        "tmdb_id": _clean_tmdb_id(detail.get("tmdb_id")),
-        "poster_url": detail.get("cover_big") or detail.get("movie_image") or None,
-        "duration_secs": detail.get("duration_secs") or None,
-        # rating/release_date not run through _apply_field_rules -- those
-        # regex find/replace rules exist for cleaning up freeform text
-        # (titles, descriptions), not for a numeric rating or an ISO date.
-        "rating": detail.get("rating") or None,
-        "release_date": detail.get("releasedate") or None,
-    }
-    # bitrate is per-SOURCE (see vod_db.set_movie_source_bitrate's docstring),
-    # not per-movie -- this get_vod_info call was made against this specific
-    # source, so it's the only one this bitrate value is actually true for.
-    bitrate = _coerce_int(detail.get("bitrate"))
-    if skip_write:
-        return {"movie_id": movie_id, "fields": movie_fields, "source_id": source["id"], "bitrate": bitrate}
-    await asyncio.to_thread(vod_db.set_movie_enrichment, movie_id, **movie_fields)
-    if bitrate is not None:
-        await asyncio.to_thread(vod_db.set_movie_source_bitrate, source["id"], bitrate)
-    if not skip_auto_merge:
-        await asyncio.to_thread(vod_db.auto_merge_movie_by_tmdb, movie_id)
-    return True
-
+    return False
 
 async def enrich_series(series_id: int, *, force: bool = False, skip_auto_merge: bool = False) -> dict:
     """Fetch get_series_info -- this is the only source of episodes (most
@@ -1591,7 +1525,7 @@ async def enrich_series(series_id: int, *, force: bool = False, skip_auto_merge:
     last_reason = "already up to date"
 
     for source in sources:
-        outcome = await _enrich_one_series_source(series_id, series, source, force=force)
+        outcome = await _enrich_one_series_source(series_id, series, source, force=force, episodes_only=True)
         if outcome["fetched"]:
             any_fetched = True
             if outcome["detail_written"]:
@@ -1619,7 +1553,7 @@ async def enrich_series(series_id: int, *, force: bool = False, skip_auto_merge:
 
 async def _enrich_one_series_source(
     series_id: int, series: dict, source: dict, *, force: bool = False,
-    write_queue: "asyncio.Queue | None" = None, episodes_only: bool = False,
+    write_queue: "asyncio.Queue | None" = None, episodes_only: bool = True,
 ) -> dict:
     """Fetches and persists exactly ONE series_sources row's episodes/detail.
     Extracted from enrich_series's original single-source-at-a-time loop body
@@ -1663,10 +1597,12 @@ async def _enrich_one_series_source(
             "detail_written": False,
         }
 
-    detail = _as_dict(info.get("info"))
+    # XC embeds optional series metadata in the same response, but it is not
+    # consumed here. Catalog import and TMDB are authoritative for metadata;
+    # this provider request exists only to obtain episode stream IDs.
     detail_written = False
 
-    if detail and not episodes_only:
+    if False and not episodes_only:
         # See enrich_movie's identical comment -- safe as of 2026-07-29's
         # bulk_import_series rewrite, which now matches primarily by
         # (import_provider_id, import_provider_series_id), not by
@@ -1776,7 +1712,7 @@ async def _enrich_one_series_source(
 async def enrich_series_source_only(
     series_id: int, provider_id: int, *, force: bool = False, skip_auto_merge: bool = False,
     write_queue: "asyncio.Queue | None" = None, source_id: int | None = None,
-    episodes_only: bool = False,
+    episodes_only: bool = True,
 ) -> dict:
     """Provider-scoped counterpart to enrich_series (plan-doc follow-up "make
     a provider lane fetch only that provider's series source", 2026-09-14).
@@ -2283,7 +2219,7 @@ async def _enrich_one(
     kind: str, sem: asyncio.Semaphore, item_id: int, force: bool, *,
     skip_auto_merge: bool = False, movie_batch: list | None = None, provider_id: int | None = None,
     write_queue: "asyncio.Queue | None" = None, series_id: int | None = None,
-    episodes_only: bool = False, source_id: int | None = None,
+    episodes_only: bool = True, source_id: int | None = None,
     progress_mode: str = "canonical",
 ) -> bool:
     """Returns True iff this item's enrichment call actually succeeded (no
@@ -2313,8 +2249,6 @@ async def _enrich_one(
                 series_kwargs = {
                     "force": force, "skip_auto_merge": skip_auto_merge, "write_queue": write_queue,
                 }
-                if episodes_only:
-                    series_kwargs["episodes_only"] = True
                 if series_id is not None:
                     # item_id is the canonical series id used for progress
                     # accounting; source_id identifies the provider-specific
@@ -2539,13 +2473,12 @@ async def _run_provider_series_phase(
                 if pending_sources is not None:
                     outcome = await _enrich_one(
                         "series", sem, item["series_id"], force, skip_auto_merge=True, provider_id=provider["id"],
-                        write_queue=write_queue, series_id=item["series_id"], episodes_only=episodes_only,
+                        write_queue=write_queue, series_id=item["series_id"],
                         source_id=item["id"], progress_mode="source" if episodes_only else "canonical",
                     )
                 else:
                     outcome = await _enrich_one(
                         "series", sem, item, force, skip_auto_merge=True, provider_id=provider["id"], write_queue=write_queue,
-                        episodes_only=episodes_only,
                     )
             except BaseException:
                 outcome = False
