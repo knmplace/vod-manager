@@ -1271,7 +1271,7 @@ interface BulkAiJobStatus {
   resolved: number
   skipped: number
   errors: number
-  results: BulkAiJobResult[]
+  results?: BulkAiJobResult[]
   error: string | null
 }
 
@@ -1285,13 +1285,23 @@ function useBulkAiJob(startEndpoint: string, progressEndpointPrefix: string) {
     queryKey: ['vod-bulk-ai-job', progressEndpointPrefix, jobId],
     queryFn: () => api.get(`${progressEndpointPrefix}${jobId}/`).then((r) => r.data),
     enabled: !!jobId,
-    refetchInterval: (query) => (query.state.data?.running ? 800 : false),
+    // Keep polling until the server explicitly reports completion.  The old
+    // check returned false before the first response, so one transient 404/
+    // 5xx left the UI looking frozen forever with no explanation.
+    retry: 3,
+    refetchInterval: (query) => {
+      if (!jobId || query.state.data?.running === false) return false
+      return 1000
+    },
   })
   return {
     start: startMutation.mutate,
     starting: startMutation.isPending,
     startError: (startMutation.error as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? null,
     job: progressQuery.data ?? null,
+    progressError: progressQuery.error
+      ? ((progressQuery.error as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? 'Could not read AI job progress. The job may have expired; start it again.')
+      : null,
     reset: () => setJobId(null),
   }
 }
@@ -1300,6 +1310,7 @@ function useBulkAiJob(startEndpoint: string, progressEndpointPrefix: string) {
 // detail list, shared by all three bulk-AI panels below.
 function BulkAiJobSummary({ job, labelFor }: { job: BulkAiJobStatus; labelFor: (r: BulkAiJobResult) => string }) {
   const [expanded, setExpanded] = useState(false)
+  const results = Array.isArray(job.results) ? job.results : []
   return (
     <div className="text-xs px-2 py-1.5 rounded border border-primary/30 bg-primary/5 space-y-1">
       <div className="flex items-center gap-2">
@@ -1311,7 +1322,7 @@ function BulkAiJobSummary({ job, labelFor }: { job: BulkAiJobStatus; labelFor: (
             {job.errors > 0 && <> · <strong>{job.errors}</strong> error{job.errors === 1 ? '' : 's'}</>}
           </span>
         )}
-        {!job.running && job.results.length > 0 && (
+        {!job.running && results.length > 0 && (
           <button className="text-primary hover:underline ml-auto" onClick={() => setExpanded((v) => !v)}>
             {expanded ? 'Hide details' : 'Show details'}
           </button>
@@ -1320,7 +1331,7 @@ function BulkAiJobSummary({ job, labelFor }: { job: BulkAiJobStatus; labelFor: (
       {job.error && <p className="text-destructive">{job.error}</p>}
       {expanded && (
         <div className="max-h-48 overflow-y-auto space-y-0.5 pt-1 border-t border-border/50">
-          {job.results.map((r, i) => (
+          {results.map((r, i) => (
             <div key={i} className="flex items-start gap-1.5">
               <span className={r.status === 'resolved' ? 'text-success' : r.status === 'error' ? 'text-destructive' : 'text-muted-foreground'}>
                 {r.status === 'resolved' ? '✓' : r.status === 'error' ? '✗' : '—'}
@@ -7633,7 +7644,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
           </div>
         </div>
         <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground rounded border border-border/60 bg-muted/20 px-2.5 py-2">
-          <span><strong className="text-foreground">Missing identity:</strong> no usable TMDB ID and no release year.</span>
+          <span><strong className="text-foreground">Missing identity:</strong> no usable TMDB ID and no release year, or an ambiguous year held for review. A same-title row elsewhere is only a candidate until the year/identity is safe to copy.</span>
           <span><strong className="text-foreground">Incorrect TMDB IDs:</strong> stored IDs TMDB returned as not found.</span>
         </div>
         {metadataQueue === 'identity' && <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer">
@@ -7689,6 +7700,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
                   </Button>
                 </div>
                 {metadataBulkAi.startError && <p className="text-xs text-destructive">{metadataBulkAi.startError}</p>}
+                {metadataBulkAi.progressError && <p className="text-xs text-destructive">{metadataBulkAi.progressError}</p>}
                 {metadataBulkAi.job && <BulkAiJobSummary job={metadataBulkAi.job} labelFor={(r) => r.name ?? `#${r.id}`} />}
                 <Pager total={filteredMetadataItems.length} limit={METADATA_PAGE_SIZE} offset={metadataOffset} onOffset={setMetadataOffset} />
                 <ul className="divide-y divide-border/50">
