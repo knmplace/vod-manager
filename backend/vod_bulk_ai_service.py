@@ -100,8 +100,31 @@ async def _resolve_one_needs_review(content_type: str, item_id: int) -> dict:
     if not candidates:
         return {"id": item_id, "name": item["name"], "status": "skipped", "detail": "no TMDB results"}
 
+    source_rows = (
+        vod_db.list_movie_sources(item_id)
+        if content_type == "movie"
+        else vod_db.list_series_sources(item_id)
+    )
+    existing_matches = vod_db.find_existing_metadata_matches(content_type, item_id)
+    for source in source_rows:
+        provider = vod_db.get_provider(source.get("provider_id")) if source.get("provider_id") else None
+        source["provider_name"] = provider.get("name") if provider else None
+    imported_details = {
+        "id": item.get("id"),
+        "name": item.get("name"),
+        "year": item.get("year"),
+        "tmdb_id": item.get("tmdb_id"),
+        "provider_category_name": item.get("provider_category_name"),
+        "raw_name": item.get("raw_name"),
+        "sources": source_rows,
+    }
+
     try:
-        suggestion = await ai_assist.suggest_year_review_match(item["name"], item.get("provider_category_name"), content_type, candidates)
+        suggestion = await ai_assist.suggest_year_review_match(
+            item["name"], item.get("provider_category_name"), content_type, candidates,
+            imported_details=imported_details,
+            existing_matches=existing_matches,
+        )
     except Exception as exc:
         return {"id": item_id, "name": item["name"], "status": "error", "detail": f"AI suggestion failed: {exc}"}
 

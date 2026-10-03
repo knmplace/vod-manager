@@ -2995,8 +2995,20 @@ async def year_review_ai_suggest(content_type: str, item_id: int, q: Optional[st
         raise HTTPException(502, detail=f"TMDB search failed: {exc}")
     if not candidates:
         return {"best_match_index": None, "reasoning": "No TMDB candidates to choose from.", "confidence": "low"}
+    source_rows = (
+        vod_db.list_movie_sources(item_id)
+        if content_type == "movie"
+        else vod_db.list_series_sources(item_id)
+    )
+    for source in source_rows:
+        provider = vod_db.get_provider(source.get("provider_id")) if source.get("provider_id") else None
+        source["provider_name"] = provider.get("name") if provider else None
     try:
-        return await ai_assist.suggest_year_review_match(item["name"], None, content_type, candidates)
+        return await ai_assist.suggest_year_review_match(
+            item["name"], item.get("provider_category_name"), content_type, candidates,
+            imported_details={**item, "sources": source_rows},
+            existing_matches=vod_db.find_existing_metadata_matches(content_type, item_id),
+        )
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc))
     except Exception as exc:
