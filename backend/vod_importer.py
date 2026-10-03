@@ -149,7 +149,11 @@ def _should_exclude_from_import(
     # list already used query-time by vod_db._enabled_languages_clause). Any
     # language not currently enabled for playback is now excluded at import
     # time too, with no separate exclude list to keep in sync.
-    code = vod_db._name_prefix_code(raw_name if raw_name is not None else name) or "EN"
+    # Use the same classifier used when the source row is stored. This
+    # includes trailing provider country tags such as "Title (DE)" and
+    # "Title (PL)", which otherwise default to EN and are only corrected
+    # later by language recompute.
+    code = vod_db._source_language(raw_name if raw_name is not None else name)
     if code not in lang["enabled_languages"]:
         return True
     if lang["exclude_non_latin"] and vod_db._is_non_latin_name(raw_name if raw_name is not None else name):

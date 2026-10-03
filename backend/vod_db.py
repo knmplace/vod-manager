@@ -3954,6 +3954,19 @@ _KNOWN_COUNTRY_SUFFIX_CODES = {
 }
 _COUNTRY_SUFFIX_RE = re.compile(r"\s*\(([A-Za-z]{2,4})\)\s*$")
 
+# Provider country suffixes are an import-language signal, not merely a
+# display-title decoration. EN/ES country variants are normalized to the
+# playback language; other recognized variants retain their country code so
+# the enabled-languages gate excludes them by default.
+_COUNTRY_SUFFIX_LANGUAGE = {
+    "US": "EN", "GB": "EN", "UK": "EN", "CA": "EN", "AU": "EN",
+    "IE": "EN", "NZ": "EN", "ZA": "EN",
+    "ES": "ES", "MX": "ES", "CO": "ES", "AR": "ES", "CL": "ES",
+    "PE": "ES", "VE": "ES", "UY": "ES", "EC": "ES", "BO": "ES",
+    "PY": "ES", "CR": "ES", "PA": "ES", "DO": "ES", "GT": "ES",
+    "HN": "ES", "NI": "ES", "SV": "ES", "PR": "ES",
+}
+
 
 def _strip_country_suffix_for_dedup(name: str) -> str:
     """Strips a single trailing "(<known country code>)" tag, e.g.
@@ -9445,7 +9458,8 @@ def auto_merge_movie_by_tmdb(movie_id: int) -> list[dict]:
             year_status = "agree"
         else:
             year_status = "MISMATCH"
-        if year_status != "agree":
+        same_name = _dedup_name_key(movie.get("name") or "") == _dedup_name_key(row.get("name") or "")
+        if year_status != "agree" and not (match_type == "tmdb_id" and same_name and year_status == "one_missing"):
             logger.warning(
                 "[auto_merge_movie_by_tmdb] tmdb_id=%s year_status=%s -- skipping id=%s -> id=%s",
                 tmdb_id, year_status, row["id"], movie_id,
@@ -9665,7 +9679,8 @@ def auto_merge_series_by_tmdb(series_id: int) -> list[dict]:
         else:
             year_status = "MISMATCH"
 
-        if year_status != "agree":
+        same_name = _dedup_name_key(current.get("name") or "") == _dedup_name_key(other.get("name") or "")
+        if year_status != "agree" and not (match_type == "tmdb_id" and same_name and year_status == "one_missing"):
             logger.warning(
                 "[auto_merge_series_by_tmdb] tmdb_id=%s year_status=%s -- skipping id=%s -> id=%s",
                 tmdb_id, year_status, row["id"], series_id,
@@ -9927,7 +9942,8 @@ def list_metadata_review(content_type: str | None = None) -> dict:
         rows = [dict(r) for r in conn.execute(
             f"""SELECT * FROM {table}
                 WHERE review_excluded=0
-                  AND (needs_year_review=1 OR (tmdb_id IS NULL AND year IS NULL))
+                  AND tmdb_id IS NULL
+                  AND (needs_year_review=1 OR year IS NULL)
                 ORDER BY needs_year_review DESC, name"""
         ).fetchall()]
         out[key] = rows
@@ -9991,7 +10007,8 @@ def get_review_summary() -> dict:
         return conn.execute(
             f"""SELECT COUNT(*) AS c FROM {table}
                 WHERE review_excluded=0 AND COALESCE(is_adult, 0)=0
-                  AND (needs_year_review=1 OR (tmdb_id IS NULL AND year IS NULL))"""
+                  AND tmdb_id IS NULL
+                  AND (needs_year_review=1 OR year IS NULL)"""
         ).fetchone()["c"]
 
     def invalid_tmdb_count(content_type: str, table: str) -> int:
@@ -10249,7 +10266,13 @@ def _source_language(raw_name: str | None) -> str:
     if not raw_name:
         return "EN"
     code = _name_prefix_code(raw_name)
-    return code or "EN"
+    if code:
+        return code
+    suffix = _COUNTRY_SUFFIX_RE.search(raw_name)
+    if suffix and suffix.group(1).upper() in _KNOWN_COUNTRY_SUFFIX_CODES:
+        country = suffix.group(1).upper()
+        return _COUNTRY_SUFFIX_LANGUAGE.get(country, country)
+    return "EN"
 
 
 _BACKFILL_TABLES = [

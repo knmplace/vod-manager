@@ -13,7 +13,7 @@ def _movie(stream_id: str, name: str, year: int | None, tmdb_id: str | None = No
     }
 
 
-def test_metadata_review_includes_missing_identity_and_year_flags(db):
+def test_metadata_review_only_keeps_missing_tmdb_identity(db):
     provider_id = db.upsert_provider("Provider", "http://provider.invalid", "u", "p", provider_type="xc")
     db.bulk_import_movies(provider_id, [
         _movie("missing-both", "No Identity", None),
@@ -29,7 +29,9 @@ def test_metadata_review_includes_missing_identity_and_year_flags(db):
 
     queue = db.list_metadata_review()
 
-    assert {row["name"] for row in queue["movies"]} == {"No Identity", "Complete"}
+    # A TMDB-backed row with only a missing/ambiguous year is not an identity
+    # review item. It is eligible for the TMDB enrichment/merge path instead.
+    assert {row["name"] for row in queue["movies"]} == {"No Identity"}
     assert queue["series"] == []
 
 
