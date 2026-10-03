@@ -77,7 +77,13 @@ function syncEventDescription(event: CatalogSyncEvent): string {
   if (event.action === 'archived') return 'Archived from active review/playback queues by the import rules.'
   if (event.action === 'unarchived') return 'Returned to the active review/playback queues.'
   const sourceCount = detail.source_count
-  return `${event.action === 'added' ? 'Added to the catalog.' : 'Catalog metadata or sources changed.'}${sourceCount != null ? ` ${Number(sourceCount).toLocaleString()} source${Number(sourceCount) === 1 ? '' : 's'}.` : ''}`
+  const sources = sourceCount != null ? `${Number(sourceCount).toLocaleString()} source${Number(sourceCount) === 1 ? '' : 's'}` : null
+  const identity = detail.identity_state ? ` ${detail.identity_state}.` : ''
+  if (event.action === 'added') return `Added from the provider feed.${sources ? ` ${sources} attached.` : ''}${identity}`
+  if (detail.reason_code === 'provider_source_refresh') {
+    return `Provider feed/source refreshed.${sources ? ` ${sources} attached.` : ''}${identity}`
+  }
+  return `Catalog record updated.${sources ? ` ${sources} attached.` : ''}${identity}`
 }
 
 interface CatalogSyncRun {

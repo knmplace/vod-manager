@@ -1337,7 +1337,16 @@ def _catalog_sync_row_detail(conn: sqlite3.Connection, content_type: str, row: s
             "season_count": int(episode_counts["seasons"]),
             "episode_source_count": int(episode_counts["episode_sources"]),
         }
-    detail.update({"tmdb_id": row["tmdb_id"], "summary": summary or {}})
+    # The event is recorded after the import transaction, so retain explicit
+    # state facts that let the UI explain why a card appeared in the report.
+    # This is intentionally phrased as a current-state fact rather than
+    # claiming a field changed when the pre-import snapshot was not captured.
+    detail.update({
+        "tmdb_id": row["tmdb_id"],
+        "identity_state": "tmdb_id present" if row["tmdb_id"] else "tmdb_id missing",
+        "reason_code": "provider_source_refresh",
+        "summary": summary or {},
+    })
     return detail
 
 
