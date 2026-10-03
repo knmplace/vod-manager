@@ -94,7 +94,7 @@ async def _resolve_one_needs_review(content_type: str, item_id: int) -> dict:
         return {"id": item_id, "name": item["name"], "status": "skipped", "detail": "no longer needs identity review"}
 
     try:
-        candidates = await tmdb_sync.search_title(item["name"], content_type)
+        candidates = await tmdb_sync.search_title(vod_db.tmdb_review_search_query(item["name"]), content_type)
     except Exception as exc:
         return {"id": item_id, "name": item["name"], "status": "error", "detail": f"TMDB search failed: {exc}"}
     if not candidates:
@@ -179,7 +179,7 @@ async def _resolve_one_tmdb_lookup_failure(content_type: str, item_id: int) -> d
     if item.get("is_adult"):
         return {"id": item_id, "name": item["name"], "status": "skipped", "detail": "adult title"}
     try:
-        candidates = await tmdb_sync.search_title(item["name"], content_type)
+        candidates = await tmdb_sync.search_title(vod_db.tmdb_review_search_query(item["name"]), content_type)
     except Exception as exc:
         return {"id": item_id, "name": item["name"], "status": "error", "detail": f"TMDB search failed: {exc}"}
     if not candidates:
@@ -231,7 +231,7 @@ async def _resolve_one_missing_artwork(content_type: str, item_id: int) -> dict:
         return {"id": item_id, "name": item["name"], "status": "skipped", "detail": "already has a poster"}
 
     try:
-        candidates = await tmdb_sync.search_title(item["name"], content_type)
+        candidates = await tmdb_sync.search_title(vod_db.tmdb_review_search_query(item["name"]), content_type)
     except Exception as exc:
         return {"id": item_id, "name": item["name"], "status": "error", "detail": f"TMDB search failed: {exc}"}
     if not candidates:

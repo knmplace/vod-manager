@@ -8839,7 +8839,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
 
       <SectionCard title="Language Backfill & Retroactive Split" icon={<Wrench size={14} />}>
         <p className="text-xs text-muted-foreground">
-          Maintenance for content imported before per-language matching existed (beads-974). Movies/series that were
+          Maintenance for content imported before per-language matching existed. Movies/series that were
           auto-merged across languages under the old rule stay mixed until split here. Run in order: 1) backfill
           fills in any missing per-source language, 2) movie split, 3) series split (also re-splits mixed-language
           episodes). Each is safe to re-run — once nothing is left to change, it becomes a no-op.

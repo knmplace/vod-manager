@@ -20,3 +20,21 @@ def test_possible_matches_can_be_reviewed_and_approved_in_bulk(db):
     assert result == {"merged": 1, "skipped": []}
     assert db.get_movie(item_id) is None
     assert db.get_movie(candidate_id)["year"] == 1995
+
+
+def test_possible_matches_do_not_list_reciprocal_unresolved_pairs(db):
+    # KNM: 2026-10-03 two unresolved same-title cards each listed the other,
+    # doubling the count; keep one pair with the lower id as the canonical candidate.
+    now = db._now()
+    conn = db._connect()
+    ids = []
+    for _ in range(2):
+        conn.execute("INSERT INTO series (name, year, tmdb_id, created_at) VALUES (?, ?, ?, ?)", ("Twin Show", None, None, now))
+        ids.append(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+    conn.commit()
+    conn.close()
+
+    page = db.list_possible_metadata_matches("series")
+    assert page["total"] == 1
+    assert page["items"][0]["id"] == max(ids)
+    assert [c["id"] for c in page["items"][0]["candidates"]] == [min(ids)]

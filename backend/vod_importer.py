@@ -47,6 +47,25 @@ async def _run_scoped_collision_sweep(sweep, item_ids: set[int]) -> list[dict]:
     return await asyncio.to_thread(sweep, item_ids) or []
 
 
+_SHARED_IMPORT_COUNT_KEYS = ("sources_changed", "total", "flagged_for_review", "errors")
+
+
+def _merge_import_counts(movie_result: dict, series_result: dict) -> dict:
+    """Merge movie/series import results without one overwriting the other.
+
+    KNM: 2026-10-03 both results use the same count keys; keep per-type
+    copies (movie_*/series_*) and report the combined keys as sums.
+    """
+    merged = {**movie_result, **series_result}
+    for key in _SHARED_IMPORT_COUNT_KEYS:
+        movie_value = movie_result.get(key, 0) or 0
+        series_value = series_result.get(key, 0) or 0
+        merged[f"movie_{key}"] = movie_value
+        merged[f"series_{key}"] = series_value
+        merged[key] = movie_value + series_value
+    return merged
+
+
 def _queue_catalog_enrichment_for_changes(
     *, changed_movie_ids: set[int], changed_series_ids: set[int], workflow_run_id: int | None = None,
 ) -> bool:
@@ -865,53 +884,76 @@ def _start_catalog_workflow(provider_name: str | None, phase: str, *, queued: bo
     })
 
 
-def _set_catalog_workflow_phase(phase: str) -> None:
-    # A periodic reconciliation can start without a user-initiated provider
-    # import. It still deserves an honest progress state, rather than an
-    # unexplained idle header while it uses the worker pool.
-    if _CATALOG_WORKFLOW_PROGRESS["started_at"] is None:
-        _CATALOG_WORKFLOW_PROGRESS["started_at"] = time.time()
-    _CATALOG_WORKFLOW_PROGRESS.update({"state": "running", "phase": phase, "finished_at": None, "error": None})
-    run_id = _CATALOG_WORKFLOW_PROGRESS.get("run_id")
+# KNM: 2026-10-03 per-run phase stamps. _CATALOG_WORKFLOW_PROGRESS is the
+# single live header, and a newer import replaces its run_id while an older
+# run's enrichment task is still going; stamps must follow the run, not the header.
+_RUN_PHASE_STAMPS: dict[int, dict] = {}
+
+
+def _workflow_stamps(run_id: int | None) -> tuple[int | None, dict, bool]:
+    """Return (target run, its stamp dict, whether it owns the live header)."""
+    current = _CATALOG_WORKFLOW_PROGRESS.get("run_id")
+    target = run_id or current
+    if target is None or target == current:
+        return target, _CATALOG_WORKFLOW_PROGRESS, True
+    return target, _RUN_PHASE_STAMPS.setdefault(target, {}), False
+
+
+def _set_catalog_workflow_phase(phase: str, *, run_id: int | None = None) -> None:
+    target, stamps, owns_header = _workflow_stamps(run_id)
+    if owns_header:
+        # A periodic reconciliation can start without a user-initiated provider
+        # import. It still deserves an honest progress state, rather than an
+        # unexplained idle header while it uses the worker pool.
+        if _CATALOG_WORKFLOW_PROGRESS["started_at"] is None:
+            _CATALOG_WORKFLOW_PROGRESS["started_at"] = time.time()
+        _CATALOG_WORKFLOW_PROGRESS.update({"state": "running", "phase": phase, "finished_at": None, "error": None})
     now = str(time.time())
-    if phase in ("Preparing automatic catalog review", "Preparing catalog review") and not _CATALOG_WORKFLOW_PROGRESS.get("reconciliation_started_at"):
-        _CATALOG_WORKFLOW_PROGRESS["reconciliation_started_at"] = time.time()
-        if run_id:
-            vod_db.update_catalog_sync_run(run_id, reconciliation_started_at=now)
-    elif phase == "Resolving known TMDB identities" and not _CATALOG_WORKFLOW_PROGRESS.get("enrichment_started_at"):
-        _CATALOG_WORKFLOW_PROGRESS["enrichment_started_at"] = time.time()
-        if run_id:
-            vod_db.update_catalog_sync_run(run_id, enrichment_started_at=now)
+    # KNM: 2026-10-03 review starts after enrichment; stamping it at queue time
+    # ("Preparing automatic catalog review") made it wrap the enrichment phase.
+    if phase == "Preparing catalog review" and not stamps.get("reconciliation_started_at"):
+        stamps["reconciliation_started_at"] = time.time()
+        if target:
+            vod_db.update_catalog_sync_run(target, reconciliation_started_at=now)
+    elif phase == "Resolving known TMDB identities" and not stamps.get("enrichment_started_at"):
+        stamps["enrichment_started_at"] = time.time()
+        if target:
+            vod_db.update_catalog_sync_run(target, enrichment_started_at=now)
 
 
-def mark_catalog_workflow_ready() -> None:
-    if _CATALOG_WORKFLOW_PROGRESS["started_at"] is None:
-        _CATALOG_WORKFLOW_PROGRESS["started_at"] = time.time()
+def mark_catalog_workflow_ready(*, run_id: int | None = None) -> None:
+    target, stamps, owns_header = _workflow_stamps(run_id)
     ready_at = time.time()
-    if _CATALOG_WORKFLOW_PROGRESS.get("reconciliation_started_at") and not _CATALOG_WORKFLOW_PROGRESS.get("reconciliation_finished_at"):
-        _CATALOG_WORKFLOW_PROGRESS["reconciliation_finished_at"] = ready_at
-    _CATALOG_WORKFLOW_PROGRESS.update({
-        "state": "ready", "phase": "Catalog ready for review",
-        "finished_at": ready_at, "ready_at": ready_at, "error": None,
-    })
-    run_id = _CATALOG_WORKFLOW_PROGRESS.get("run_id")
-    if run_id:
+    if stamps.get("reconciliation_started_at") and not stamps.get("reconciliation_finished_at"):
+        stamps["reconciliation_finished_at"] = ready_at
+    if owns_header:
+        if _CATALOG_WORKFLOW_PROGRESS["started_at"] is None:
+            _CATALOG_WORKFLOW_PROGRESS["started_at"] = ready_at
+        _CATALOG_WORKFLOW_PROGRESS.update({
+            "state": "ready", "phase": "Catalog ready for review",
+            "finished_at": ready_at, "ready_at": ready_at, "error": None,
+        })
+    if target:
         fields = {"ready_at": str(ready_at), "status": "ready"}
-        if _CATALOG_WORKFLOW_PROGRESS.get("reconciliation_finished_at"):
-            fields["reconciliation_finished_at"] = str(_CATALOG_WORKFLOW_PROGRESS["reconciliation_finished_at"])
-        if _CATALOG_WORKFLOW_PROGRESS.get("enrichment_finished_at"):
-            fields["enrichment_finished_at"] = str(_CATALOG_WORKFLOW_PROGRESS["enrichment_finished_at"])
-        vod_db.update_catalog_sync_run(run_id, **fields)
+        if stamps.get("reconciliation_finished_at"):
+            fields["reconciliation_finished_at"] = str(stamps["reconciliation_finished_at"])
+        if stamps.get("enrichment_finished_at"):
+            fields["enrichment_finished_at"] = str(stamps["enrichment_finished_at"])
+        vod_db.update_catalog_sync_run(target, **fields)
+    if target is not None:
+        _RUN_PHASE_STAMPS.pop(target, None)
 
 
-def _mark_catalog_workflow_failed(error: str) -> None:
-    _CATALOG_WORKFLOW_PROGRESS.update({
-        "state": "failed", "phase": "Automatic work needs attention",
-        "finished_at": time.time(), "error": error,
-    })
-    run_id = _CATALOG_WORKFLOW_PROGRESS.get("run_id")
-    if run_id:
-        vod_db.update_catalog_sync_run(run_id, status="failed", error=error, ready_at=str(time.time()))
+def _mark_catalog_workflow_failed(error: str, *, run_id: int | None = None) -> None:
+    target, _, owns_header = _workflow_stamps(run_id)
+    if owns_header:
+        _CATALOG_WORKFLOW_PROGRESS.update({
+            "state": "failed", "phase": "Automatic work needs attention",
+            "finished_at": time.time(), "error": error,
+        })
+    if target:
+        vod_db.update_catalog_sync_run(target, status="failed", error=error, ready_at=str(time.time()))
+        _RUN_PHASE_STAMPS.pop(target, None)
 
 
 def _catalog_sync_summary(result: dict) -> dict:
@@ -1071,7 +1113,7 @@ async def import_provider_catalog(provider_id: int, *, schedule_enrichment: bool
         # Nothing changed, so there is no enrichment/reconciliation phase to
         # await. Keep the handoff truthful instead of stranding it at the
         # completed provider-import phase.
-        mark_catalog_workflow_ready()
+        mark_catalog_workflow_ready(run_id=run_id)
         await asyncio.to_thread(vod_db.update_catalog_sync_run, run_id, status="ready", ready_at=str(time.time()))
     return result
 
@@ -1256,8 +1298,7 @@ async def _import_provider_catalog_impl(provider_id: int) -> dict:
         "provider": provider["name"],
         "movie_categories": len(categories),
         "series_categories": len(series_categories),
-        **movie_result,
-        **series_result,
+        **_merge_import_counts(movie_result, series_result),
         **reconcile_summary,
         **purge_summary,
         **archive_result,
@@ -2041,9 +2082,11 @@ async def _post_import_enrichment(
     detail is deliberately not part of this handoff either. Episode discovery
     is lazy on show open, with a small scheduled trickle handled separately.
     """
+    # KNM: 2026-10-03 pin the run now; a later import replaces the header's run_id.
+    pinned_run_id = workflow_run_id or _CATALOG_WORKFLOW_PROGRESS.get("run_id")
     try:
         if track_catalog_workflow:
-            _set_catalog_workflow_phase("Resolving known TMDB identities")
+            _set_catalog_workflow_phase("Resolving known TMDB identities", run_id=pinned_run_id)
         movie_count = await asyncio.to_thread(vod_db.count_movies_pending_tmdb_enrichment) if changed_movie_ids is None else await asyncio.to_thread(vod_db.count_movies_pending_tmdb_enrichment, changed_movie_ids)
         series_count = await asyncio.to_thread(vod_db.count_series_pending_tmdb_metadata_enrichment) if changed_series_ids is None else await asyncio.to_thread(vod_db.count_series_pending_tmdb_metadata_enrichment, changed_series_ids)
         movie_limit = min(_TMDB_INITIAL_MOVIE_CAP, max(1, math.ceil(movie_count * _TMDB_INITIAL_FRACTION))) if movie_count else 0
@@ -2054,9 +2097,8 @@ async def _post_import_enrichment(
         )
         movie_events = await bulk_enrich_tmdb_movies(limit=movie_limit or 1, item_ids=changed_movie_ids) or []
         series_events = await bulk_enrich_tmdb_series_metadata(limit=series_limit or 1, item_ids=changed_series_ids) or []
-        run_id = workflow_run_id or _CATALOG_WORKFLOW_PROGRESS.get("run_id")
         await _append_catalog_sync_events(
-            run_id,
+            pinned_run_id,
             movie_events + series_events,
             {
                 "automatic_merges": sum(event.get("action") == "merged" for event in movie_events + series_events),
@@ -2064,24 +2106,24 @@ async def _post_import_enrichment(
             },
         )
         if track_catalog_workflow:
-            _CATALOG_WORKFLOW_PROGRESS["enrichment_finished_at"] = time.time()
-            run_id = workflow_run_id or _CATALOG_WORKFLOW_PROGRESS.get("run_id")
-            if run_id:
+            pinned_run_id, stamps, _ = _workflow_stamps(pinned_run_id)
+            stamps["enrichment_finished_at"] = time.time()
+            if pinned_run_id:
                 vod_db.update_catalog_sync_run(
-                    run_id,
-                    enrichment_finished_at=str(_CATALOG_WORKFLOW_PROGRESS["enrichment_finished_at"]),
+                    pinned_run_id,
+                    enrichment_finished_at=str(stamps["enrichment_finished_at"]),
                     status="ready",
                     ready_at=str(time.time()),
                 )
         if track_catalog_workflow:
-            _set_catalog_workflow_phase("Preparing catalog review")
+            _set_catalog_workflow_phase("Preparing catalog review", run_id=pinned_run_id)
         if track_catalog_workflow:
-            mark_catalog_workflow_ready()
+            mark_catalog_workflow_ready(run_id=pinned_run_id)
         _schedule_background_tmdb_work()
     except Exception:
         logger.exception("[vod_importer] post-import enrichment failed")
         if track_catalog_workflow:
-            _mark_catalog_workflow_failed("automatic enrichment failed")
+            _mark_catalog_workflow_failed("automatic enrichment failed", run_id=pinned_run_id)
 
 
 def schedule_post_import_enrichment(
@@ -2100,7 +2142,7 @@ def schedule_post_import_enrichment(
         "started_at": None, "finished_at": None,
     })
     if track_catalog_workflow:
-        _set_catalog_workflow_phase("Preparing automatic catalog review")
+        _set_catalog_workflow_phase("Preparing automatic catalog review", run_id=workflow_run_id)
     _POST_IMPORT_ENRICH_TASK = asyncio.create_task(
         _post_import_enrichment(
             track_catalog_workflow=track_catalog_workflow,

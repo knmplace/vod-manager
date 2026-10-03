@@ -4039,6 +4039,17 @@ def _import_match_key_name(name: str) -> str:
     return _TRAILING_YEAR_RE.sub("", _strip_country_suffix_for_dedup(name)).strip()
 
 
+def tmdb_review_search_query(name: str | None, q: str | None = None) -> str:
+    """Default TMDB search text for review/AI flows.
+
+    KNM: 2026-10-03 a reviewer's own q is used verbatim; otherwise strip one
+    trailing "(US)" and one "(YYYY)" tag, which TMDB search fails to match.
+    """
+    if q and q.strip():
+        return q.strip()
+    return _import_match_key_name(name or "") or (name or "").strip()
+
+
 def _duplicate_ignore_signature(item_ids: list[int]) -> str:
     return ",".join(str(i) for i in sorted(item_ids))
 
@@ -10020,7 +10031,13 @@ def list_possible_metadata_matches(content_type: str, limit: int = 50, offset: i
 
     matched: list[dict] = []
     for row in rows:
-        candidates = [candidate for candidate in by_key.get(_dedup_name_key(row["name"] or ""), []) if candidate["id"] != row["id"]]
+        # KNM: 2026-10-03 two unresolved cards would list each other; emit the
+        # pair once, from the higher id, so the lower id stays canonical.
+        candidates = [
+            candidate for candidate in by_key.get(_dedup_name_key(row["name"] or ""), [])
+            if candidate["id"] != row["id"]
+            and not (candidate["tmdb_id"] is None and candidate["year"] is None and candidate["id"] > row["id"])
+        ]
         if not candidates:
             continue
         matched.append({

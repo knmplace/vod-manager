@@ -142,6 +142,39 @@ def test_tmdb_series_pass_reuses_one_lookup_for_shared_tmdb_id(db, monkeypatch):
     assert db.get_series(second_id)["name"] == "Canonical Card"
 
 
+def _series_row(provider_series_id, name, year, tmdb_id, raw_name=None):
+    return {
+        "name": name, "year": year, "provider_series_id": provider_series_id,
+        "provider_category_name": None, "raw_name": raw_name or name, "_has_detail": True,
+        "tmdb_id": tmdb_id, "provider_last_modified": None,
+    }
+
+
+def test_tmdb_series_pass_merges_new_alias_into_existing_same_tmdb_card(db, monkeypatch):
+    """A provider alias (localized title, no year) sharing a language and TMDB
+    id with an existing card must merge once the metadata pass dates it."""
+    en_provider = db.upsert_provider("EN Provider", "http://en.invalid", "user", "pass")
+    es_provider = db.upsert_provider("ES Provider", "http://es.invalid", "user", "pass")
+    es_1 = _series_row("es-1", "Berlin", 2026, "308014", "ES - Berlin (2026) (ES)")
+    db.bulk_import_series(en_provider, [_series_row("en-1", "Berlin", 2026, "308014")])
+    db.bulk_import_series(es_provider, [es_1])
+    db.bulk_import_series(es_provider, [
+        es_1, _series_row("es-2", "Berlín y la dama", None, "308014", "ES - Berlín y la dama (2026) (ES)"),
+    ])
+    before = {row["id"] for row in db.list_series(limit=50)}
+    assert len(before) == 3  # EN card, ES card, undated ES alias
+
+    async def fake_tmdb(tmdb_id):
+        return {"name": "Berlin", "content_rating": None, "year": 2026}
+
+    monkeypatch.setattr(tmdb_sync, "get_tv_full_details", fake_tmdb)
+    monkeypatch.setattr(vod_importer.vod_db, "get_active_rules_for_field", lambda *_: [])
+    asyncio.run(vod_importer.bulk_enrich_tmdb_series_metadata(concurrency=1, item_ids=before))
+
+    # Alias folds into the ES card; the EN card stays separate by language.
+    assert len(db.list_series(limit=50)) == 2
+
+
 def test_tmdb_404_is_persisted_for_incorrect_id_review(db, monkeypatch):
     provider_id = db.upsert_provider("Example Provider", "http://example.invalid", "user", "pass")
     db.bulk_import_movies(provider_id, [_movie("gone", "404")])
