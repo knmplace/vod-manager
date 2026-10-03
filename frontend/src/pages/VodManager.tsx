@@ -4482,6 +4482,102 @@ function LibraryLanguageModal({ contentType, qc, onClose }: {
 export type VodManagerTab = 'movies' | 'series' | 'metadata' | 'recovery' | 'curation' | 'providers' | 'config' | 'dvr'
 export type DvrSubTab = 'scheduled' | 'users' | 'library' | 'missing' | 'metrics'
 
+interface PossibleMetadataMatchCandidate {
+  id: number
+  name: string
+  year: number | null
+  tmdb_id: string | null
+  match_reason: string
+}
+
+interface PossibleMetadataMatchItem {
+  id: number
+  name: string
+  year: number | null
+  candidates: PossibleMetadataMatchCandidate[]
+}
+
+function PossibleMetadataMatches({ contentType }: { contentType: 'movie' | 'series' }) {
+  const qc = useQueryClient()
+  const [offset, setOffset] = useState(0)
+  const [selected, setSelected] = useState<Map<number, number>>(new Map())
+  const query = useQuery<{ items: PossibleMetadataMatchItem[]; total: number; limit: number; offset: number }>({
+    queryKey: ['vod-possible-matches', contentType, offset],
+    queryFn: () => api.get('/vod/possible-matches/', { params: { content_type: contentType, limit: 50, offset } }).then((r) => r.data),
+  })
+  const merge = useMutation({
+    mutationFn: (pairs: { item_id: number; candidate_id: number }[]) => api.post('/vod/possible-matches/bulk-merge/', { content_type: contentType, pairs }),
+    onSuccess: (r) => {
+      setSelected(new Map())
+      qc.invalidateQueries({ queryKey: ['vod-possible-matches', contentType] })
+      qc.invalidateQueries({ queryKey: [contentType === 'movie' ? 'vod-movies' : 'vod-series'] })
+      notify(`Merged ${r.data.merged}; skipped ${r.data.skipped.length}.`)
+    },
+  })
+  const items = query.data?.items ?? []
+  const allVisibleSelected = items.length > 0 && items.every((item) => selected.has(item.id))
+  const selectAllVisible = () => {
+    setSelected((current) => {
+      const next = new Map(current)
+      if (allVisibleSelected) items.forEach((item) => next.delete(item.id))
+      else items.forEach((item) => { if (item.candidates[0]) next.set(item.id, item.candidates[0].id) })
+      return next
+    })
+  }
+  return (
+    <SectionCard title={`Possible ${contentType === 'movie' ? 'Movie' : 'TV Show'} Matches`} icon={<ArrowRightLeft size={14} />}>
+      <p className="text-xs text-muted-foreground">
+        Review same-title candidates from other providers. Selecting a row approves the displayed candidate; final title and language checks still run on the server before merging.
+      </p>
+      <div className="flex items-center gap-2 flex-wrap rounded border border-border/50 bg-muted/30 px-2 py-1.5">
+        <span className="text-xs text-muted-foreground">{selected.size} selected</span>
+        <button className="text-xs text-muted-foreground hover:text-foreground underline decoration-dotted" onClick={selectAllVisible}>
+          {allVisibleSelected ? 'Clear visible' : `Select all visible (${items.length})`}
+        </button>
+        <Button size="sm" disabled={!selected.size || merge.isPending} onClick={() => merge.mutate(Array.from(selected, ([item_id, candidate_id]) => ({ item_id, candidate_id })))}>
+          {merge.isPending ? <Loader2 size={12} className="mr-1 animate-spin" /> : <ArrowRightLeft size={12} className="mr-1" />}
+          Approve and merge ({selected.size})
+        </Button>
+        {query.data && <span className="ml-auto text-xs text-muted-foreground">{query.data.total.toLocaleString()} possible matches</span>}
+      </div>
+      {query.isLoading && <p className="text-xs text-muted-foreground">Finding possible matches…</p>}
+      {query.isError && <p className="text-xs text-destructive">Could not load possible matches.</p>}
+      {!query.isLoading && !items.length && <p className="text-xs text-muted-foreground">No possible matches found.</p>}
+      <div className="space-y-2">
+        {items.map((item) => {
+          const chosen = selected.get(item.id)
+          return (
+            <div key={item.id} className={`rounded border p-2 ${chosen ? 'border-primary/60 bg-primary/5' : 'border-border/50'}`}>
+              <div className="flex items-start gap-2">
+                <input type="checkbox" checked={chosen != null} onChange={() => setSelected((current) => {
+                  const next = new Map(current)
+                  if (next.has(item.id)) next.delete(item.id)
+                  else if (item.candidates[0]) next.set(item.id, item.candidates[0].id)
+                  return next
+                })} />
+                <div className="min-w-0 flex-1">
+                  <div className="font-medium">{item.name} <span className="text-xs text-amber-400">missing TMDB/year</span></div>
+                  <div className="text-[11px] text-muted-foreground">Select the existing catalog card to receive this provider source.</div>
+                  <div className="mt-1 space-y-1">
+                    {item.candidates.map((candidate) => (
+                      <label key={candidate.id} className="flex items-center gap-2 rounded border border-border/40 bg-background/30 px-2 py-1 text-xs cursor-pointer">
+                        <input type="radio" name={`match-${contentType}-${item.id}`} checked={chosen === candidate.id} onChange={() => setSelected((current) => new Map(current).set(item.id, candidate.id))} />
+                        <span className="font-medium">{candidate.name}</span>
+                        <span className="text-muted-foreground">{candidate.year ?? 'no year'}{candidate.tmdb_id ? ` · TMDB ${candidate.tmdb_id}` : ''} · {candidate.match_reason}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+      {query.data && <Pager total={query.data.total} limit={query.data.limit} offset={offset} onOffset={(value) => { setOffset(value); setSelected(new Map()) }} />}
+    </SectionCard>
+  )
+}
+
 export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrSubTabPersisted }: {
   activeTab: VodManagerTab
   setActiveTab: (t: VodManagerTab) => void
@@ -4513,6 +4609,8 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
   const [metadataOffset, setMetadataOffset] = useState(0)
   const [missingArtworkModalOpen, setMissingArtworkModalOpen] = useState<'movie' | 'series' | null>(null)
   const [libraryLanguageModalOpen, setLibraryLanguageModalOpen] = useState<'movie' | 'series' | null>(null)
+  const [movieSubTab, setMovieSubTab] = useState<'library' | 'matches'>('library')
+  const [seriesSubTab, setSeriesSubTab] = useState<'library' | 'matches'>('library')
 
   // ── Activity (currently open stream relays) ──
   const activityQuery = useQuery<ActivitySession[]>({
@@ -10232,6 +10330,12 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
 
       {activeTab === 'movies' && (
       <>
+      <div className="flex items-center gap-1 border-b border-border/60">
+        <button className={`border-b-2 px-3 py-2 text-xs font-medium ${movieSubTab === 'library' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'}`} onClick={() => setMovieSubTab('library')}>Movies</button>
+        <button className={`border-b-2 px-3 py-2 text-xs font-medium ${movieSubTab === 'matches' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'}`} onClick={() => setMovieSubTab('matches')}>Possible matches</button>
+      </div>
+      {movieSubTab === 'matches' ? <PossibleMetadataMatches contentType="movie" /> : (
+      <>
       <SectionCard title="Movies" icon={<Film size={14} />}>
         <div className="flex items-center gap-1.5 flex-wrap">
           <input
@@ -10403,8 +10507,16 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
       </SectionCard>
       </>
       )}
+      </>
+      )}
 
       {activeTab === 'series' && (
+      <>
+      <div className="flex items-center gap-1 border-b border-border/60">
+        <button className={`border-b-2 px-3 py-2 text-xs font-medium ${seriesSubTab === 'library' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'}`} onClick={() => setSeriesSubTab('library')}>TV Shows</button>
+        <button className={`border-b-2 px-3 py-2 text-xs font-medium ${seriesSubTab === 'matches' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'}`} onClick={() => setSeriesSubTab('matches')}>Possible matches</button>
+      </div>
+      {seriesSubTab === 'matches' ? <PossibleMetadataMatches contentType="series" /> : (
       <>
       <SectionCard title="TV Shows" icon={<Tv size={14} />}>
         <div className="flex items-center gap-1.5 flex-wrap">
@@ -10574,6 +10686,8 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
           </Button>
         </div>
       </SectionCard>
+      </>
+      )}
       </>
       )}
 

@@ -9993,6 +9993,99 @@ def find_existing_metadata_matches(content_type: str, item_id: int) -> list[dict
     return matches[:5]
 
 
+def list_possible_metadata_matches(content_type: str, limit: int = 50, offset: int = 0) -> dict:
+    """List unresolved cards that have a same-normalized-title catalog candidate.
+
+    This is intentionally a review surface, not an automatic merge. The
+    caller must approve an explicit source/candidate pair; the bulk approval
+    path revalidates the title and language gates immediately before merging.
+    """
+    if content_type not in ("movie", "series"):
+        raise ValueError("content_type must be 'movie' or 'series'")
+    table = "movies" if content_type == "movie" else "series"
+    conn = _connect()
+    rows = [dict(row) for row in conn.execute(
+        f"""SELECT id, name, year, tmdb_id, needs_year_review, review_excluded
+            FROM {table}
+            WHERE review_excluded=0 AND tmdb_id IS NULL AND year IS NULL
+            ORDER BY name, id"""
+    ).fetchall()]
+    all_rows = [dict(row) for row in conn.execute(
+        f"""SELECT id, name, year, tmdb_id
+            FROM {table} WHERE review_excluded=0 ORDER BY name, id"""
+    ).fetchall()]
+    by_key: dict[str, list[dict]] = {}
+    for row in all_rows:
+        by_key.setdefault(_dedup_name_key(row["name"] or ""), []).append(row)
+
+    matched: list[dict] = []
+    for row in rows:
+        candidates = [candidate for candidate in by_key.get(_dedup_name_key(row["name"] or ""), []) if candidate["id"] != row["id"]]
+        if not candidates:
+            continue
+        matched.append({
+            "id": row["id"],
+            "name": row["name"],
+            "year": row["year"],
+            "tmdb_id": row["tmdb_id"],
+            "candidates": [
+                {
+                    "id": candidate["id"],
+                    "name": candidate["name"],
+                    "year": candidate["year"],
+                    "tmdb_id": candidate["tmdb_id"],
+                    "match_reason": "same normalized title",
+                }
+                for candidate in candidates[:5]
+            ],
+        })
+    conn.close()
+    total = len(matched)
+    return {"items": matched[max(0, offset):max(0, offset) + max(1, min(limit, 200))], "total": total, "limit": limit, "offset": offset}
+
+
+def bulk_merge_possible_metadata_matches(content_type: str, pairs: list[dict]) -> dict:
+    """Approve explicitly selected probable matches with final safety checks."""
+    if content_type not in ("movie", "series"):
+        raise ValueError("content_type must be 'movie' or 'series'")
+    table = "movies" if content_type == "movie" else "series"
+    sources_table = "movie_sources" if content_type == "movie" else "series_sources"
+    fk_column = "movie_id" if content_type == "movie" else "series_id"
+    merged = 0
+    skipped: list[dict] = []
+    for pair in pairs:
+        try:
+            item_id = int(pair["item_id"])
+            candidate_id = int(pair["candidate_id"])
+        except (KeyError, TypeError, ValueError):
+            skipped.append({"item_id": pair.get("item_id"), "candidate_id": pair.get("candidate_id"), "reason": "invalid pair"})
+            continue
+        if item_id == candidate_id:
+            skipped.append({"item_id": item_id, "candidate_id": candidate_id, "reason": "same row"})
+            continue
+        conn = _connect()
+        item = conn.execute(f"SELECT id, name, year, tmdb_id, review_excluded FROM {table} WHERE id=?", (item_id,)).fetchone()
+        candidate = conn.execute(f"SELECT id, name, year, tmdb_id, review_excluded FROM {table} WHERE id=?", (candidate_id,)).fetchone()
+        same_name = bool(item and candidate and _dedup_name_key(item["name"] or "") == _dedup_name_key(candidate["name"] or ""))
+        same_language = bool(item and candidate and _shares_a_language(conn, sources_table, fk_column, item_id, candidate_id))
+        conn.close()
+        if not item or not candidate or item["review_excluded"] or candidate["review_excluded"]:
+            skipped.append({"item_id": item_id, "candidate_id": candidate_id, "reason": "row no longer active"})
+            continue
+        if item["tmdb_id"] is not None or item["year"] is not None or not same_name:
+            skipped.append({"item_id": item_id, "candidate_id": candidate_id, "reason": "identity changed or title no longer matches"})
+            continue
+        if not same_language:
+            skipped.append({"item_id": item_id, "candidate_id": candidate_id, "reason": "no shared source language"})
+            continue
+        if content_type == "movie":
+            merge_movie(item_id, candidate_id)
+        else:
+            merge_series(item_id, candidate_id)
+        merged += 1
+    return {"merged": merged, "skipped": skipped}
+
+
 def get_review_summary() -> dict:
     """Small, poll-safe counts for the post-import review handoff.
 

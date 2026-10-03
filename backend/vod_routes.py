@@ -524,6 +524,16 @@ class BulkArchiveRequest(BaseModel):
     archived: bool
 
 
+class PossibleMetadataMatchPair(BaseModel):
+    item_id: int
+    candidate_id: int
+
+
+class BulkPossibleMetadataMatchesRequest(BaseModel):
+    content_type: str
+    pairs: list[PossibleMetadataMatchPair]
+
+
 class SeriesRequest(BaseModel):
     name: str
     year: Optional[int] = None
@@ -2951,6 +2961,24 @@ async def needs_review_existing_matches(content_type: str, item_id: int):
         return await asyncio.to_thread(vod_db.find_existing_metadata_matches, content_type, item_id)
     except ValueError as exc:
         raise HTTPException(404, detail=str(exc))
+
+
+@router.get("/possible-matches/", dependencies=_GUARDS)
+async def list_possible_metadata_matches(content_type: Optional[str] = None, limit: int = 50, offset: int = 0):
+    if content_type not in ("movie", "series"):
+        raise HTTPException(400, detail="content_type must be 'movie' or 'series'")
+    return await asyncio.to_thread(vod_db.list_possible_metadata_matches, content_type, limit, offset)
+
+
+@router.post("/possible-matches/bulk-merge/", dependencies=_GUARDS)
+async def bulk_merge_possible_metadata_matches(body: BulkPossibleMetadataMatchesRequest):
+    if body.content_type not in ("movie", "series"):
+        raise HTTPException(400, detail="content_type must be 'movie' or 'series'")
+    return await asyncio.to_thread(
+        vod_db.bulk_merge_possible_metadata_matches,
+        body.content_type,
+        [pair.model_dump() for pair in body.pairs],
+    )
 
 
 @router.get("/tmdb-lookup-failures/", dependencies=_GUARDS)
