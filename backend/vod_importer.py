@@ -48,12 +48,13 @@ async def _run_scoped_collision_sweep(sweep, item_ids: set[int]) -> list[dict]:
 
 
 def _queue_catalog_enrichment_for_changes(
-    *, changed_movie_ids: set[int], changed_series_ids: set[int],
+    *, changed_movie_ids: set[int], changed_series_ids: set[int], workflow_run_id: int | None = None,
 ) -> bool:
     """Queue delta-scoped enrichment while tolerating legacy test hooks."""
     kwargs = {
         "changed_movie_ids": changed_movie_ids,
         "changed_series_ids": changed_series_ids,
+        "workflow_run_id": workflow_run_id,
     }
     try:
         inspect.signature(schedule_post_import_enrichment).bind(**kwargs)
@@ -1051,7 +1052,17 @@ async def import_provider_catalog(provider_id: int, *, schedule_enrichment: bool
         result["post_import_enrichment_queued"] = _queue_catalog_enrichment_for_changes(
             changed_movie_ids=set(result.get("changed_movie_ids", [])),
             changed_series_ids=set(result.get("changed_series_ids", [])),
+            workflow_run_id=run_id,
         )
+        if not result["post_import_enrichment_queued"]:
+            # Another provider's enrichment task already owns the shared
+            # worker. This import is complete and must not remain "running"
+            # until that unrelated task finishes. Its pending TMDB work is
+            # still picked up by the normal scheduled pass.
+            await asyncio.to_thread(
+                vod_db.update_catalog_sync_run,
+                run_id, status="ready", ready_at=str(time.time()),
+            )
     elif schedule_enrichment:
         # Nothing changed, so there is no enrichment/reconciliation phase to
         # await. Keep the handoff truthful instead of stranding it at the
@@ -2018,6 +2029,7 @@ async def _post_import_enrichment(
     *, track_catalog_workflow: bool = True,
     changed_movie_ids: set[int] | None = None,
     changed_series_ids: set[int] | None = None,
+    workflow_run_id: int | None = None,
 ) -> None:
     """Run the ordered metadata phases after import.
 
@@ -2038,7 +2050,7 @@ async def _post_import_enrichment(
         )
         movie_events = await bulk_enrich_tmdb_movies(limit=movie_limit or 1, item_ids=changed_movie_ids) or []
         series_events = await bulk_enrich_tmdb_series_metadata(limit=series_limit or 1, item_ids=changed_series_ids) or []
-        run_id = _CATALOG_WORKFLOW_PROGRESS.get("run_id")
+        run_id = workflow_run_id or _CATALOG_WORKFLOW_PROGRESS.get("run_id")
         await _append_catalog_sync_events(
             run_id,
             movie_events + series_events,
@@ -2049,9 +2061,14 @@ async def _post_import_enrichment(
         )
         if track_catalog_workflow:
             _CATALOG_WORKFLOW_PROGRESS["enrichment_finished_at"] = time.time()
-            run_id = _CATALOG_WORKFLOW_PROGRESS.get("run_id")
+            run_id = workflow_run_id or _CATALOG_WORKFLOW_PROGRESS.get("run_id")
             if run_id:
-                vod_db.update_catalog_sync_run(run_id, enrichment_finished_at=str(_CATALOG_WORKFLOW_PROGRESS["enrichment_finished_at"]))
+                vod_db.update_catalog_sync_run(
+                    run_id,
+                    enrichment_finished_at=str(_CATALOG_WORKFLOW_PROGRESS["enrichment_finished_at"]),
+                    status="ready",
+                    ready_at=str(time.time()),
+                )
         if track_catalog_workflow:
             _set_catalog_workflow_phase("Preparing catalog review")
         if track_catalog_workflow:
@@ -2067,6 +2084,7 @@ def schedule_post_import_enrichment(
     *, track_catalog_workflow: bool = True,
     changed_movie_ids: set[int] | None = None,
     changed_series_ids: set[int] | None = None,
+    workflow_run_id: int | None = None,
 ) -> bool:
     """Queue one reconciliation pass; coalesce overlapping provider imports."""
     global _POST_IMPORT_ENRICH_TASK
@@ -2084,6 +2102,7 @@ def schedule_post_import_enrichment(
             track_catalog_workflow=track_catalog_workflow,
             changed_movie_ids=changed_movie_ids,
             changed_series_ids=changed_series_ids,
+            workflow_run_id=workflow_run_id,
         )
     )
     return True
