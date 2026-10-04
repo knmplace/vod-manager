@@ -8281,11 +8281,15 @@ _LEGACY_ITEM_FINGERPRINT_FIELDS = {
 }
 
 
+def fingerprint_hash(payload: dict) -> str:
+    # KNM: 2026-10-04 -- single owner of the catalog fingerprint hash (vod_importer reuses it).
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+
+
 def _catalog_fingerprint_from_item(kind: str, item: dict, legacy: bool = False) -> str:
     """Fallback for direct/test callers that predate importer fingerprints."""
     fields = (_LEGACY_ITEM_FINGERPRINT_FIELDS if legacy else _ITEM_FINGERPRINT_FIELDS)[kind]
-    payload = {field: item.get(field) for field in fields}
-    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+    return fingerprint_hash({field: item.get(field) for field in fields})
 
 
 def _source_fingerprints(kind: str, item: dict) -> tuple[str, str]:
@@ -10673,16 +10677,23 @@ def list_metadata_review(content_type: str | None = None) -> dict:
     ):
         if content_type not in (None, requested_type):
             continue
-        rows = [dict(r) for r in conn.execute(
-            f"""SELECT * FROM {table}
-                WHERE review_excluded=0
-                  AND tmdb_id IS NULL
-                  AND (needs_year_review=1 OR year IS NULL)
-                ORDER BY needs_year_review DESC, name"""
-        ).fetchall()]
+        rows = [dict(r) for r in conn.execute(_metadata_review_sql(table)).fetchall()]
         out[key] = rows
     conn.close()
     return out
+
+
+def _metadata_review_sql(table: str) -> str:
+    # KNM: 2026-10-04 -- restored upstream's UNION form (upstream PR #35 review):
+    # SQLite won't split an OR across the two partial idx_*_metadata_review_*
+    # indexes, so the OR form full-scanned (8s+ on ~115k rows). Keeps the fork's
+    # tmdb_id IS NULL narrowing on the flagged branch (3d67bd2).
+    return f"""SELECT * FROM (
+                SELECT * FROM {table} WHERE review_excluded=0 AND needs_year_review=1 AND tmdb_id IS NULL
+                UNION
+                SELECT * FROM {table} WHERE review_excluded=0 AND tmdb_id IS NULL AND year IS NULL
+            )
+            ORDER BY needs_year_review DESC, name"""
 
 
 def find_existing_metadata_matches(content_type: str, item_id: int) -> list[dict]:

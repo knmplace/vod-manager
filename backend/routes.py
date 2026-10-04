@@ -1,11 +1,9 @@
-import asyncio
-import json
 import logging
 import os
 import time
 from typing import Optional
-from urllib.request import Request as UrlRequest, urlopen
 
+import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 
@@ -192,15 +190,14 @@ async def get_external_ip():
     if now - cached_at < _EXTERNAL_IP_CACHE_SECONDS:
         return {"ip": cached_ip, "available": cached_ip is not None}
     try:
-        def fetch() -> str:
-            request = UrlRequest("https://api.ipify.org?format=json", headers={"User-Agent": "vod-manager/diagnostic"})
-            with urlopen(request, timeout=3) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-            ip = str(payload.get("ip", "")).strip()
-            if not ip:
-                raise ValueError("external IP service returned no address")
-            return ip
-        _external_ip_cache = (await asyncio.to_thread(fetch), now)
+        # KNM: 2026-10-04 -- httpx like every other outbound call (was urllib in a thread).
+        async with httpx.AsyncClient(timeout=3, headers={"User-Agent": "vod-manager/diagnostic"}) as client:
+            response = await client.get("https://api.ipify.org?format=json")
+            response.raise_for_status()
+            ip = str(response.json().get("ip", "")).strip()
+        if not ip:
+            raise ValueError("external IP service returned no address")
+        _external_ip_cache = (ip, now)
     except Exception as exc:
         logger.info("[routes] external IP lookup unavailable: %s", exc)
         _external_ip_cache = (cached_ip, now)

@@ -13,7 +13,6 @@ bounded concurrency instead of a human clicking one movie at a time.
 import asyncio
 import inspect
 import math
-import hashlib
 import json
 import logging
 import os
@@ -254,7 +253,7 @@ _LEGACY_CATALOG_FINGERPRINT_FIELDS = {
 def _hash_catalog_fields(fields, item: dict, provider_category_name: str | None) -> str:
     payload = {field: item.get(field) for field in fields}
     payload["provider_category_name"] = provider_category_name
-    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+    return vod_db.fingerprint_hash(payload)
 
 
 def _catalog_fingerprint(kind: str, item: dict, provider_category_name: str | None = None) -> str:
@@ -1047,6 +1046,16 @@ def mark_import_running(provider_id: int, provider_name: str) -> int:
     return run_id
 
 
+def merge_changed_ids(acc: set[int] | None, result: dict, key: str) -> set[int] | None:
+    # KNM: 2026-10-04 -- Plex/Emby/library importers don't report changed ids;
+    # None (unscoped) then wins, or post-import enrichment would be scoped to an
+    # empty set and never queue their new items (upstream PR #35 review).
+    if acc is None or key not in result:
+        return None
+    acc.update(result[key])
+    return acc
+
+
 def import_error_detail(exc: BaseException) -> str:
     # KNM: 2026-10-04 -- failed imports stored only the class name; keep the
     # message, redacted (httpx errors embed the provider login in the URL).
@@ -1341,35 +1350,6 @@ async def _import_provider_catalog_impl(provider_id: int) -> dict:
             logger.info("[vod_importer] provider=%s purged %d movie(s)/%d series matching current exclusion rules",
                         provider["name"], purge_result["movies_deleted"], purge_result["series_deleted"])
 
-    # KNM: added 2026-09-13, user report -- catch-up companion to the
-    # same-day auto-merge language gate fix (see vod_db.
-    # archive_disabled_language_content's docstring). Runs here, on the
-    # same cadence as the purge above, so deployments upgrading from before
-    # the fix get their legacy disabled-language backlog (rows the merge
-    # bug kept silently re-merging instead of leaving flagged for review)
-    # cleaned up without a separate manual step. Not scoped to this
-    # provider_id like the purge call above -- it evaluates every movie/
-    # series row's source languages regardless of which provider(s) they
-    # came from, since the check isn't provider-specific.
-    archive_result = {
-        "movies_archived": 0, "movies_unarchived": 0,
-        "series_archived": 0, "series_unarchived": 0,
-    }
-    if catalog_changed:
-        archive_result = await asyncio.to_thread(
-            vod_db.archive_disabled_language_content, changed_movie_ids, changed_series_ids,
-        )
-        if archive_result["movies_archived"] or archive_result["series_archived"]:
-            logger.info(
-                "[vod_importer] archived %d movie(s)/%d series with no source in an enabled language",
-                archive_result["movies_archived"], archive_result["series_archived"],
-            )
-        if archive_result["movies_unarchived"] or archive_result["series_unarchived"]:
-            logger.info(
-                "[vod_importer] un-archived %d movie(s)/%d series after a previously-disabled language was re-enabled",
-                archive_result["movies_unarchived"], archive_result["series_unarchived"],
-            )
-
     # KNM: added 2026-09-17 -- source-first series matching prevents new
     # shadows; this catches the pre-fix rows after a successful full refresh.
     # It deletes only records with neither a series source nor any playable
@@ -1404,19 +1384,6 @@ async def _import_provider_catalog_impl(provider_id: int) -> dict:
             reconcile_result["episode_sources_removed"],
         )
 
-    # A successful catalog pass is a safe opportunity to remove any legacy
-    # rows with neither a provider source nor a playable episode source
-    # (ported from knmplace's fork) -- catches whatever slips through the
-    # choke points above (a bug elsewhere, a manual DB edit, an upgrade from
-    # before series_sources existed) instead of leaving it to sit until
-    # someone runs the Orphan Checker by hand.
-    orphan_result = await asyncio.to_thread(vod_db.purge_orphans)
-    if orphan_result["series_deleted"] or orphan_result["movies_deleted"] or orphan_result["episodes_deleted"]:
-        logger.info(
-            "[vod_importer] provider=%s purged %d source-less series, %d movie(s), %d episode(s)",
-            provider["name"], orphan_result["series_deleted"], orphan_result["movies_deleted"], orphan_result["episodes_deleted"],
-        )
-
     if provider.get("auto_create_categories"):
         try:
             created = await asyncio.to_thread(
@@ -1438,11 +1405,19 @@ async def _import_provider_catalog_impl(provider_id: int) -> dict:
     # Playback Languages) gets flagged for review without a separate manual
     # step. Not scoped to this provider_id -- it evaluates every movie/series
     # row's source languages regardless of which provider(s) they came from.
+    # KNM: 2026-10-04 -- the 10-03 upstream merge left a second, catalog_changed-gated
+    # scoped copy of this sweep plus a second purge_orphans in this function; a no-op
+    # sync after narrowing Enabled Playback Languages must still sweep, so only this one stays.
     archive_result = await asyncio.to_thread(vod_db.archive_disabled_language_content)
     if archive_result["movies_archived"] or archive_result["series_archived"]:
         logger.info(
             "[vod_importer] archived %d movie(s)/%d series with no source in an enabled language",
             archive_result["movies_archived"], archive_result["series_archived"],
+        )
+    if archive_result["movies_unarchived"] or archive_result["series_unarchived"]:
+        logger.info(
+            "[vod_importer] un-archived %d movie(s)/%d series after a previously-disabled language was re-enabled",
+            archive_result["movies_unarchived"], archive_result["series_unarchived"],
         )
 
     # Companion cleanup to _should_auto_archive: deletes rows that are
