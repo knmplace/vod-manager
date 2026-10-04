@@ -33,11 +33,13 @@ instead of opening a duplicate request.
 
 ## 2026-10-04 (Episode list preloading settings)
 
-- ✅ **Episode lists preload about 3x faster, still gently.** The background
+- ✅ 🔀 **Episode lists preload about 3x faster, still gently.** Proposed upstream
+  in [#43](https://github.com/jstevenscl/vod-manager/pull/43) (with the pacing, stacked on #35). The background
   preloader now pauses 15 minutes between batches instead of 45, so it does
   about 290 shows per hour per provider instead of about 100. It still sends
   one request at a time with 3 seconds between requests.
-- ✅ **Preloading is adjustable in Settings → Refresh Schedule.** The new
+- ✅ 🔀 **Preloading is adjustable in Settings → Refresh Schedule.** Proposed
+  upstream in [#43](https://github.com/jstevenscl/vod-manager/pull/43). The new
   "Episode list preloading" section sets shows per batch, the pause between
   batches and the gap between requests. It explains what each one does and
   shows a live shows-per-hour estimate. Setting 0 shows turns preloading off.
