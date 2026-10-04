@@ -33,7 +33,8 @@ instead of opening a duplicate request.
 
 ## 2026-10-04 (Artwork changes no longer count as catalog changes)
 
-- ✅ **New posters from a provider no longer count as catalog changes.**
+- ✅ 🔀 **New posters from a provider no longer count as catalog changes.**
+  Proposed upstream in [#44](https://github.com/jstevenscl/vod-manager/pull/44).
   A refresh now counts a title as changed only when something that affects
   playback or placement changes: stream id, file type, TMDB id, name,
   category, or (for series) the provider's new-episodes timestamp. Posters,
@@ -42,6 +43,11 @@ instead of opening a duplicate request.
   re-runs TMDB matching for all of them. Titles imported before this change
   switch over quietly on their next refresh, without being counted as
   changed.
+- ✅ 🔀 **Opening a show loads its missing episodes.** Proposed upstream in
+  [#45](https://github.com/jstevenscl/vod-manager/pull/45) (stacked on #43).
+  Imports no longer wait on an episode-sync phase; the background preloader
+  fills episodes over time, and opening a show fetches any provider that
+  has none yet, even when another provider already supplied some.
 
 ## 2026-10-04 (Episode list preloading settings)
 
