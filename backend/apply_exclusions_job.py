@@ -58,6 +58,10 @@ async def _run_job(job_id: str) -> None:
                 logger.error("[apply_exclusions_job] provider=%s failed: %s", p["name"], detail)
                 job["results"].append({"provider": p["name"], "error": detail})
             job["completed"] += 1
+        # KNM: 2026-10-04 -- the re-sweep below can take a while; without a
+        # phase the UI showed "Provider 5 of 4 -- syncing <last provider>".
+        job["current_provider"] = None
+        job["phase"] = "finalizing"
         # Real gap found live 2026-07-29: without this, an item newly
         # un-excluded by re-running import exclusions doesn't reappear in
         # All Movies/All TV Shows (and therefore stays invisible to

@@ -111,3 +111,62 @@ def test_apply_rules_job_error_hides_provider_credentials(monkeypatch):
     error = apply_exclusions_job._jobs[job_id]["results"][0]["error"]
     assert "realuser" not in error and "realpass" not in error
     assert "513" in error
+
+
+def test_trickle_skips_tick_while_catalog_import_runs(trickle_env, monkeypatch):
+    async def fake_enrich(series_id, provider_id, **kwargs):
+        trickle_env["calls"].append(kwargs["source_id"])
+        return {}
+
+    monkeypatch.setattr(vod_importer, "enrich_series_source_only", fake_enrich)
+
+    async def run():
+        async with vod_importer._XC_IMPORT_LOCK:
+            return await vod_importer.run_episode_trickle_tick(batch_size=4, spacing_seconds=0)
+
+    asyncio.run(run())
+    assert trickle_env["calls"] == []
+
+
+def test_trickle_lane_stops_when_catalog_import_starts(trickle_env, monkeypatch):
+    lock_holder = {}
+
+    async def fake_enrich(series_id, provider_id, **kwargs):
+        trickle_env["calls"].append(kwargs["source_id"])
+        if len(trickle_env["calls"]) == 2:
+            await vod_importer._XC_IMPORT_LOCK.acquire()
+            lock_holder["held"] = True
+        return {}
+
+    monkeypatch.setattr(vod_importer, "enrich_series_source_only", fake_enrich)
+
+    async def run():
+        try:
+            return await vod_importer.run_episode_trickle_tick(batch_size=10, spacing_seconds=0)
+        finally:
+            if lock_holder.get("held"):
+                vod_importer._XC_IMPORT_LOCK.release()
+
+    asyncio.run(run())
+    assert trickle_env["calls"] == [100, 101]
+
+
+def test_apply_rules_progress_never_exceeds_total_while_finalizing(monkeypatch):
+    provider = {"id": 1, "name": "Provider One", "is_active": True, "provider_type": "xc"}
+    seen = {}
+
+    async def ok_import(provider_id):
+        return {}
+
+    async def resweep():
+        job = apply_exclusions_job._jobs["finalizing-test"]
+        seen.update(completed=job["completed"], total=job["total"],
+                    current=job["current_provider"], phase=job.get("phase"))
+
+    monkeypatch.setattr(apply_exclusions_job.vod_db, "list_providers", lambda: [provider])
+    monkeypatch.setattr(apply_exclusions_job.vod_importer, "import_provider_catalog", ok_import)
+    monkeypatch.setattr(apply_exclusions_job.vod_importer, "resweep_smart_categories", resweep)
+    apply_exclusions_job._jobs["finalizing-test"] = {"results": [], "completed": 0, "total": 0, "current_provider": None}
+    asyncio.run(apply_exclusions_job._run_job("finalizing-test"))
+
+    assert seen == {"completed": 1, "total": 1, "current": None, "phase": "finalizing"}

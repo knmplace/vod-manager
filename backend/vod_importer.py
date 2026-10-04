@@ -2125,6 +2125,7 @@ async def bulk_enrich_tmdb_series_metadata(
 async def bulk_enrich_series_episodes(
     concurrency: int = 6, limit: int | None = None, series_ids: set[int] | None = None,
     request_spacing: float = 0, max_consecutive_failures: int | None = None,
+    yield_to_import: bool = False,
 ) -> list[dict]:
     """Fetch provider detail only for pending series episode sources.
 
@@ -2171,6 +2172,7 @@ async def bulk_enrich_series_episodes(
                 provider_count=len(selected), pending_only=True, episodes_only=True,
                 pending_sources=pending_by_provider[provider["id"]],
                 request_spacing=request_spacing, max_consecutive_failures=max_consecutive_failures,
+                yield_to_import=yield_to_import,
             ) for provider in selected
         ))
         for provider, result in zip(selected, results):
@@ -2337,9 +2339,13 @@ async def run_episode_trickle_tick(
     spacing = float(spacing_seconds if spacing_seconds is not None else settings["episode_trickle_spacing_seconds"])
     if batch <= 0:
         return []
+    if _XC_IMPORT_LOCK.locked():
+        logger.info("[episode_trickle] catalog import running; skipping this tick")
+        return []
     return await bulk_enrich_series_episodes(
         concurrency=1, limit=batch, request_spacing=spacing,
         max_consecutive_failures=_TRICKLE_MAX_CONSECUTIVE_FAILURES,
+        yield_to_import=True,
     )
 
 
@@ -2640,6 +2646,7 @@ async def _run_provider_series_phase(
     provider_count: int = 1, pending_only: bool = False, episodes_only: bool = False,
     pending_sources: list[dict] | None = None,
     request_spacing: float = 0, max_consecutive_failures: int | None = None,
+    yield_to_import: bool = False,
 ) -> tuple[bool, list]:
     """Runs one provider's series phase to completion. Same ok semantics as
     _run_provider_movie_phase. write_queue: see _run_provider_movie_phase's
@@ -2683,6 +2690,10 @@ async def _run_provider_series_phase(
             if _ENRICH_CANCEL_REQUESTED:
                 return
             if max_consecutive_failures and consecutive_failures >= max_consecutive_failures:
+                return
+            # KNM: 2026-10-04 -- a catalog import holds the SQLite writer for
+            # minutes; episode writes queued behind it hit "database is locked".
+            if yield_to_import and _XC_IMPORT_LOCK.locked():
                 return
             try:
                 item = queue.get_nowait()
