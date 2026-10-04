@@ -54,6 +54,15 @@ be proposed upstream in a separate pull request once validated live.
 - ✅ **Provider credentials hidden in "Apply rules" errors.** A failed
   provider in the apply-rules summary no longer shows the provider's
   username and password in the error URL.
+- ✅ **Episode trickle no longer collides with "Apply rules".** A trickle
+  run that overlapped a catalog import queued episode writes behind the
+  import and a few were skipped with "database is locked". The trickle now
+  skips its run while a catalog import is in progress, and stops early if
+  one starts mid-run; the skipped shows are picked up on the next run.
+- ✅ **"Provider 5 of 4" progress label fixed.** While "Apply rules" finished
+  its final category re-sweep, the progress text counted one provider past
+  the total and still named the last provider. It now reads "All N
+  provider(s) synced — finalizing…".
 
 ## 2026-10-03 (Curation layout)
 
