@@ -8895,204 +8895,281 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
 
       {activeTab === 'curation' && (
       <>
-      <SectionCard title="Import Language Exclusion" icon={<Trash2 size={14} />}>
-        <p className="text-xs text-muted-foreground">
-          Auto-archives matching movies/series the moment they're imported (or re-imported) — global across every
-          provider, since the languages you don't want almost never depend on which provider it came from. Per-provider
-          category exclusion is the "Exclude Categories" button on each provider above. Same rule either way: it
-          archives (still browsable/playable/categorizable if you change your mind), never deletes, and never
-          overrides an item you've manually un-archived.
-        </p>
-        {allLanguageCodes.length > 0 ? (
-          <>
-            <div className="flex items-center gap-1.5">
-              <input
-                className={inputCls('flex-1')}
-                placeholder="Search languages…"
-                value={languageSearch}
-                onChange={(e) => setLanguageSearch(e.target.value)}
-              />
-              <div className="flex items-center gap-0.5 rounded border border-border p-0.5">
-                {(['all', 'selected', 'unselected'] as const).map((f) => (
-                  <button
-                    key={f}
-                    className={`px-1.5 py-0.5 rounded text-[10px] transition-colors ${languageShowFilter === f ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
-                    onClick={() => setLanguageShowFilter(f)}
-                  >
-                    {f === 'all' ? 'All' : f === 'selected' ? 'Selected' : 'Unselected'}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div className="flex items-center gap-1.5 text-xs">
-              <button
-                className="text-muted-foreground hover:text-foreground underline decoration-dotted"
-                onClick={() => setLanguageDraft(new Set([...languageDraft, ...visibleLanguageCodes.map((c) => c.code)]))}
-              >
-                Select visible ({visibleLanguageCodes.length})
-              </button>
-              <button
-                className="text-muted-foreground hover:text-foreground underline decoration-dotted"
-                onClick={() => { const next = new Set(languageDraft); visibleLanguageCodes.forEach((c) => next.delete(c.code)); setLanguageDraft(next) }}
-              >
-                Deselect visible ({visibleLanguageCodes.filter((c) => languageDraft.has(c.code)).length})
-              </button>
-              <span className="text-muted-foreground ml-auto">{languageDraft.size} selected total · shift-click to select a range</span>
-            </div>
-            <div className="max-h-48 overflow-y-auto space-y-0.5 border border-border rounded p-2 text-xs">
-              {visibleLanguageCodes.map((c, i) => (
-                <label key={c.code} className="flex items-center gap-1.5 select-none">
-                  <input
-                    type="checkbox"
-                    checked={languageDraft.has(c.code)}
-                    onChange={() => {}}
-                    onClick={(e) => toggleLanguageSelected(c.code, i, e.shiftKey)}
-                  />
-                  <span className="font-mono">{c.code}</span>
-                  {LANGUAGE_CODE_NAMES[c.code] && <span className="text-muted-foreground">— {LANGUAGE_CODE_NAMES[c.code]}</span>}
-                  <span className="text-muted-foreground ml-auto">{c.count > 0 ? `${c.count} title${c.count === 1 ? '' : 's'}` : 'not currently in pool'}</span>
-                </label>
-              ))}
-              {visibleLanguageCodes.length === 0 && <p className="text-muted-foreground">No languages match.</p>}
-            </div>
-          </>
-        ) : (
+      {/* KNM: 2026-10-03 -- the three import/playback language and country filters side by side as equal columns */}
+      <div className="grid gap-4 lg:grid-cols-3 items-stretch">
+        <SectionCard title="Import Language Exclusion" icon={<Trash2 size={14} />}>
           <p className="text-xs text-muted-foreground">
-            No titles in the pool carry a language prefix in the name itself (e.g. "AR| ...", "EN| ..."). If your
-            providers tag language by category name instead (e.g. "ARA: ...", "ENG: ..."), this panel has nothing to
-            catch — use that provider's own "Exclude Categories" button above instead.
+            Auto-archives matching movies/series the moment they're imported (or re-imported) — global across every
+            provider, since the languages you don't want almost never depend on which provider it came from. Per-provider
+            category exclusion is the "Exclude Categories" button on each provider above. Same rule either way: it
+            archives (still browsable/playable/categorizable if you change your mind), never deletes, and never
+            overrides an item you've manually un-archived.
           </p>
-        )}
-        <Button
-          size="sm"
-          disabled={saveImportLanguageExclusion.isPending}
-          onClick={() => saveImportLanguageExclusion.mutate({
-            exclude_prefixes: [...languageDraft],
-            exclude_non_latin: importLanguageExclusionQuery.data?.exclude_non_latin ?? false,
-          })}
-        >
-          {saveImportLanguageExclusion.isPending ? <Loader2 size={12} className="animate-spin mr-1" /> : null}
-          Save selected languages
-        </Button>
-        <label className="flex items-center gap-1.5 text-xs">
-          <input
-            type="checkbox"
-            checked={importLanguageExclusionQuery.data?.exclude_non_latin ?? false}
-            onChange={(e) => saveImportLanguageExclusion.mutate({
-              exclude_prefixes: [...languageDraft],
-              exclude_non_latin: e.target.checked,
-            })}
-          />
-          Also exclude non-Latin-script titles (Arabic, Thai, Chinese/Japanese/Korean, Cyrillic, Greek, Hebrew, Devanagari)
-        </label>
-        <div className="flex items-center gap-1.5 pt-1">
-          <Button
-            size="sm" variant="outline"
-            disabled={applyImportExclusionsNow.isPending || applyExclusionsJobQuery.data?.status === 'running'}
-            onClick={() => askConfirm('Re-import every active provider now to apply the current exclusion rules across your existing catalog? For a large catalog this can take a while.', () => applyImportExclusionsNow.mutate())}
-          >
-            {applyImportExclusionsNow.isPending || applyExclusionsJobQuery.data?.status === 'running' ? <Loader2 size={12} className="animate-spin mr-1" /> : <RefreshCw size={12} className="mr-1" />}
-            Apply rules to existing catalog now
-          </Button>
-          {applyExclusionsJobQuery.data?.status === 'running' && (
-            <span className="text-xs text-muted-foreground">
-              Provider {applyExclusionsJobQuery.data.completed + 1} of {applyExclusionsJobQuery.data.total}
-              {applyExclusionsJobQuery.data.current_provider ? ` — syncing ${applyExclusionsJobQuery.data.current_provider}…` : '…'}
-            </span>
-          )}
-          {applyExclusionsJobQuery.data?.status === 'error' && (
-            <span className="text-xs text-destructive">Failed: {applyExclusionsJobQuery.data.error}</span>
-          )}
-        </div>
-        {applyExclusionsJobQuery.data?.status === 'done' && !!applyExclusionsJobQuery.data.results.length && (
-          <div className="text-xs border border-border rounded p-2 space-y-1">
-            <p className="text-muted-foreground">
-              Done — {applyExclusionsJobQuery.data.results.length} provider(s), {
-                applyExclusionsJobQuery.data.results.reduce((n, r) => n + (r.movies_archived ?? 0) + (r.series_archived ?? 0), 0)
-              } newly archived and {
-                applyExclusionsJobQuery.data.results.reduce((n, r) => n + (r.movies_unarchived ?? 0) + (r.series_unarchived ?? 0), 0)
-              } restored (no longer matched) by the current rules.
+          {allLanguageCodes.length > 0 ? (
+            <>
+              <div className="flex items-center gap-1.5">
+                <input
+                  className={inputCls('flex-1')}
+                  placeholder="Search languages…"
+                  value={languageSearch}
+                  onChange={(e) => setLanguageSearch(e.target.value)}
+                />
+                <div className="flex items-center gap-0.5 rounded border border-border p-0.5">
+                  {(['all', 'selected', 'unselected'] as const).map((f) => (
+                    <button
+                      key={f}
+                      className={`px-1.5 py-0.5 rounded text-[10px] transition-colors ${languageShowFilter === f ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+                      onClick={() => setLanguageShowFilter(f)}
+                    >
+                      {f === 'all' ? 'All' : f === 'selected' ? 'Selected' : 'Unselected'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5 text-xs">
+                <button
+                  className="text-muted-foreground hover:text-foreground underline decoration-dotted"
+                  onClick={() => setLanguageDraft(new Set([...languageDraft, ...visibleLanguageCodes.map((c) => c.code)]))}
+                >
+                  Select visible ({visibleLanguageCodes.length})
+                </button>
+                <button
+                  className="text-muted-foreground hover:text-foreground underline decoration-dotted"
+                  onClick={() => { const next = new Set(languageDraft); visibleLanguageCodes.forEach((c) => next.delete(c.code)); setLanguageDraft(next) }}
+                >
+                  Deselect visible ({visibleLanguageCodes.filter((c) => languageDraft.has(c.code)).length})
+                </button>
+                <span className="text-muted-foreground ml-auto">{languageDraft.size} selected total · shift-click to select a range</span>
+              </div>
+              <div className="max-h-48 overflow-y-auto space-y-0.5 border border-border rounded p-2 text-xs">
+                {visibleLanguageCodes.map((c, i) => (
+                  <label key={c.code} className="flex items-center gap-1.5 select-none">
+                    <input
+                      type="checkbox"
+                      checked={languageDraft.has(c.code)}
+                      onChange={() => {}}
+                      onClick={(e) => toggleLanguageSelected(c.code, i, e.shiftKey)}
+                    />
+                    <span className="font-mono">{c.code}</span>
+                    {LANGUAGE_CODE_NAMES[c.code] && <span className="text-muted-foreground">— {LANGUAGE_CODE_NAMES[c.code]}</span>}
+                    <span className="text-muted-foreground ml-auto">{c.count > 0 ? `${c.count} title${c.count === 1 ? '' : 's'}` : 'not currently in pool'}</span>
+                  </label>
+                ))}
+                {visibleLanguageCodes.length === 0 && <p className="text-muted-foreground">No languages match.</p>}
+              </div>
+            </>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              No titles in the pool carry a language prefix in the name itself (e.g. "AR| ...", "EN| ..."). If your
+              providers tag language by category name instead (e.g. "ARA: ...", "ENG: ..."), this panel has nothing to
+              catch — use that provider's own "Exclude Categories" button above instead.
             </p>
-            {applyExclusionsJobQuery.data.results.map((r) => (
-              <p key={r.provider} className="text-muted-foreground">
-                {r.provider}: {r.error
-                  ? <span className="text-destructive">{r.error}</span>
-                  : <>{(r.movies_archived ?? 0) + (r.series_archived ?? 0)} archived · {(r.movies_unarchived ?? 0) + (r.series_unarchived ?? 0)} restored · {(r.movies_matched ?? 0) + (r.series_matched ?? 0)} matched · {(r.movies_created ?? 0) + (r.series_created ?? 0)} new</>}
+          )}
+          <Button
+            size="sm"
+            disabled={saveImportLanguageExclusion.isPending}
+            onClick={() => saveImportLanguageExclusion.mutate({
+              exclude_prefixes: [...languageDraft],
+              exclude_non_latin: importLanguageExclusionQuery.data?.exclude_non_latin ?? false,
+            })}
+          >
+            {saveImportLanguageExclusion.isPending ? <Loader2 size={12} className="animate-spin mr-1" /> : null}
+            Save selected languages
+          </Button>
+          <label className="flex items-center gap-1.5 text-xs">
+            <input
+              type="checkbox"
+              checked={importLanguageExclusionQuery.data?.exclude_non_latin ?? false}
+              onChange={(e) => saveImportLanguageExclusion.mutate({
+                exclude_prefixes: [...languageDraft],
+                exclude_non_latin: e.target.checked,
+              })}
+            />
+            Also exclude non-Latin-script titles (Arabic, Thai, Chinese/Japanese/Korean, Cyrillic, Greek, Hebrew, Devanagari)
+          </label>
+          <div className="flex items-center gap-1.5 pt-1">
+            <Button
+              size="sm" variant="outline"
+              disabled={applyImportExclusionsNow.isPending || applyExclusionsJobQuery.data?.status === 'running'}
+              onClick={() => askConfirm('Re-import every active provider now to apply the current exclusion rules across your existing catalog? For a large catalog this can take a while.', () => applyImportExclusionsNow.mutate())}
+            >
+              {applyImportExclusionsNow.isPending || applyExclusionsJobQuery.data?.status === 'running' ? <Loader2 size={12} className="animate-spin mr-1" /> : <RefreshCw size={12} className="mr-1" />}
+              Apply rules to existing catalog now
+            </Button>
+            {applyExclusionsJobQuery.data?.status === 'running' && (
+              <span className="text-xs text-muted-foreground">
+                Provider {applyExclusionsJobQuery.data.completed + 1} of {applyExclusionsJobQuery.data.total}
+                {applyExclusionsJobQuery.data.current_provider ? ` — syncing ${applyExclusionsJobQuery.data.current_provider}…` : '…'}
+              </span>
+            )}
+            {applyExclusionsJobQuery.data?.status === 'error' && (
+              <span className="text-xs text-destructive">Failed: {applyExclusionsJobQuery.data.error}</span>
+            )}
+          </div>
+          {applyExclusionsJobQuery.data?.status === 'done' && !!applyExclusionsJobQuery.data.results.length && (
+            <div className="text-xs border border-border rounded p-2 space-y-1">
+              <p className="text-muted-foreground">
+                Done — {applyExclusionsJobQuery.data.results.length} provider(s), {
+                  applyExclusionsJobQuery.data.results.reduce((n, r) => n + (r.movies_archived ?? 0) + (r.series_archived ?? 0), 0)
+                } newly archived and {
+                  applyExclusionsJobQuery.data.results.reduce((n, r) => n + (r.movies_unarchived ?? 0) + (r.series_unarchived ?? 0), 0)
+                } restored (no longer matched) by the current rules.
               </p>
-            ))}
+              {applyExclusionsJobQuery.data.results.map((r) => (
+                <p key={r.provider} className="text-muted-foreground">
+                  {r.provider}: {r.error
+                    ? <span className="text-destructive">{r.error}</span>
+                    : <>{(r.movies_archived ?? 0) + (r.series_archived ?? 0)} archived · {(r.movies_unarchived ?? 0) + (r.series_unarchived ?? 0)} restored · {(r.movies_matched ?? 0) + (r.series_matched ?? 0)} matched · {(r.movies_created ?? 0) + (r.series_created ?? 0)} new</>}
+                </p>
+              ))}
+            </div>
+          )}
+        </SectionCard>
+        <SectionCard title="Enabled Playback Languages" icon={<Play size={14} />}>
+          <p className="text-xs text-muted-foreground">
+            This is a different filter from "Import Language Exclusion". That one decides what gets imported in
+            the first place, so it only affects titles going forward (or when you click "Apply rules to existing
+            catalog now"). This one is a live backstop on top of everything already in the catalog: it gates which
+            language a movie/episode/export/failover is allowed to stream from right now, regardless of import
+            history. Checking a language back on instantly makes any matching source eligible again — no re-import
+            needed. Unchecking one instantly removes eligibility for sources in that language, which can take a title
+            out of streaming/export entirely if that was its only enabled-language source.
+          </p>
+          <div className="flex items-center gap-1.5">
+            <input
+              className={inputCls('flex-1')}
+              placeholder="Search languages…"
+              value={enabledLanguageSearch}
+              onChange={(e) => setEnabledLanguageSearch(e.target.value)}
+            />
+            <div className="flex items-center gap-0.5 rounded border border-border p-0.5">
+              {(['all', 'selected', 'unselected'] as const).map((f) => (
+                <button
+                  key={f}
+                  className={`px-1.5 py-0.5 rounded text-[10px] transition-colors ${enabledLanguageShowFilter === f ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+                  onClick={() => setEnabledLanguageShowFilter(f)}
+                >
+                  {f === 'all' ? 'All' : f === 'selected' ? 'Selected' : 'Unselected'}
+                </button>
+              ))}
+            </div>
           </div>
-        )}
-      </SectionCard>
-
-      <SectionCard title="Enabled Playback Languages" icon={<Play size={14} />}>
-        <p className="text-xs text-muted-foreground">
-          This is a different filter from "Import Language Exclusion" above. That one decides what gets imported in
-          the first place, so it only affects titles going forward (or when you click "Apply rules to existing
-          catalog now"). This one is a live backstop on top of everything already in the catalog: it gates which
-          language a movie/episode/export/failover is allowed to stream from right now, regardless of import
-          history. Checking a language back on instantly makes any matching source eligible again — no re-import
-          needed. Unchecking one instantly removes eligibility for sources in that language, which can take a title
-          out of streaming/export entirely if that was its only enabled-language source.
-        </p>
-        <div className="flex items-center gap-1.5">
-          <input
-            className={inputCls('flex-1')}
-            placeholder="Search languages…"
-            value={enabledLanguageSearch}
-            onChange={(e) => setEnabledLanguageSearch(e.target.value)}
-          />
-          <div className="flex items-center gap-0.5 rounded border border-border p-0.5">
-            {(['all', 'selected', 'unselected'] as const).map((f) => (
-              <button
-                key={f}
-                className={`px-1.5 py-0.5 rounded text-[10px] transition-colors ${enabledLanguageShowFilter === f ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
-                onClick={() => setEnabledLanguageShowFilter(f)}
-              >
-                {f === 'all' ? 'All' : f === 'selected' ? 'Selected' : 'Unselected'}
-              </button>
-            ))}
+          <div className="flex items-center gap-1.5 text-xs">
+            <button
+              className="text-muted-foreground hover:text-foreground underline decoration-dotted"
+              onClick={() => setEnabledLanguageDraft(new Set([...enabledLanguageDraft, ...visibleEnabledLanguageCodes.map((c) => c.code)]))}
+            >
+              Select visible ({visibleEnabledLanguageCodes.length})
+            </button>
+            <button
+              className="text-muted-foreground hover:text-foreground underline decoration-dotted"
+              onClick={() => { const next = new Set(enabledLanguageDraft); visibleEnabledLanguageCodes.forEach((c) => next.delete(c.code)); setEnabledLanguageDraft(next) }}
+            >
+              Deselect visible ({visibleEnabledLanguageCodes.filter((c) => enabledLanguageDraft.has(c.code)).length})
+            </button>
+            <span className="text-muted-foreground ml-auto">{enabledLanguageDraft.size} selected total · shift-click to select a range</span>
           </div>
-        </div>
-        <div className="flex items-center gap-1.5 text-xs">
-          <button
-            className="text-muted-foreground hover:text-foreground underline decoration-dotted"
-            onClick={() => setEnabledLanguageDraft(new Set([...enabledLanguageDraft, ...visibleEnabledLanguageCodes.map((c) => c.code)]))}
+          <div className="max-h-48 overflow-y-auto space-y-0.5 border border-border rounded p-2 text-xs">
+            {visibleEnabledLanguageCodes.map((c, i) => (
+              <label key={c.code} className="flex items-center gap-1.5 select-none">
+                <input
+                  type="checkbox"
+                  checked={enabledLanguageDraft.has(c.code)}
+                  onChange={() => {}}
+                  onClick={(e) => toggleEnabledLanguageSelected(c.code, i, e.shiftKey)}
+                />
+                <span className="font-mono">{c.code}</span>
+                {LANGUAGE_CODE_NAMES[c.code] && <span className="text-muted-foreground">— {LANGUAGE_CODE_NAMES[c.code]}</span>}
+                <span className="text-muted-foreground ml-auto">{c.count > 0 ? `${c.count} title${c.count === 1 ? '' : 's'}` : 'not currently in pool'}</span>
+              </label>
+            ))}
+            {visibleEnabledLanguageCodes.length === 0 && <p className="text-muted-foreground">No languages match.</p>}
+          </div>
+          <Button
+            size="sm"
+            disabled={saveEnabledLanguages.isPending || enabledLanguageDraft.size === 0}
+            onClick={saveEnabledLanguagesWithImpactCheck}
           >
-            Select visible ({visibleEnabledLanguageCodes.length})
-          </button>
-          <button
-            className="text-muted-foreground hover:text-foreground underline decoration-dotted"
-            onClick={() => { const next = new Set(enabledLanguageDraft); visibleEnabledLanguageCodes.forEach((c) => next.delete(c.code)); setEnabledLanguageDraft(next) }}
+            {saveEnabledLanguages.isPending ? <Loader2 size={12} className="animate-spin mr-1" /> : null}
+            Save enabled languages
+          </Button>
+        </SectionCard>
+        <SectionCard title="Import Country Exclusion" icon={<Trash2 size={14} />}>
+          <p className="text-xs text-muted-foreground">
+            Sibling to Import Language Exclusion, same rule either way (archives on import, never deletes, never
+            overrides a manual un-archive) — but keyed on a title's trailing "(XX)" country-of-origin tag instead of a
+            leading language prefix. Useful for an internationally-franchised show that imports several genuinely
+            different country editions under the same base title — check the ones you don't want and only those
+            editions get auto-archived, the rest of the catalog is untouched.
+          </p>
+          {allCountryCodes.length > 0 ? (
+            <>
+              <div className="flex items-center gap-1.5">
+                <input
+                  className={inputCls('flex-1')}
+                  placeholder="Search countries…"
+                  value={countrySearch}
+                  onChange={(e) => setCountrySearch(e.target.value)}
+                />
+                <div className="flex items-center gap-0.5 rounded border border-border p-0.5">
+                  {(['all', 'selected', 'unselected'] as const).map((f) => (
+                    <button
+                      key={f}
+                      className={`px-1.5 py-0.5 rounded text-[10px] transition-colors ${countryShowFilter === f ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+                      onClick={() => setCountryShowFilter(f)}
+                    >
+                      {f === 'all' ? 'All' : f === 'selected' ? 'Selected' : 'Unselected'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5 text-xs">
+                <button
+                  className="text-muted-foreground hover:text-foreground underline decoration-dotted"
+                  onClick={() => setCountryDraft(new Set([...countryDraft, ...visibleCountryCodes.map((c) => c.code)]))}
+                >
+                  Select visible ({visibleCountryCodes.length})
+                </button>
+                <button
+                  className="text-muted-foreground hover:text-foreground underline decoration-dotted"
+                  onClick={() => { const next = new Set(countryDraft); visibleCountryCodes.forEach((c) => next.delete(c.code)); setCountryDraft(next) }}
+                >
+                  Deselect visible ({visibleCountryCodes.filter((c) => countryDraft.has(c.code)).length})
+                </button>
+                <span className="text-muted-foreground ml-auto">{countryDraft.size} selected total · shift-click to select a range</span>
+              </div>
+              <div className="max-h-48 overflow-y-auto space-y-0.5 border border-border rounded p-2 text-xs">
+                {visibleCountryCodes.map((c, i) => (
+                  <label key={c.code} className="flex items-center gap-1.5 select-none">
+                    <input
+                      type="checkbox"
+                      checked={countryDraft.has(c.code)}
+                      onChange={() => {}}
+                      onClick={(e) => toggleCountrySelected(c.code, i, e.shiftKey)}
+                    />
+                    <span className="font-mono">{c.code}</span>
+                    {COUNTRY_CODE_NAMES[c.code] && <span className="text-muted-foreground">— {COUNTRY_CODE_NAMES[c.code]}</span>}
+                    <span className="text-muted-foreground ml-auto">{c.count > 0 ? `${c.count} title${c.count === 1 ? '' : 's'}` : 'not currently in pool'}</span>
+                  </label>
+                ))}
+                {visibleCountryCodes.length === 0 && <p className="text-muted-foreground">No countries match.</p>}
+              </div>
+            </>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              No titles in the pool carry a recognized trailing country tag (e.g. "Title (US)", "Title (NZ)").
+            </p>
+          )}
+          <Button
+            size="sm"
+            disabled={saveImportCountryExclusion.isPending}
+            onClick={() => saveImportCountryExclusion.mutate({ exclude_country_codes: [...countryDraft] })}
           >
-            Deselect visible ({visibleEnabledLanguageCodes.filter((c) => enabledLanguageDraft.has(c.code)).length})
-          </button>
-          <span className="text-muted-foreground ml-auto">{enabledLanguageDraft.size} selected total · shift-click to select a range</span>
-        </div>
-        <div className="max-h-48 overflow-y-auto space-y-0.5 border border-border rounded p-2 text-xs">
-          {visibleEnabledLanguageCodes.map((c, i) => (
-            <label key={c.code} className="flex items-center gap-1.5 select-none">
-              <input
-                type="checkbox"
-                checked={enabledLanguageDraft.has(c.code)}
-                onChange={() => {}}
-                onClick={(e) => toggleEnabledLanguageSelected(c.code, i, e.shiftKey)}
-              />
-              <span className="font-mono">{c.code}</span>
-              {LANGUAGE_CODE_NAMES[c.code] && <span className="text-muted-foreground">— {LANGUAGE_CODE_NAMES[c.code]}</span>}
-              <span className="text-muted-foreground ml-auto">{c.count > 0 ? `${c.count} title${c.count === 1 ? '' : 's'}` : 'not currently in pool'}</span>
-            </label>
-          ))}
-          {visibleEnabledLanguageCodes.length === 0 && <p className="text-muted-foreground">No languages match.</p>}
-        </div>
-        <Button
-          size="sm"
-          disabled={saveEnabledLanguages.isPending || enabledLanguageDraft.size === 0}
-          onClick={saveEnabledLanguagesWithImpactCheck}
-        >
-          {saveEnabledLanguages.isPending ? <Loader2 size={12} className="animate-spin mr-1" /> : null}
-          Save enabled languages
-        </Button>
-      </SectionCard>
+            {saveImportCountryExclusion.isPending ? <Loader2 size={12} className="animate-spin mr-1" /> : null}
+            Save selected countries
+          </Button>
+        </SectionCard>
+      </div>
 
       <SectionCard title="Language Backfill & Retroactive Split" icon={<Wrench size={14} />}>
         <p className="text-xs text-muted-foreground">
@@ -9173,82 +9250,6 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
             </span>
           </div>
         ))}
-      </SectionCard>
-
-      <SectionCard title="Import Country Exclusion" icon={<Trash2 size={14} />}>
-        <p className="text-xs text-muted-foreground">
-          Sibling to Import Language Exclusion above, same rule either way (archives on import, never deletes, never
-          overrides a manual un-archive) — but keyed on a title's trailing "(XX)" country-of-origin tag instead of a
-          leading language prefix. Useful for an internationally-franchised show that imports several genuinely
-          different country editions under the same base title — check the ones you don't want and only those
-          editions get auto-archived, the rest of the catalog is untouched.
-        </p>
-        {allCountryCodes.length > 0 ? (
-          <>
-            <div className="flex items-center gap-1.5">
-              <input
-                className={inputCls('flex-1')}
-                placeholder="Search countries…"
-                value={countrySearch}
-                onChange={(e) => setCountrySearch(e.target.value)}
-              />
-              <div className="flex items-center gap-0.5 rounded border border-border p-0.5">
-                {(['all', 'selected', 'unselected'] as const).map((f) => (
-                  <button
-                    key={f}
-                    className={`px-1.5 py-0.5 rounded text-[10px] transition-colors ${countryShowFilter === f ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
-                    onClick={() => setCountryShowFilter(f)}
-                  >
-                    {f === 'all' ? 'All' : f === 'selected' ? 'Selected' : 'Unselected'}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div className="flex items-center gap-1.5 text-xs">
-              <button
-                className="text-muted-foreground hover:text-foreground underline decoration-dotted"
-                onClick={() => setCountryDraft(new Set([...countryDraft, ...visibleCountryCodes.map((c) => c.code)]))}
-              >
-                Select visible ({visibleCountryCodes.length})
-              </button>
-              <button
-                className="text-muted-foreground hover:text-foreground underline decoration-dotted"
-                onClick={() => { const next = new Set(countryDraft); visibleCountryCodes.forEach((c) => next.delete(c.code)); setCountryDraft(next) }}
-              >
-                Deselect visible ({visibleCountryCodes.filter((c) => countryDraft.has(c.code)).length})
-              </button>
-              <span className="text-muted-foreground ml-auto">{countryDraft.size} selected total · shift-click to select a range</span>
-            </div>
-            <div className="max-h-48 overflow-y-auto space-y-0.5 border border-border rounded p-2 text-xs">
-              {visibleCountryCodes.map((c, i) => (
-                <label key={c.code} className="flex items-center gap-1.5 select-none">
-                  <input
-                    type="checkbox"
-                    checked={countryDraft.has(c.code)}
-                    onChange={() => {}}
-                    onClick={(e) => toggleCountrySelected(c.code, i, e.shiftKey)}
-                  />
-                  <span className="font-mono">{c.code}</span>
-                  {COUNTRY_CODE_NAMES[c.code] && <span className="text-muted-foreground">— {COUNTRY_CODE_NAMES[c.code]}</span>}
-                  <span className="text-muted-foreground ml-auto">{c.count > 0 ? `${c.count} title${c.count === 1 ? '' : 's'}` : 'not currently in pool'}</span>
-                </label>
-              ))}
-              {visibleCountryCodes.length === 0 && <p className="text-muted-foreground">No countries match.</p>}
-            </div>
-          </>
-        ) : (
-          <p className="text-xs text-muted-foreground">
-            No titles in the pool carry a recognized trailing country tag (e.g. "Title (US)", "Title (NZ)").
-          </p>
-        )}
-        <Button
-          size="sm"
-          disabled={saveImportCountryExclusion.isPending}
-          onClick={() => saveImportCountryExclusion.mutate({ exclude_country_codes: [...countryDraft] })}
-        >
-          {saveImportCountryExclusion.isPending ? <Loader2 size={12} className="animate-spin mr-1" /> : null}
-          Save selected countries
-        </Button>
       </SectionCard>
       </>
       )}

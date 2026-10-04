@@ -31,6 +31,16 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-03 (Curation layout)
+
+- ✅ **Curation tab: language and country filters side by side.** Separate
+  from the v0.2.20 adoption below — layout only, no behavior change.
+  - Import Language Exclusion, Enabled Playback Languages and Import Country
+    Exclusion now sit together in one row as three equal-width columns on
+    wide screens, and stack on narrow ones.
+  - Language Backfill & Retroactive Split moves below that row.
+  - Descriptions that said "above" now just name the sibling section.
+
 ## 2026-10-03
 
 - ✅ **Upstream v0.2.20 adopted into the fork (version label now 0.2.20).**
