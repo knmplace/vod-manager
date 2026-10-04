@@ -124,7 +124,7 @@ async def import_plex_library(provider_id: int) -> dict:
                     part_key, container = plex_client.extract_part(item)
                     if not part_key:
                         continue
-                    if vod_importer._should_exclude_from_import(
+                    if vod_importer._should_auto_archive(
                         item.get("title", ""), category_name, exclude_categories, exclude_uncategorized, lang, country=country,
                     ):
                         continue
@@ -164,7 +164,7 @@ async def import_plex_library(provider_id: int) -> dict:
                     rating_key = show.get("ratingKey")
                     if not rating_key:
                         continue
-                    if vod_importer._should_exclude_from_import(
+                    if vod_importer._should_auto_archive(
                         show.get("title", ""), category_name, exclude_categories, exclude_uncategorized, lang, country=country,
                     ):
                         continue

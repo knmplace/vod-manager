@@ -9,7 +9,7 @@ setting): excluded content should never be stored at all, mirroring how a
 real exclusion is meant to work -- "I don't want this content in my library",
 not "store it but hide it".
 
-_should_auto_archive is renamed _should_exclude_from_import (same logic,
+_should_auto_archive is renamed _should_auto_archive (same logic,
 name now matches its actual role: a caller-side skip decision, not a
 post-import archive flag) and is used by every importer (XC/vod_importer.py,
 Plex, Emby) to filter items out of movie_items/series_items BEFORE calling
@@ -32,25 +32,25 @@ import vod_importer
 
 
 def test_excluded_category_returns_true():
-    assert vod_importer._should_exclude_from_import(
+    assert vod_importer._should_auto_archive(
         "Some Movie", "Foreign Films", ["Foreign Films"], False, {"enabled_languages": ["EN"], "exclude_non_latin": False},
     ) is True
 
 
 def test_non_excluded_category_returns_false():
-    assert vod_importer._should_exclude_from_import(
+    assert vod_importer._should_auto_archive(
         "Some Movie", "Action Movies", ["Foreign Films"], False, {"enabled_languages": ["EN"], "exclude_non_latin": False},
     ) is False
 
 
 def test_uncategorized_excluded_when_flag_set():
-    assert vod_importer._should_exclude_from_import(
+    assert vod_importer._should_auto_archive(
         "Some Movie", None, [], True, {"enabled_languages": ["EN"], "exclude_non_latin": False},
     ) is True
 
 
 def test_uncategorized_not_excluded_when_flag_unset():
-    assert vod_importer._should_exclude_from_import(
+    assert vod_importer._should_auto_archive(
         "Some Movie", None, [], False, {"enabled_languages": ["EN"], "exclude_non_latin": False},
     ) is False
 
@@ -60,13 +60,13 @@ def test_language_not_in_enabled_set_is_excluded():
     test_language_prefix_exclusion_still_works: GR is excluded simply by
     being absent from enabled_languages, with no separate exclude list
     involved."""
-    assert vod_importer._should_exclude_from_import(
+    assert vod_importer._should_auto_archive(
         "GR - Some Movie", None, [], False, {"enabled_languages": ["EN"], "exclude_non_latin": False},
     ) is True
 
 
 def test_language_in_enabled_set_is_not_excluded():
-    assert vod_importer._should_exclude_from_import(
+    assert vod_importer._should_auto_archive(
         "GR - Some Movie", None, [], False, {"enabled_languages": ["EN", "GR"], "exclude_non_latin": False},
     ) is False
 
@@ -77,13 +77,13 @@ def test_untagged_name_excluded_when_en_not_in_enabled_set():
     admin whose Enabled Playback Languages list doesn't include "EN" must
     actually exclude the untagged titles that list counts as EN, not
     silently exclude nothing)."""
-    assert vod_importer._should_exclude_from_import(
+    assert vod_importer._should_auto_archive(
         "Some Movie", None, [], False, {"enabled_languages": ["GR"], "exclude_non_latin": False},
     ) is True
 
 
 def test_untagged_name_not_excluded_when_en_in_enabled_set():
-    assert vod_importer._should_exclude_from_import(
+    assert vod_importer._should_auto_archive(
         "Some Movie", None, [], False, {"enabled_languages": ["EN"], "exclude_non_latin": False},
     ) is False
 
@@ -94,6 +94,6 @@ def test_previously_excluded_ir_prefix_now_excluded_by_default():
     enabled it for playback either). The inverted "not in enabled_languages"
     check closes that gap automatically -- IR excludes now unless an admin
     explicitly enables it, with no manual exclude-list maintenance required."""
-    assert vod_importer._should_exclude_from_import(
+    assert vod_importer._should_auto_archive(
         "IR - Some Movie", None, [], False, {"enabled_languages": ["EN"], "exclude_non_latin": False},
     ) is True

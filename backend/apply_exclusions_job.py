@@ -53,7 +53,10 @@ async def _run_job(job_id: str) -> None:
                     # fall into the XC branch below and error out.
                     result = await dispatcharr_dvr_importer.import_dvr_recordings(p["id"])
                 else:
-                    result = await vod_importer.import_provider_catalog(p["id"])
+                    # KNM: 2026-10-04 -- the background TMDB pass picks up
+                    # pending items; scheduling a sweep per provider here was
+                    # redundant.
+                    result = await vod_importer.import_provider_catalog(p["id"], schedule_enrichment=False)
                 # KNM: 2026-10-04 -- this is a full re-import; without the stamp
                 # the scheduled refresher imported the provider again right after.
                 await asyncio.to_thread(vod_db.mark_provider_catalog_refreshed, p["id"])

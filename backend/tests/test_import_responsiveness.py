@@ -6,7 +6,7 @@ import vod_importer
 
 
 def test_catalog_item_builders_keep_raw_snapshot_when_items_are_filtered(monkeypatch):
-    monkeypatch.setattr(vod_importer, "_should_exclude_from_import", lambda name, *_args, **_kwargs: name == "Skip")
+    monkeypatch.setattr(vod_importer, "_should_auto_archive", lambda name, *_args, **_kwargs: name == "Skip")
 
     movies, movie_ids = vod_importer._build_movie_import_items(
         [

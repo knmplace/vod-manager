@@ -1171,7 +1171,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # all -- import_exclude_categories can never match those (it only
         # ever compares an actual category NAME against the exclude list),
         # so this is a separate on/off switch, not another entry in that
-        # list. See vod_importer._should_exclude_from_import.
+        # list. See vod_importer._should_auto_archive.
         ("providers", "import_exclude_uncategorized", "INTEGER NOT NULL DEFAULT 0"),
         # The provider's own "last_modified" for this series, as reported by
         # the cheap bulk get_series list call (refreshed on every catalog
@@ -1483,10 +1483,7 @@ def record_catalog_sync_events(
     }
     for content_type, ids, table in (("movie", movie_ids, "movies"), ("series", series_ids, "series")):
         ids = sorted({int(item_id) for item_id in ids if item_id is not None})
-        for offset in range(0, len(ids), 900):
-            batch = ids[offset:offset + 900]
-            if not batch:
-                continue
+        for batch in _chunked(ids):
             placeholders = ",".join("?" * len(batch))
             rows = conn.execute(
                 f"SELECT id, name, year, tmdb_id FROM {table} WHERE id IN ({placeholders})", batch,
@@ -3594,7 +3591,7 @@ def set_provider_import_exclude_categories(provider_id: int, category_names: lis
     "Movies - Spanish") to skip entirely on import -- unlike the language
     exclusion rules (config.get/save_import_language_exclusion), this is
     per-provider since available categories genuinely differ provider to
-    provider. See vod_importer._should_exclude_from_import.
+    provider. See vod_importer._should_auto_archive.
 
     exclude_uncategorized (GH issue #7) is a separate switch, not another
     category name -- some providers ship items with no category attached at
@@ -3929,8 +3926,8 @@ def _remove_provider_sources(
     (series_id, provider_series_id) rows of one provider, then any episode
     sources/cards left with no source. Shared by reconcile_provider_catalog_
     sources and purge_excluded_category_sources. Caller commits."""
-    for start in range(0, len(stale_movie_rows), 900):
-        source_ids = [row["id"] for row in stale_movie_rows[start:start + 900]]
+    for chunk_rows in _chunked(stale_movie_rows):
+        source_ids = [row["id"] for row in chunk_rows]
         conn.execute(
             f"DELETE FROM movie_sources WHERE id IN ({','.join('?' * len(source_ids))})",
             source_ids,
@@ -3939,8 +3936,8 @@ def _remove_provider_sources(
     stale_series_by_id: dict[int, set[str]] = {}
     for row in stale_series_rows:
         stale_series_by_id.setdefault(row["series_id"], set()).add(row["provider_series_id"])
-    for start in range(0, len(stale_series_rows), 900):
-        series_ids = [row["provider_series_id"] for row in stale_series_rows[start:start + 900]]
+    for chunk_rows in _chunked(stale_series_rows):
+        series_ids = [row["provider_series_id"] for row in chunk_rows]
         conn.execute(
             f"DELETE FROM series_sources WHERE provider_id=? AND provider_series_id IN ({','.join('?' * len(series_ids))})",
             (provider_id, *series_ids),
@@ -3959,8 +3956,7 @@ def _remove_provider_sources(
     ]
     episode_source_ids: list[int] = []
     affected_episode_ids: set[int] = set()
-    for start in range(0, len(series_without_provider_source), 900):
-        ids = series_without_provider_source[start:start + 900]
+    for ids in _chunked(series_without_provider_source):
         rows = conn.execute(
             f"SELECT es.id, es.episode_id FROM episode_sources es "
             f"JOIN episodes e ON e.id=es.episode_id "
@@ -3969,8 +3965,7 @@ def _remove_provider_sources(
         ).fetchall()
         episode_source_ids.extend(row["id"] for row in rows)
         affected_episode_ids.update(row["episode_id"] for row in rows)
-    for start in range(0, len(episode_source_ids), 900):
-        ids = episode_source_ids[start:start + 900]
+    for ids in _chunked(episode_source_ids):
         conn.execute(f"DELETE FROM episode_sources WHERE id IN ({','.join('?' * len(ids))})", ids)
 
     for movie_id in {row["movie_id"] for row in stale_movie_rows}:
@@ -4430,7 +4425,7 @@ def _country_suffix_code(name: str) -> str | None:
     _KNOWN_COUNTRY_SUFFIX_CODES, same reasoning as that set's own comment --
     a real title can legitimately end in "(Something)" that isn't a country
     tag at all. Shared by _strip_country_suffix_for_dedup (Duplicate Finder
-    normalization) and vod_importer._should_exclude_from_import (Import Country
+    normalization) and vod_importer._should_auto_archive (Import Country
     Exclusion) so the two features agree on exactly what counts as a
     country-tagged title instead of drifting out of sync with their own
     copies of this check."""
@@ -8325,8 +8320,7 @@ def bulk_import_movies(provider_id: int, items: list[dict], _retry_depth: int = 
     exclusion rule no longer set auto_archive=True to reach this behavior --
     per user direction (2026-09-10, follow-up to beads-974), an excluded
     item is now filtered out of the items list entirely by the caller
-    (vod_importer._should_exclude_from_import, formerly _should_auto_
-    archive) before it ever reaches this function, so it's never stored at
+    (vod_importer._should_auto_archive) before it ever reaches this function, so it's never stored at
     all rather than stored-then-archived. auto_archive/should_archive stay
     wired up here for any other caller that still wants the archive (not
     skip) behavior; see vod_db.purge_excluded_archived_content for the
@@ -8380,8 +8374,7 @@ def bulk_import_movies(provider_id: int, items: list[dict], _retry_depth: int = 
             # unchanged -- only where the row comes from differs.
             stream_ids = [item["provider_stream_id"] for item in chunk]
             sources_by_stream_id: dict[str, sqlite3.Row] = {}
-            for i in range(0, len(stream_ids), 900):
-                sub = stream_ids[i:i + 900]
+            for sub in _chunked(stream_ids):
                 placeholders = ",".join("?" * len(sub))
                 rows = conn.execute(
                     f"SELECT provider_stream_id, movie_id, catalog_fingerprint FROM movie_sources "
@@ -8395,8 +8388,7 @@ def bulk_import_movies(provider_id: int, items: list[dict], _retry_depth: int = 
             movies_by_id: dict[int, sqlite3.Row] = {}
             if matched_movie_ids:
                 ids = list(matched_movie_ids)
-                for i in range(0, len(ids), 900):
-                    sub = ids[i:i + 900]
+                for sub in _chunked(ids):
                     placeholders = ",".join("?" * len(sub))
                     rows = conn.execute(
                         f"SELECT id, tmdb_id, is_adult, is_adult_manual, review_excluded, review_excluded_manual "
@@ -8436,8 +8428,7 @@ def bulk_import_movies(provider_id: int, items: list[dict], _retry_depth: int = 
                 # either ordering; the in-memory buckets below then group
                 # everything found under the shared normalized key.
                 names = list({n for n, _ in name_year_pairs} | {_import_match_key_name(n) for n, _ in name_year_pairs})
-                for i in range(0, len(names), 900):
-                    sub = names[i:i + 900]
+                for sub in _chunked(names):
                     placeholders = ",".join("?" * len(sub))
                     rows = conn.execute(
                         f"SELECT id, name, year, tmdb_id, is_adult, is_adult_manual, review_excluded, review_excluded_manual "
@@ -8462,8 +8453,7 @@ def bulk_import_movies(provider_id: int, items: list[dict], _retry_depth: int = 
             movie_languages: dict[int, set[str]] = {}
             if language_candidate_ids:
                 ids = list(language_candidate_ids)
-                for i in range(0, len(ids), 900):
-                    sub = ids[i:i + 900]
+                for sub in _chunked(ids):
                     placeholders = ",".join("?" * len(sub))
                     rows = conn.execute(
                         f"SELECT movie_id, COALESCE(language, 'EN') AS lang FROM movie_sources "
@@ -8833,8 +8823,7 @@ def bulk_import_series(provider_id: int, items: list[dict], _retry_depth: int = 
             series_ids = [item.get("provider_series_id") for item in chunk]
             existing_by_series_id: dict[object, sqlite3.Row] = {}
             source_fingerprints: dict[str, str | None] = {}
-            for i in range(0, len(series_ids), 900):
-                sub = series_ids[i:i + 900]
+            for sub in _chunked(series_ids):
                 placeholders = ",".join("?" * len(sub))
                 rows = conn.execute(
                     f"SELECT ss.provider_series_id, ss.catalog_fingerprint, s.id, s.is_adult, s.is_adult_manual, "
@@ -8846,8 +8835,7 @@ def bulk_import_series(provider_id: int, items: list[dict], _retry_depth: int = 
                 for row in rows:
                     source_fingerprints[row["provider_series_id"]] = row["catalog_fingerprint"]
                     existing_by_series_id[row["provider_series_id"]] = row
-            for i in range(0, len(series_ids), 900):
-                sub = series_ids[i:i + 900]
+            for sub in _chunked(series_ids):
                 placeholders = ",".join("?" * len(sub))
                 rows = conn.execute(
                     f"SELECT id, is_adult, is_adult_manual, review_excluded, review_excluded_manual, import_provider_series_id "
@@ -8876,8 +8864,7 @@ def bulk_import_series(provider_id: int, items: list[dict], _retry_depth: int = 
             series_by_name: dict[str, list[sqlite3.Row]] = {}
             if name_year_pairs:
                 names = list({n for n, _ in name_year_pairs} | {_import_match_key_name(n) for n, _ in name_year_pairs})
-                for i in range(0, len(names), 900):
-                    sub = names[i:i + 900]
+                for sub in _chunked(names):
                     placeholders = ",".join("?" * len(sub))
                     rows = conn.execute(
                         f"SELECT id, name, year, tmdb_id, is_adult, is_adult_manual, review_excluded, review_excluded_manual, import_provider_id "
@@ -8899,8 +8886,7 @@ def bulk_import_series(provider_id: int, items: list[dict], _retry_depth: int = 
             series_languages: dict[int, set[str]] = {}
             if series_language_candidate_ids:
                 ids = list(series_language_candidate_ids)
-                for i in range(0, len(ids), 900):
-                    sub = ids[i:i + 900]
+                for sub in _chunked(ids):
                     placeholders = ",".join("?" * len(sub))
                     rows = conn.execute(
                         f"SELECT series_id, COALESCE(language, 'EN') AS lang FROM series_sources "
@@ -9256,7 +9242,7 @@ def bulk_import_plex_movies(provider_id: int, items: list[dict]) -> dict:
     see that function's docstring,
     including the note that provider-level category/language exclusion no
     longer reaches this function at all: excluded items are filtered out by
-    the caller (vod_importer._should_exclude_from_import) before this is
+    the caller (vod_importer._should_auto_archive) before this is
     even called, for Plex/Emby library-section-as-category exclusion (GH#9)
     same as XC-provider category exclusion."""
     _WRITE_LOCK.acquire()
@@ -11774,7 +11760,7 @@ def _row_excluded_by_rule(
     name: str, category_names: set[str], provider_exclude_categories: list[str],
     exclude_uncategorized: bool, lang: dict,
 ) -> bool:
-    """Same rule vod_importer._should_exclude_from_import applies per-item at
+    """Same rule vod_importer._should_auto_archive applies per-item at
     import time, adapted for purge_excluded_archived_content's already-in-DB
     rows: category_names is every provider_category_name seen across a row's
     sources (movie_sources/series_sources) rather than one item's single
@@ -11783,7 +11769,7 @@ def _row_excluded_by_rule(
     2026-09-11: lang["enabled_languages"] (an include-list, from
     config.get_enabled_languages()) replaces lang["exclude_prefixes"] (an
     explicit exclude-list) for the language-prefix gate -- see
-    vod_importer._should_exclude_from_import's identical change for the full
+    vod_importer._should_auto_archive's identical change for the full
     rationale. Keep in sync with that function's identical EN fallback --
     purge and import-time filtering must agree on what "EN" means, or a
     purge could leave behind (or delete) rows the import-time filter would
@@ -11806,7 +11792,7 @@ def purge_excluded_archived_content(provider_exclusions: dict[int, tuple[list[st
     deletes movies/series rows that are currently auto-archived
     (review_excluded=1, review_excluded_manual=0) AND still match a currently
     active exclusion rule -- content that, under the new "skip at import,
-    never store" model (see vod_importer._should_exclude_from_import), should
+    never store" model (see vod_importer._should_auto_archive), should
     never have been imported in the first place. A human's manual archive
     (review_excluded_manual=1, see bulk_set_review_excluded) is never
     touched -- same protection every other auto-archive path in this file
@@ -11818,7 +11804,7 @@ def purge_excluded_archived_content(provider_exclusions: dict[int, tuple[list[st
     import_exclude_uncategorized (see vod_importer.import_provider_catalog).
     A row is only ever evaluated against the exclusion rule(s) of the
     provider(s) it actually has a source from, mirroring the per-provider
-    scoping _should_exclude_from_import already has at import time."""
+    scoping _should_auto_archive already has at import time."""
     # KNM: 2026-10-03 upstream v0.2.20 merge -- adopt upstream's _WRITE_LOCK (RLock) around this write path.
     with _WRITE_LOCK:
         conn = _connect()
@@ -12175,7 +12161,7 @@ def list_all_pool_prefixes() -> list[dict]:
     blind.
 
     A name with no recognized prefix is counted as "EN", matching
-    _source_language's/_should_exclude_from_import's identical fallback --
+    _source_language's/_should_auto_archive's identical fallback --
     without this, the vast majority of untagged EN/ES-convention titles
     were invisible here, making the pool look almost empty and making "EN"
     impossible to select/exclude even though it's the actual language most
@@ -12723,7 +12709,7 @@ def evaluate_smart_category(category_id: int, item_ids: list[int] | set[int] | N
 
     conn = _connect()
     rows = []
-    id_chunks = [ids[i:i + 900] for i in range(0, len(ids), 900)] if ids is not None else [None]
+    id_chunks = _chunked(ids) if ids is not None else [None]
     if category["content_type"] == "movie":
         for chunk in id_chunks:
             where = "m.review_excluded=0"

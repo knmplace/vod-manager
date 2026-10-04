@@ -96,7 +96,7 @@ def test_background_tmdb_pass_leaves_episodes_to_the_trickle(monkeypatch):
 def test_apply_rules_job_error_hides_provider_credentials(monkeypatch):
     provider = {"id": 1, "name": "Provider One", "is_active": True, "provider_type": "xc"}
 
-    async def failing_import(provider_id):
+    async def failing_import(provider_id, **_kwargs):
         raise RuntimeError(
             "Server error '513 <none>' for url "
             "'http://example.invalid/player_api.php?username=realuser&password=realpass&action=get_vod_categories'"

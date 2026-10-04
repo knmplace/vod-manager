@@ -11,12 +11,12 @@ def test_country_suffixes_are_classified_for_language_filter():
 
 def test_country_suffixes_are_excluded_at_import_when_not_enabled():
     lang = {"enabled_languages": ["EN", "ES"], "exclude_non_latin": False}
-    assert vod_importer._should_exclude_from_import(
+    assert vod_importer._should_auto_archive(
         "#BringBackAlice (PL)", lang=lang, raw_name="#BringBackAlice (PL)"
     )
-    assert vod_importer._should_exclude_from_import(
+    assert vod_importer._should_auto_archive(
         "1899 (2022) (DE)", lang=lang, raw_name="1899 (2022) (DE)"
     )
-    assert not vod_importer._should_exclude_from_import(
+    assert not vod_importer._should_auto_archive(
         "Alba (2021) (ES)", lang=lang, raw_name="Alba (2021) (ES)"
     )

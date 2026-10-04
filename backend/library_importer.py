@@ -203,7 +203,7 @@ async def _import_library_locked(provider_id: int) -> dict:
         # KNM: 2026-10-03 fork skips excluded items at import (never stored)
         # rather than storing them auto-archived; still counted as seen so the
         # removal reconcile below treats them as present on the share.
-        excluded = vod_importer._should_exclude_from_import(
+        excluded = vod_importer._should_auto_archive(
             name, None, exclude_categories, exclude_uncategorized, lang, country=country, raw_name=parsed.title,
         )
 

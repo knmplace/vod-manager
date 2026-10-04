@@ -104,7 +104,7 @@ async def import_emby_library(provider_id: int) -> dict:
                     stream_id, container = emby_vod_client.extract_stream_id(item)
                     if not stream_id:
                         continue
-                    if vod_importer._should_exclude_from_import(
+                    if vod_importer._should_auto_archive(
                         item.get("Name", ""), category_name, exclude_categories, exclude_uncategorized, lang, country=country,
                     ):
                         continue
@@ -152,7 +152,7 @@ async def import_emby_library(provider_id: int) -> dict:
                     series_id = show.get("Id")
                     if not series_id:
                         continue
-                    if vod_importer._should_exclude_from_import(
+                    if vod_importer._should_auto_archive(
                         show.get("Name", ""), category_name, exclude_categories, exclude_uncategorized, lang, country=country,
                     ):
                         continue

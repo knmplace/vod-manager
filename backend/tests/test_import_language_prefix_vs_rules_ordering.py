@@ -4,7 +4,7 @@ despite 'ES' also sitting in the now-vestigial import_exclude_language_
 prefixes list), while every OTHER excluded language was correctly kept out.
 
 Root cause: _import_movies_for_provider/_import_series_for_provider (see
-_should_exclude_from_import in vod_importer.py) ran the language-prefix
+_should_auto_archive in vod_importer.py) ran the language-prefix
 exclusion check against `name` AFTER vod_db.apply_rules_to_value had
 already stripped the leading "ES - " prefix via the built-in Title &
 Metadata Rules (a real DB rule, id=1, strips ~150+ known language-code
@@ -18,7 +18,7 @@ carried a language prefix that a metadata rule also stripped.
 
 This was reportedly already discussed and expected to be fixed in a prior
 session but never actually landed -- this test exercises the real
-_import_movies_for_provider pipeline (not just _should_exclude_from_import
+_import_movies_for_provider pipeline (not just _should_auto_archive
 in isolation, which test_import_exclusion_skip.py already covers) with an
 active rule that strips the prefix, to prove the ordering bug for real and
 guard against it regressing again."""

@@ -83,7 +83,7 @@ def _queue_catalog_enrichment_for_changes(
 
 
 def _current_lang_settings() -> dict:
-    """Builds the `lang` dict _should_exclude_from_import/_row_excluded_by_rule
+    """Builds the `lang` dict _should_auto_archive/_row_excluded_by_rule
     read: enabled_languages (config.get_enabled_languages(), the include-list
     the language-prefix gate now checks membership against) merged with
     exclude_non_latin (still config.get_import_language_exclusion(), which
@@ -96,7 +96,7 @@ def _current_lang_settings() -> dict:
     }
 
 
-def _should_exclude_from_import(
+def _should_auto_archive(
     name: str, provider_category_name: str | None = None, provider_exclude_categories: list[str] = (),
     exclude_uncategorized: bool = False, lang: dict | None = None, country: list[str] | None = None,
     raw_name: str | None = None,
@@ -110,7 +110,8 @@ def _should_exclude_from_import(
     per-provider (providers.import_exclude_categories), since available
     categories genuinely differ provider to provider.
 
-    Formerly _should_auto_archive: an excluded item used to still be fully
+    Despite the name (kept for existing callers), an excluded item is no
+    longer archived. It used to still be fully
     imported and stored, just tagged auto_archive=True (hidden from review
     queues, but otherwise fully present -- see vod_db.bulk_set_review_
     excluded's "still fully browsable/playable/categorizable" archive
@@ -680,7 +681,7 @@ def _build_movie_import_items(streams, category_names, exclude_categories, exclu
         name, year = parse_name_year(s.get("name") or "")
         name = vod_db.apply_rules_to_value(name, movie_name_rules)
         category_name = category_names.get(str(s.get("category_id")))
-        if _should_exclude_from_import(
+        if _should_auto_archive(
             name, category_name, exclude_categories, exclude_uncategorized, lang, country=country, raw_name=s.get("name") or "",
         ):
             continue
@@ -776,7 +777,7 @@ def _build_series_import_items(series_list, series_category_names, exclude_categ
         name, year = parse_name_year(s.get("name") or "")
         name = vod_db.apply_rules_to_value(name, series_name_rules)
         category_name = series_category_names.get(str(s.get("category_id")))
-        if _should_exclude_from_import(
+        if _should_auto_archive(
             name, category_name, exclude_categories, exclude_uncategorized, lang, country=country, raw_name=s.get("name") or "",
         ):
             continue
@@ -1046,6 +1047,12 @@ def mark_import_running(provider_id: int, provider_name: str) -> int:
     return run_id
 
 
+def import_error_detail(exc: BaseException) -> str:
+    # KNM: 2026-10-04 -- failed imports stored only the class name; keep the
+    # message, redacted (httpx errors embed the provider login in the URL).
+    return _redact_upstream_url(str(exc)) or type(exc).__name__
+
+
 def mark_import_finished(
     provider_id: int, error: str | None = None, *, run_id: int | None = None, result: dict | None = None,
 ) -> None:
@@ -1091,7 +1098,7 @@ async def run_tracked_import(provider_id: int, importer) -> dict:
     try:
         result = await importer(provider_id)
     except Exception as exc:
-        mark_import_finished(provider_id, type(exc).__name__, run_id=run_id)
+        mark_import_finished(provider_id, import_error_detail(exc), run_id=run_id)
         raise
     mark_import_finished(provider_id, run_id=run_id, result=result)
     result["catalog_sync_run_id"] = run_id
@@ -1140,9 +1147,10 @@ async def import_provider_catalog(provider_id: int, *, schedule_enrichment: bool
         try:
             result = await _import_provider_catalog_impl(provider_id)
         except Exception as exc:
-            _IMPORT_PROGRESS.update({"running": False, "finished_at": time.time(), "error": type(exc).__name__})
-            await asyncio.to_thread(vod_db.update_catalog_sync_run, run_id, status="failed", error=type(exc).__name__)
-            _mark_catalog_workflow_failed(type(exc).__name__)
+            detail = import_error_detail(exc)
+            _IMPORT_PROGRESS.update({"running": False, "finished_at": time.time(), "error": detail})
+            await asyncio.to_thread(vod_db.update_catalog_sync_run, run_id, status="failed", error=detail)
+            _mark_catalog_workflow_failed(detail)
             raise
         _IMPORT_PROGRESS.update({"running": False, "finished_at": time.time()})
         _CATALOG_WORKFLOW_PROGRESS["import_finished_at"] = time.time()
@@ -2203,7 +2211,7 @@ async def bulk_enrich_series_episodes(
         return []
     providers = [p for p in await asyncio.to_thread(vod_db.list_providers)
                  if p.get("is_active", True)]
-    _ENRICH_DONE_SOURCE_IDS.clear()
+    _reset_enrich_done_ids()
     pending_provider_ids = []
     pending_by_provider: dict[int, list[dict]] = {}
     pending_series_ids: set[int] = set()
@@ -2227,7 +2235,7 @@ async def bulk_enrich_series_episodes(
         "started_at": time.time(), "finished_at": None,
         "cancelled": False, "providers_incomplete": [],
     })
-    series_sem = asyncio.Semaphore(max(1, concurrency))
+    series_sem = _CapacitySemaphore(max(1, concurrency))
     write_queue: "asyncio.Queue" = asyncio.Queue(maxsize=32)
     writer_task = asyncio.create_task(_run_global_writer(write_queue))
     try:
@@ -2474,6 +2482,14 @@ _ENRICH_DONE_IDS: dict[str, set] = {"movie": set(), "series": set()}
 _ENRICH_DONE_SOURCE_IDS: set = set()
 
 
+def _reset_enrich_done_ids() -> None:
+    # KNM: 2026-10-04 -- every run clears both sets together; clearing them at
+    # different points let stale keys from a prior run skew *_done counts.
+    _ENRICH_DONE_IDS["movie"].clear()
+    _ENRICH_DONE_IDS["series"].clear()
+    _ENRICH_DONE_SOURCE_IDS.clear()
+
+
 def get_enrich_progress() -> dict:
     progress = dict(_ENRICH_PROGRESS)
     # Surfaces which provider(s), if any, enrichment is currently backing off
@@ -2501,6 +2517,23 @@ _PROGRESS_PREFIX = {"movie": "movies", "series": "series"}  # "series" pluralize
 # Returned by _enrich_one when a series source's provider fetch failed (truthy,
 # so callers that only check `is False` keep their behavior).
 _SOURCE_FETCH_FAILED = "source_fetch_failed"
+# KNM: 2026-10-04 -- returned on ProviderBackoffError: a deliberate deferral,
+# not a provider failure, so phases must not mark themselves failed for it
+# (that triggered a full retry / skipped the series phase).
+_BACKOFF_SKIPPED = "backoff_skipped"
+
+
+class _CapacitySemaphore(asyncio.Semaphore):
+    """Semaphore that remembers its configured size; _value is only the free
+    permits, which is smaller while other providers' phases hold some."""
+
+    def __init__(self, value: int = 1):
+        super().__init__(value)
+        self.capacity = value
+
+
+def _semaphore_capacity(sem: asyncio.Semaphore) -> int:
+    return getattr(sem, "capacity", None) or sem._value or 1
 
 
 async def _enrich_one(
@@ -2510,8 +2543,9 @@ async def _enrich_one(
     episodes_only: bool = True, source_id: int | None = None,
     progress_mode: str = "canonical",
 ) -> bool:
-    """Returns True iff this item's enrichment call actually succeeded (no
-    exception, including no ProviderBackoffError) -- used by bulk_enrich_all's
+    """Returns True iff this item's enrichment call actually succeeded,
+    _BACKOFF_SKIPPED when its provider is backing off (deferred, not failed),
+    or False on a real error -- used by bulk_enrich_all's
     per-provider phase orchestration to tell "this provider's phase is
     genuinely failing" apart from "some items 404'd but the provider itself
     is fine", the same way a single _enrich_one call always could not.
@@ -2559,7 +2593,7 @@ async def _enrich_one(
             # and gets picked up again on the next bulk-enrich run (or later
             # in this same run, once the provider's backoff expires).
             _ENRICH_PROGRESS[f"{prefix}_backoff_skipped"] += 1
-            return False
+            return _BACKOFF_SKIPPED
         except Exception as exc:
             # httpx.HTTPStatusError/ConnectError's own str() embeds the full
             # request URL -- real, working provider credentials included --
@@ -2673,7 +2707,7 @@ async def _run_provider_movie_phase(
     # sem is shared across provider_count concurrently-running providers'
     # phases -- divide its capacity fairly instead of each phase
     # claiming sem._value (the semaphore's full capacity) for itself alone.
-    worker_count = max(1, (sem._value or 1) // max(1, provider_count))
+    worker_count = max(1, _semaphore_capacity(sem) // max(1, provider_count))
 
     async def _flush_chunk(chunk: list) -> None:
         if write_queue is not None:
@@ -2749,7 +2783,7 @@ async def _run_provider_series_phase(
         vod_db.list_all_series_ids, provider_id=provider["id"]
     )
     ok = True
-    worker_count = max(1, (sem._value or 1) // max(1, provider_count))
+    worker_count = max(1, _semaphore_capacity(sem) // max(1, provider_count))
 
     queue: asyncio.Queue = asyncio.Queue()
     for item in pending_sources if pending_sources is not None else series_ids:
@@ -2791,7 +2825,11 @@ async def _run_provider_series_phase(
                     )
             except BaseException:
                 outcome = False
-            if outcome is False:
+            if outcome == _BACKOFF_SKIPPED:
+                # Provider is rate-limited; stop this trickle lane, don't fail the phase.
+                if max_consecutive_failures:
+                    consecutive_failures = max_consecutive_failures
+            elif outcome is False:
                 ok = False
                 consecutive_failures += 1
                 if max_consecutive_failures and _provider_backoff_remaining(provider["id"]) > 0:
@@ -2967,8 +3005,7 @@ async def bulk_enrich_all(concurrency: int = 8, force: bool = False, pending_onl
     # call), and a provider added mid-run should still get merged.
     merged_movie_ids: set = set()
     merged_series_ids: set = set()
-    _ENRICH_DONE_IDS["movie"].clear()
-    _ENRICH_DONE_IDS["series"].clear()
+    _reset_enrich_done_ids()
     _ENRICH_PROGRESS.update({
         "running": True,
         "movies_total": len(movie_ids_all), "movies_done": 0, "movies_errors": 0, "movies_backoff_skipped": 0,
@@ -2986,8 +3023,8 @@ async def bulk_enrich_all(concurrency: int = 8, force: bool = False, pending_onl
     # starvation this is fixing, only softer), each kind gets its own
     # provider-request budget. Shared across all providers, same as before --
     # only the SEQUENCING is now per-provider, not the concurrency budget.
-    movie_sem = asyncio.Semaphore(concurrency)
-    series_sem = asyncio.Semaphore(concurrency)
+    movie_sem = _CapacitySemaphore(concurrency)
+    series_sem = _CapacitySemaphore(concurrency)
 
     # One run-wide queue + one background writer task (plan-doc follow-up
     # "one global writer", 2026-09-14) -- every provider lane's movie/series

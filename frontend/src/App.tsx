@@ -308,6 +308,9 @@ export default function App() {
               <p className="mt-1">TMDB: {runtimeStatusQuery.data.tmdb.done}/{runtimeStatusQuery.data.tmdb.total}</p>
             ) : runtimeStatusQuery.data?.enrichment.running ? (
               <p className="mt-1">Enriching: {runtimeStatusQuery.data.enrichment.movies_done}/{runtimeStatusQuery.data.enrichment.movies_total} movies · {runtimeStatusQuery.data.enrichment.series_done}/{runtimeStatusQuery.data.enrichment.series_total} series</p>
+            ) : runtimeStatusQuery.data?.import.error ? (
+              // KNM: 2026-10-04 -- imports run in the background now; without this a failed one just fell back to "Idle" (upstream PR #31 review).
+              <p className="mt-1 text-destructive">{runtimeStatusQuery.data.import.provider_name ?? 'Provider'} import failed: {runtimeStatusQuery.data.import.error}</p>
             ) : (
               <p className={workflowIsReady ? 'mt-1 text-emerald-400' : workflowHasFailed ? 'mt-1 text-destructive' : 'mt-1'}>
                 {workflowIsReady ? 'Catalog ready for review' : workflowHasFailed ? (workflow?.error ?? 'Automatic catalog work needs attention.') : 'Idle'}

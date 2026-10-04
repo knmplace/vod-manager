@@ -1761,7 +1761,7 @@ async def _run_provider_catalog_import(provider_id: int) -> dict:
             result = await vod_importer.import_provider_catalog(provider_id, schedule_enrichment=False)
     except Exception as exc:
         if track_lifecycle:
-            vod_importer.mark_import_finished(provider_id, type(exc).__name__, run_id=run_id)
+            vod_importer.mark_import_finished(provider_id, vod_importer.import_error_detail(exc), run_id=run_id)
         # exc_info: some failures here raise with an empty str() (e.g. a bare
         # TimeoutError), which used to log as "failed: " with nothing else
         # to go on -- the full traceback is the only way to actually

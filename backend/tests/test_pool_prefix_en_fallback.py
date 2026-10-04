@@ -6,7 +6,7 @@ treats as "EN" by default -- were invisible to the Import Language Exclusion
 (a real deployment with ~87k titles showed only 6 total) and made "EN"
 impossible to select/exclude even though it's what most untagged content
 actually is. Fixed by having list_all_pool_prefixes/list_library_prefixes
-(and the _should_exclude_from_import / _row_excluded_by_rule matchers they
+(and the _should_auto_archive / _row_excluded_by_rule matchers they
 back) treat "no recognized prefix" as "EN", matching _source_language's
 existing fallback."""
 
