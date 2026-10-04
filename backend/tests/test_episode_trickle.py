@@ -14,7 +14,7 @@ import vod_importer
 def test_trickle_settings_have_safe_defaults(db):
     settings = config.get_refresh_settings()
     assert settings["episode_trickle_batch"] == 100
-    assert settings["episode_trickle_interval_seconds"] == 45 * 60
+    assert settings["episode_trickle_interval_seconds"] == 15 * 60
     assert settings["episode_trickle_spacing_seconds"] == 3
 
 

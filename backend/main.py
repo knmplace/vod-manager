@@ -282,7 +282,7 @@ async def _watch_session_poller() -> None:
 
 async def _episode_trickle_scheduler() -> None:
     """KNM: 2026-10-03 -- paced background episode discovery. Every
-    episode_trickle_interval_seconds (default 45 min), fetch at most
+    episode_trickle_interval_seconds (default 15 min), fetch at most
     episode_trickle_batch pending series sources per provider, spaced out;
     see vod_importer.run_episode_trickle_tick."""
     await asyncio.sleep(120)
