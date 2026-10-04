@@ -10161,6 +10161,11 @@ def _merge_series_row(conn: sqlite3.Connection, from_id: int, into_id: int) -> N
                 (into_id, from_id, p["category_id"]),
             )
 
+    # KNM: 2026-10-04 -- series_sources cascades on the series delete below;
+    # without this the merged-away provider link was lost and the next import
+    # re-created the show as "new" (then auto-merged it again, every run).
+    # UNIQUE is (provider_id, provider_series_id), so this can't conflict.
+    conn.execute("UPDATE series_sources SET series_id=? WHERE series_id=?", (into_id, from_id))
     conn.execute("DELETE FROM series WHERE id=?", (from_id,))
 
 

@@ -31,6 +31,19 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-04 (Series merge keeps provider links)
+
+- ✅ **"Apply rules" no longer re-creates the same shows as "new" on every
+  run.** When two cards for the same show were merged, the provider link on
+  the card being merged away was deleted along with it. On the next import
+  that provider's show looked unknown, so it was created again as "new" and
+  auto-merged again — about 30–50 shows per provider churned on every run.
+  - Merging series now moves every provider source onto the surviving card,
+    the same way movie merges already did.
+  - Links lost before this fix are rebuilt by the next import. Expect one
+    more run with some "new" shows, then the counts should drop to real
+    additions only.
+
 ## 2026-10-03 (Episode trickle pacing)
 
 The credential fix and the "Provider 5 of 4" label fix are proposed upstream in
