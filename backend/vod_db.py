@@ -9400,7 +9400,15 @@ def bulk_import_plex_series(provider_id: int, items: list[dict]) -> dict:
                     # import_provider_id/import_provider_series_id first, so a title
                     # changing between Plex syncs could silently duplicate a series on
                     # the very next import instead of recognizing it via its stable id.
+                    # KNM: 2026-10-04 -- series_sources first, as bulk_import_series
+                    # does. After a merge the survivor keeps the source link but not
+                    # the import_provider_* pointer, so the pointer alone missed it
+                    # and re-created the card every run (Plex title-with-year churn).
                     existing = conn.execute(
+                        "SELECT s.id, s.review_excluded, s.review_excluded_manual FROM series_sources ss "
+                        "JOIN series s ON s.id=ss.series_id WHERE ss.provider_id=? AND ss.provider_series_id=?",
+                        (provider_id, item.get("provider_series_id")),
+                    ).fetchone() or conn.execute(
                         "SELECT id, review_excluded, review_excluded_manual FROM series WHERE import_provider_id=? AND import_provider_series_id=?",
                         (provider_id, item.get("provider_series_id")),
                     ).fetchone()

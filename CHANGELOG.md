@@ -43,6 +43,12 @@ instead of opening a duplicate request.
   - Links lost before this fix are rebuilt by the next import. Expect one
     more run with some "new" shows, then the counts should drop to real
     additions only.
+- ✅ **Plex, Emby, Jellyfin and library shows no longer come back as "new"
+  after a merge.** When a show from one of these sources was merged into
+  another card (for example "Show (2025)" into "Show"), the next import
+  couldn't find it and created a fresh card every run. These importers now
+  find the show through its saved source link, as provider imports already
+  did.
 
 ## 2026-10-03 (Episode trickle pacing)
 
