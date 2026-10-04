@@ -42,6 +42,10 @@ instead of opening a duplicate request.
   batches and the gap between requests. It explains what each one does and
   shows a live shows-per-hour estimate. Setting 0 shows turns preloading off.
   The card's help text is also brighter.
+- Verified live after deploy: batches of 100 now start about 20.6 minutes
+  apart (was about 51), about 291 shows per hour per provider (was about
+  118). Requests stay about 3.3 seconds apart, with 0 failures and 0 errors
+  logged.
 
 ## 2026-10-04 (Sync History completeness)
 
@@ -54,7 +58,7 @@ instead of opening a duplicate request.
   Only XC providers wrote a history row; scheduled and Apply-rules refreshes
   of the other types left no trace. Apply rules also handled library
   (rclone/SMB) providers as XC, which failed; they now use the library importer.
-- ✅ **Apply rules counts as a catalog refresh.** It re-imports every
+- ✅ 🔀 **Apply rules counts as a catalog refresh.** Proposed upstream in [#42](https://github.com/jstevenscl/vod-manager/pull/42). It re-imports every
   provider but didn't reset the refresh timer, so the scheduler imported the
   same provider again shortly after.
 
