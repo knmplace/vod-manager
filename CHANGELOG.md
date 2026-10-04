@@ -33,8 +33,8 @@ instead of opening a duplicate request.
 
 ## 2026-10-04 (Series merge keeps provider links)
 
-- ✅ **"Apply rules" no longer re-creates the same shows as "new" on every
-  run.** When two cards for the same show were merged, the provider link on
+- ✅ 🔀 **"Apply rules" no longer re-creates the same shows as "new" on every
+  run.** Proposed upstream in [#41](https://github.com/jstevenscl/vod-manager/pull/41). When two cards for the same show were merged, the provider link on
   the card being merged away was deleted along with it. On the next import
   that provider's show looked unknown, so it was created again as "new" and
   auto-merged again — about 30–50 shows per provider churned on every run.
