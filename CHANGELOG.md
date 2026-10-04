@@ -33,6 +33,13 @@ instead of opening a duplicate request.
 
 ## 2026-10-03 (Episode trickle pacing)
 
+Episode trickle pacing and the credential fix are fork only for now; they will
+be proposed upstream in a separate pull request once validated live.
+
+- ✅ 🔀 **Docker build no longer hangs.** The frontend stage now builds once on
+  the runner's native platform instead of under arm64 emulation, and the
+  build job is capped at 30 minutes. A build that had sat for 36+ minutes now
+  completes in about 7. Proposed upstream in [#39](https://github.com/jstevenscl/vod-manager/pull/39).
 - ✅ **Paced background episode discovery.** Episode lists and stream ids
   for shows that haven't been opened yet are now fetched on their own
   schedule instead of a handful at a time once every enrichment cycle.
@@ -96,7 +103,7 @@ instead of opening a duplicate request.
     upstream's category-tag fallback is used last.
 
   **Fixes found during validation**
-  - **Excluded categories now remove content already imported.** Adding a
+  - 🔀 **Excluded categories now remove content already imported.** Adding a
     provider category to the import exclusion list used to stop only *new*
     items; anything imported earlier stayed forever. XC imports now remove that
     provider's sources in excluded categories (and uncategorized sources when
@@ -106,7 +113,8 @@ instead of opening a duplicate request.
     `POST /api/vod/providers/{id}/purge-excluded-content/?dry_run=true`
     (default is preview; `dry_run=false` applies).
     **Back up your database before upgrading** — the first XC import after
-    upgrading applies this cleanup automatically.
+    upgrading applies this cleanup automatically. Proposed upstream in
+    [#39](https://github.com/jstevenscl/vod-manager/pull/39).
   - Possible Metadata Matches:
     - Reciprocal pairs (A→B and B→A) are now listed once.
     - Pairs that share no source language (which the merge always refuses) are
@@ -121,9 +129,10 @@ instead of opening a duplicate request.
     even when a newer import starts. Review timing now starts after enrichment
     instead of wrapping it. A cancelled enrichment (shutdown or redeploy) now
     marks its run as failed instead of leaving it "running".
-  - TMDB review search (needs-review, missing-artwork, AI suggest, bulk AI)
+  - 🔀 TMDB review search (needs-review, missing-artwork, AI suggest, bulk AI)
     strips a trailing year and country tag from the stored name before
-    searching, so titles like `Show (2014) (US)` find their match.
+    searching, so titles like `Show (2014) (US)` find their match. Proposed
+    upstream in [#39](https://github.com/jstevenscl/vod-manager/pull/39).
   - Removed an internal tracker reference from the Language Backfill card text
     and fixed garbled characters (`â€¦`/`â€”`) in the UI.
 
