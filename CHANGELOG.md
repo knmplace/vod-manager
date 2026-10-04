@@ -33,8 +33,10 @@ instead of opening a duplicate request.
 
 ## 2026-10-03 (Episode trickle pacing)
 
-Episode trickle pacing and the credential fix are fork only for now; they will
-be proposed upstream in a separate pull request once validated live.
+The credential fix and the "Provider 5 of 4" label fix are proposed upstream in
+[#40](https://github.com/jstevenscl/vod-manager/pull/40) (follow-up to #39).
+Episode trickle pacing stays fork only: it depends on fork-only episode
+discovery changes that upstream doesn't have.
 
 - ✅ 🔀 **Docker build no longer hangs.** The frontend stage now builds once on
   the runner's native platform instead of under arm64 emulation, and the
@@ -51,18 +53,18 @@ be proposed upstream in a separate pull request once validated live.
     (`episode_trickle_batch`, `episode_trickle_interval_seconds`,
     `episode_trickle_spacing_seconds`).
   - Opening a show still fetches its episodes immediately.
-- ✅ **Provider credentials hidden in "Apply rules" errors.** A failed
+- ✅ 🔀 **Provider credentials hidden in "Apply rules" errors.** A failed
   provider in the apply-rules summary no longer shows the provider's
-  username and password in the error URL.
+  username and password in the error URL. Proposed upstream in [#40](https://github.com/jstevenscl/vod-manager/pull/40).
 - ✅ **Episode trickle no longer collides with "Apply rules".** A trickle
   run that overlapped a catalog import queued episode writes behind the
   import and a few were skipped with "database is locked". The trickle now
   skips its run while a catalog import is in progress, and stops early if
   one starts mid-run; the skipped shows are picked up on the next run.
-- ✅ **"Provider 5 of 4" progress label fixed.** While "Apply rules" finished
+- ✅ 🔀 **"Provider 5 of 4" progress label fixed.** While "Apply rules" finished
   its final category re-sweep, the progress text counted one provider past
   the total and still named the last provider. It now reads "All N
-  provider(s) synced — finalizing…".
+  provider(s) synced — finalizing…". Proposed upstream in [#40](https://github.com/jstevenscl/vod-manager/pull/40).
 
 ## 2026-10-03 (Curation layout)
 
