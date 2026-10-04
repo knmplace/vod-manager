@@ -31,6 +31,18 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-04 (Artwork changes no longer count as catalog changes)
+
+- ✅ **New posters from a provider no longer count as catalog changes.**
+  A refresh now counts a title as changed only when something that affects
+  playback or placement changes: stream id, file type, TMDB id, name,
+  category, or (for series) the provider's new-episodes timestamp. Posters,
+  plots, genres and cast come from TMDB, so a provider swapping its image
+  links no longer marks thousands of titles as changed in Sync History or
+  re-runs TMDB matching for all of them. Titles imported before this change
+  switch over quietly on their next refresh, without being counted as
+  changed.
+
 ## 2026-10-04 (Episode list preloading settings)
 
 - ✅ 🔀 **Episode lists preload about 3x faster, still gently.** Proposed upstream
