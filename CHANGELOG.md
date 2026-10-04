@@ -31,6 +31,21 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-04 (Sync History completeness)
+
+- ✅ **Scheduled refreshes no longer stay "running" in Sync History.** The
+  background refresher finished its import but never closed the run, so a
+  refresh that found nothing new sat at "running" forever. Manual Plex/Emby
+  imports had the same gap. Runs now close as "ready" (or "failed"), and any
+  run a restart leaves open is closed on startup.
+- ✅ **Plex, Emby, Jellyfin and library refreshes now show in Sync History.**
+  Only XC providers wrote a history row; scheduled and Apply-rules refreshes
+  of the other types left no trace. Apply rules also handled library
+  (rclone/SMB) providers as XC, which failed; they now use the library importer.
+- ✅ **Apply rules counts as a catalog refresh.** It re-imports every
+  provider but didn't reset the refresh timer, so the scheduler imported the
+  same provider again shortly after.
+
 ## 2026-10-04 (Series merge keeps provider links)
 
 - ✅ 🔀 **"Apply rules" no longer re-creates the same shows as "new" on every

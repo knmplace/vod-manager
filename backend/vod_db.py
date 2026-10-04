@@ -1404,6 +1404,28 @@ def update_catalog_sync_run(run_id: int, **fields) -> None:
     conn.close()
 
 
+def close_orphaned_catalog_sync_runs() -> int:
+    """Close runs a restart left at "running"; call only at startup.
+
+    KNM: 2026-10-04 -- a run whose import finished counts as ready; one cut
+    off mid-import is failed, so Sync History never shows a run as live
+    when nothing is working on it.
+    """
+    with _WRITE_LOCK:
+        conn = _connect()
+        ready = conn.execute(
+            """UPDATE catalog_sync_runs SET status='ready', ready_at=COALESCE(ready_at, import_finished_at)
+               WHERE status IN ('running','queued') AND import_finished_at IS NOT NULL"""
+        ).rowcount
+        failed = conn.execute(
+            """UPDATE catalog_sync_runs SET status='failed', error='interrupted by restart', ready_at=?
+               WHERE status IN ('running','queued')""",
+            (_now(),),
+        ).rowcount
+        _commit_with_retry(conn)
+        conn.close()
+    return ready + failed
+
 def _catalog_sync_row_detail(conn: sqlite3.Connection, content_type: str, row: sqlite3.Row, summary: dict | None) -> dict:
     """Build durable, user-facing context for one catalog card event."""
     if content_type == "movie":

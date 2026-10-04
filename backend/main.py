@@ -143,14 +143,16 @@ async def _vod_catalog_refresher() -> None:
                 requires_full_resweep = False
                 for p in due:
                     try:
+                        # KNM: 2026-10-04 -- run_tracked_import writes the
+                        # Sync History row XC imports already get.
                         if p.get("provider_type") == "plex":
-                            result = await plex_importer.import_plex_library(p["id"])
+                            result = await vod_importer.run_tracked_import(p["id"], plex_importer.import_plex_library)
                             requires_full_resweep = True
                         elif p.get("provider_type") in ("emby", "jellyfin"):
-                            result = await emby_vod_importer.import_emby_library(p["id"])
+                            result = await vod_importer.run_tracked_import(p["id"], emby_vod_importer.import_emby_library)
                             requires_full_resweep = True
                         elif p.get("provider_type") == "library":
-                            result = await library_importer.import_library(p["id"])
+                            result = await vod_importer.run_tracked_import(p["id"], library_importer.import_library)
                             requires_full_resweep = True
                         else:
                             # Defer enrichment until every due provider's
@@ -454,6 +456,11 @@ async def _tmdb_sync_scheduler() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("VOD Manager started")
+    # KNM: 2026-10-04 -- nothing survives a restart, so any run still marked
+    # "running" in Sync History is stale.
+    closed = await asyncio.to_thread(vod_db.close_orphaned_catalog_sync_runs)
+    if closed:
+        logger.info("Closed %d stale Sync History run(s) left by the previous process", closed)
     tasks = [
         asyncio.create_task(_vod_catalog_refresher()),
         asyncio.create_task(_dispatcharr_dvr_poller()),

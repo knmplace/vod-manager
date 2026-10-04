@@ -1004,7 +1004,7 @@ def mark_import_queued(provider_id: int, provider_name: str, queue_position: int
     _start_catalog_workflow(provider_name, "Waiting to import catalog", queued=True)
 
 
-def mark_import_running(provider_id: int, provider_name: str) -> None:
+def mark_import_running(provider_id: int, provider_name: str) -> int:
     """Expose a non-XC manual import while its provider adapter is running.
 
     XC imports update this state inside import_provider_catalog.  Plex, Emby,
@@ -1022,26 +1022,59 @@ def mark_import_running(provider_id: int, provider_name: str) -> None:
     now = str(time.time())
     _CATALOG_WORKFLOW_PROGRESS["import_started_at"] = time.time()
     vod_db.update_catalog_sync_run(run_id, import_started_at=now)
+    return run_id
 
 
-def mark_import_finished(provider_id: int, error: str | None = None) -> None:
-    """Finish a non-XC manual import without overwriting a newer job's state."""
-    if _IMPORT_PROGRESS.get("provider_id") != provider_id:
+def mark_import_finished(
+    provider_id: int, error: str | None = None, *, run_id: int | None = None, result: dict | None = None,
+) -> None:
+    """Finish a non-XC import without overwriting a newer job's state."""
+    if _IMPORT_PROGRESS.get("provider_id") == provider_id:
+        _IMPORT_PROGRESS.update({
+            "running": False, "queued": False, "queue_position": None,
+            "finished_at": time.time(), "error": error,
+        })
+    elif run_id is None:
         return
-    _IMPORT_PROGRESS.update({
-        "running": False, "queued": False, "queue_position": None,
-        "finished_at": time.time(), "error": error,
-    })
-    run_id = _CATALOG_WORKFLOW_PROGRESS.get("run_id")
-    if run_id:
-        vod_db.update_catalog_sync_run(
-            run_id,
-            import_finished_at=str(time.time()),
-            status="failed" if error else "running",
-            error=error,
-        )
+    run_id = run_id or _CATALOG_WORKFLOW_PROGRESS.get("run_id")
+    if not run_id:
+        return
+    vod_db.update_catalog_sync_run(run_id, import_finished_at=str(time.time()))
     if error:
-        _mark_catalog_workflow_failed(error)
+        _mark_catalog_workflow_failed(error, run_id=run_id)
+        return
+    # KNM: 2026-10-04 -- this used to leave the run at "running" on success;
+    # with no catalog change nothing ever closed it.
+    if result is not None:
+        summary = _catalog_sync_summary(result)
+        vod_db.record_catalog_sync_events(
+            run_id,
+            movie_ids=result.get("changed_movie_ids", []),
+            series_ids=result.get("changed_series_ids", []),
+            created_movie_ids=result.get("created_movie_ids", []),
+            created_series_ids=result.get("created_series_ids", []),
+            summary=summary,
+        )
+        vod_db.update_catalog_sync_run(run_id, summary_json=json.dumps(summary, separators=(",", ":")))
+    mark_catalog_workflow_ready(run_id=run_id)
+
+
+async def run_tracked_import(provider_id: int, importer) -> dict:
+    """Run a Plex/Emby/Jellyfin/library import with a Sync History row.
+
+    KNM: 2026-10-04 -- only XC imports and manual clicks wrote one, so the
+    scheduled refresher and Apply rules left these providers out of history.
+    """
+    provider = await asyncio.to_thread(vod_db.get_provider, provider_id)
+    run_id = mark_import_running(provider_id, provider.get("name") if provider else f"provider {provider_id}")
+    try:
+        result = await importer(provider_id)
+    except Exception as exc:
+        mark_import_finished(provider_id, type(exc).__name__, run_id=run_id)
+        raise
+    mark_import_finished(provider_id, run_id=run_id, result=result)
+    result["catalog_sync_run_id"] = run_id
+    return result
 
 
 def get_process_cpu_percent() -> float | None:
@@ -1122,10 +1155,13 @@ async def import_provider_catalog(provider_id: int, *, schedule_enrichment: bool
                 vod_db.update_catalog_sync_run,
                 run_id, status="ready", ready_at=str(time.time()),
             )
-    elif schedule_enrichment:
+    else:
         # Nothing changed, so there is no enrichment/reconciliation phase to
         # await. Keep the handoff truthful instead of stranding it at the
         # completed provider-import phase.
+        # KNM: 2026-10-04 -- also when the caller defers enrichment (scheduled
+        # refresher, manual queue): nothing else closes this run, so it sat
+        # at "running" in Sync History forever.
         mark_catalog_workflow_ready(run_id=run_id)
         await asyncio.to_thread(vod_db.update_catalog_sync_run, run_id, status="ready", ready_at=str(time.time()))
     return result

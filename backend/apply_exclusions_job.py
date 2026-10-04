@@ -18,6 +18,7 @@ import uuid
 
 import dispatcharr_dvr_importer
 import emby_vod_importer
+import library_importer
 import plex_importer
 import vod_db
 import vod_importer
@@ -38,10 +39,13 @@ async def _run_job(job_id: str) -> None:
         for p in providers:
             job["current_provider"] = p["name"]
             try:
+                # KNM: 2026-10-04 -- tracked so these show in Sync History too.
                 if p.get("provider_type") == "plex":
-                    result = await plex_importer.import_plex_library(p["id"])
+                    result = await vod_importer.run_tracked_import(p["id"], plex_importer.import_plex_library)
                 elif p.get("provider_type") in ("emby", "jellyfin"):
-                    result = await emby_vod_importer.import_emby_library(p["id"])
+                    result = await vod_importer.run_tracked_import(p["id"], emby_vod_importer.import_emby_library)
+                elif p.get("provider_type") == "library":
+                    result = await vod_importer.run_tracked_import(p["id"], library_importer.import_library)
                 elif p.get("provider_type") == "dispatcharr_dvr":
                     # DVR recordings have no language/category exclusion rules
                     # to retroactively apply yet -- this just re-runs the same
@@ -50,6 +54,9 @@ async def _run_job(job_id: str) -> None:
                     result = await dispatcharr_dvr_importer.import_dvr_recordings(p["id"])
                 else:
                     result = await vod_importer.import_provider_catalog(p["id"])
+                # KNM: 2026-10-04 -- this is a full re-import; without the stamp
+                # the scheduled refresher imported the provider again right after.
+                await asyncio.to_thread(vod_db.mark_provider_catalog_refreshed, p["id"])
                 job["results"].append({"provider": p["name"], **result})
             except Exception as exc:
                 # KNM: 2026-10-03 -- httpx errors embed the request URL with the
