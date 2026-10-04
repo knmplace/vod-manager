@@ -14,6 +14,7 @@ import asyncio
 import logging
 import time
 
+import config
 import emby_vod_client
 import vod_db
 import vod_importer
@@ -69,6 +70,7 @@ async def import_emby_library(provider_id: int) -> dict:
     exclude_categories = provider.get("import_exclude_categories") or []
     exclude_uncategorized = bool(provider.get("import_exclude_uncategorized"))
     lang = vod_importer._current_lang_settings()
+    country = config.get_import_country_exclusion()
 
     movie_result = {"movies_created": 0, "movies_matched": 0, "total": 0}
     series_result = {"series_created": 0, "series_matched": 0, "episodes_imported": 0}
@@ -103,7 +105,7 @@ async def import_emby_library(provider_id: int) -> dict:
                     if not stream_id:
                         continue
                     if vod_importer._should_exclude_from_import(
-                        item.get("Name", ""), category_name, exclude_categories, exclude_uncategorized, lang,
+                        item.get("Name", ""), category_name, exclude_categories, exclude_uncategorized, lang, country=country,
                     ):
                         continue
                     fields = emby_vod_client.extract_common_fields(item)
@@ -151,7 +153,7 @@ async def import_emby_library(provider_id: int) -> dict:
                     if not series_id:
                         continue
                     if vod_importer._should_exclude_from_import(
-                        show.get("Name", ""), category_name, exclude_categories, exclude_uncategorized, lang,
+                        show.get("Name", ""), category_name, exclude_categories, exclude_uncategorized, lang, country=country,
                     ):
                         continue
                     fields = emby_vod_client.extract_common_fields(show)

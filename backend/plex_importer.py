@@ -21,6 +21,7 @@ import asyncio
 import logging
 import time
 
+import config
 import plex_client
 import vod_db
 import vod_importer
@@ -86,6 +87,7 @@ async def import_plex_library(provider_id: int) -> dict:
     exclude_categories = provider.get("import_exclude_categories") or []
     exclude_uncategorized = bool(provider.get("import_exclude_uncategorized"))
     lang = vod_importer._current_lang_settings()
+    country = config.get_import_country_exclusion()
 
     movie_result = {"movies_created": 0, "movies_matched": 0, "total": 0}
     series_result = {"series_created": 0, "series_matched": 0, "episodes_imported": 0}
@@ -123,7 +125,7 @@ async def import_plex_library(provider_id: int) -> dict:
                     if not part_key:
                         continue
                     if vod_importer._should_exclude_from_import(
-                        item.get("title", ""), category_name, exclude_categories, exclude_uncategorized, lang,
+                        item.get("title", ""), category_name, exclude_categories, exclude_uncategorized, lang, country=country,
                     ):
                         continue
                     fields = plex_client.extract_common_fields(item)
@@ -163,7 +165,7 @@ async def import_plex_library(provider_id: int) -> dict:
                     if not rating_key:
                         continue
                     if vod_importer._should_exclude_from_import(
-                        show.get("title", ""), category_name, exclude_categories, exclude_uncategorized, lang,
+                        show.get("title", ""), category_name, exclude_categories, exclude_uncategorized, lang, country=country,
                     ):
                         continue
                     fields = plex_client.extract_common_fields(show)

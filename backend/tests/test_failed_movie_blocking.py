@@ -1,4 +1,5 @@
-"""Repeatedly failing every movie fallback must suppress the dead title."""
+"""Movies whose every fallback repeatedly fails should be hidden from
+client listings (stream_blocked) until a source works again."""
 
 
 def test_all_failed_movie_sources_are_blocked_and_a_success_restores_the_title(db):

@@ -60,7 +60,8 @@ def test_successful_successor_clears_obsolete_stream_failure(db):
     db.add_movie_source(movie_id, provider_id, "movie-1")
     db.log_stream_failure(
         "movie", "Example Movie", "relay-user", [{"provider": "provider-a"}],
-        "RemoteProtocolError", movie_id=movie_id, client_ip="192.0.2.10",
+        # KNM: 2026-10-03 upstream v0.2.20 merge -- only recoverable (mid-stream) failures are cleared now.
+        "RemoteProtocolError", movie_id=movie_id, client_ip="192.0.2.10", recoverable=True,
     )
 
     cleared = db.clear_recovered_stream_failures(

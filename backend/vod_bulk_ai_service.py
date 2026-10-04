@@ -169,7 +169,9 @@ async def start_needs_review_bulk_resolve(content_type: str, ids: list[int]) -> 
 
 
 # ---------------------------------------------------------------------------
-# Incorrect TMDB IDs
+# Incorrect TMDB IDs (see vod_db.list_tmdb_lookup_failures / tmdb_sync.
+# TmdbNotFoundError) -- an id that WAS confirmed-valid but TMDB now 404s on,
+# distinct from _resolve_one_needs_review's no-id-at-all case above.
 # ---------------------------------------------------------------------------
 
 async def _resolve_one_tmdb_lookup_failure(content_type: str, item_id: int) -> dict:
@@ -198,7 +200,9 @@ async def _resolve_one_tmdb_lookup_failure(content_type: str, item_id: int) -> d
         result = vod_db.set_tmdb_id(content_type, item_id, int(pick["tmdb_id"]))
     except ValueError as exc:
         return {"id": item_id, "name": item["name"], "status": "error", "detail": str(exc)}
-    return {"id": item_id, "name": item["name"], "status": "resolved", "detail": f"set TMDB ID {pick['tmdb_id']}" if not result.get("merged_into") else f"merged into #{result['merged_into']}"}
+    if result.get("merged_into"):
+        return {"id": item_id, "name": item["name"], "status": "resolved", "detail": f"merged into #{result['merged_into']}"}
+    return {"id": item_id, "name": item["name"], "status": "resolved", "detail": f"set TMDB ID {pick['tmdb_id']}"}
 
 
 async def _run_tmdb_lookup_failure_job(job_id: str, content_type: str, ids: list[int]) -> None:
@@ -209,6 +213,9 @@ async def _run_tmdb_lookup_failure_job(job_id: str, content_type: str, ids: list
             except Exception as exc:
                 result = {"id": item_id, "status": "error", "detail": str(exc)}
             _record(job_id, result)
+    except Exception as exc:
+        _jobs[job_id]["error"] = str(exc)
+        logger.exception("[vod_bulk_ai] tmdb-lookup-failure job %s failed: %s", job_id, exc)
     finally:
         _finish_job(job_id)
 

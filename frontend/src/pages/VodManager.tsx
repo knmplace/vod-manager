@@ -16,7 +16,7 @@ interface Provider {
   max_streams: number
   is_active: number
   priority: number
-  provider_type: 'xc' | 'plex' | 'emby' | 'jellyfin' | 'dispatcharr_dvr'
+  provider_type: 'xc' | 'plex' | 'emby' | 'jellyfin' | 'library' | 'dispatcharr_dvr'
   shared_connection_limit: number | null
   custom_user_agent: string | null
   has_password: boolean
@@ -37,6 +37,9 @@ interface Provider {
   dvr_delete_after_copy: number
   auto_create_categories: number
   archive_new_categories: number
+  library_backend: 'local' | 'smb' | 'sftp' | 's3' | 'gdrive' | 'dropbox' | 'box'
+  library_remote_config: Record<string, unknown>
+  has_library_remote_secret: boolean
 }
 
 interface CatalogSyncEvent {
@@ -298,7 +301,7 @@ interface ActivitySession {
   kind: 'movie' | 'series'
   title: string
   provider_name: string
-  provider_type: 'xc' | 'plex' | 'emby' | 'jellyfin' | 'dispatcharr_dvr'
+  provider_type: 'xc' | 'plex' | 'emby' | 'jellyfin' | 'library' | 'dispatcharr_dvr'
   started_at: number
   bytes_sent: number
   total_bytes: number
@@ -1195,8 +1198,8 @@ interface Category {
   use_ai_evaluation: number
 }
 
-const PROVIDER_TYPE_LABELS: Record<'xc' | 'plex' | 'emby' | 'jellyfin' | 'dispatcharr_dvr', string> = {
-  xc: 'Xtream-Codes', plex: 'Plex', emby: 'Emby', jellyfin: 'Jellyfin', dispatcharr_dvr: 'Dispatcharr DVR',
+const PROVIDER_TYPE_LABELS: Record<'xc' | 'plex' | 'emby' | 'jellyfin' | 'library' | 'dispatcharr_dvr', string> = {
+  xc: 'Xtream-Codes', plex: 'Plex', emby: 'Emby', jellyfin: 'Jellyfin', library: 'Folder (local/SMB/NFS)', dispatcharr_dvr: 'Dispatcharr DVR',
 }
 
 // Best-effort friendly names for provider name-prefix codes (e.g. "AR|",
@@ -1227,6 +1230,22 @@ const LANGUAGE_CODE_NAMES: Record<string, string> = {
   // else entirely for CH, and the rest look like provider-specific
   // shorthand with no reliable interpretation). A wrong guess here is
   // worse than just showing the raw code.
+}
+// Country-of-origin suffix codes (backend _KNOWN_COUNTRY_SUFFIX_CODES,
+// vod_db._country_suffix_code) -- a separate, trailing-tag provider
+// convention from the leading language prefixes above, e.g. "Married at
+// First Sight (NZ)". Kept as its own map rather than reusing
+// LANGUAGE_CODE_NAMES since a few codes overlap but mean something
+// different in this context (GB/UK here is "United Kingdom" the country,
+// not "British English" the language dialect).
+const COUNTRY_CODE_NAMES: Record<string, string> = {
+  US: 'United States', GB: 'United Kingdom', UK: 'United Kingdom', ES: 'Spain',
+  FR: 'France', CA: 'Canada', AU: 'Australia', KR: 'South Korea', IT: 'Italy',
+  DE: 'Germany', MX: 'Mexico', TR: 'Turkey', SE: 'Sweden', BR: 'Brazil',
+  PL: 'Poland', JP: 'Japan', NO: 'Norway', IN: 'India', ZA: 'South Africa',
+  CO: 'Colombia', AR: 'Argentina', DK: 'Denmark', BE: 'Belgium', IL: 'Israel',
+  NL: 'Netherlands', IE: 'Ireland', NZ: 'New Zealand', FI: 'Finland',
+  TH: 'Thailand', IS: 'Iceland', PT: 'Portugal',
 }
 type AiProvider = 'anthropic' | 'openai' | 'gemini'
 const AI_PROVIDER_DEFAULT_MODELS: Record<AiProvider, string> = {
@@ -2045,12 +2064,33 @@ function DuplicateGroupRow({ group, contentType, xcCredentials, onMerge, isPendi
   }
   const sameTmdbMatch = [...tmdbIdCounts.values()].some((c) => c > 1)
 
+  // Real gap found live 2026-09-17: "Merge into selected" always merged
+  // EVERY other item in the group into the keep pick, with no way to act on
+  // a subset -- a real problem the moment a group has 3+ items and only
+  // some of them are true matches (found live: a base-name-only pass 5
+  // candidate mixing a genuine pair with an unrelated third title). All
+  // items start checked (so a normal 2-item group behaves exactly like
+  // before, zero extra clicks), and both Merge and Ignore below now act on
+  // only the checked subset -- an unchecked item is left completely
+  // untouched (not merged, not dismissed), free to resurface however the
+  // next scan groups it.
+  const [checkedIds, setCheckedIds] = useState<Set<number>>(() => new Set(group.items.map((i) => i.id)))
+  const toggleChecked = (id: number) => setCheckedIds((prev) => {
+    const next = new Set(prev)
+    if (next.has(id)) next.delete(id); else next.add(id)
+    return next
+  })
+  const checkedItems = group.items.filter((i) => checkedIds.has(i.id))
+
   // Backend sorts most-sourced/most-placed first, but that ignores TMDB
   // confirmation entirely -- an unconfirmed candidate with more sources used
   // to beat a TMDB-confirmed one for the default "keep" pick. Rank by TMDB
   // signal first (corroborated match > uncorroborated match > no signal
   // either way > year mismatch > confirmed-wrong while a sibling matches),
   // falling back to the backend's source/category order within a tier.
+  // Corroboration (tmdbIdCounts) is deliberately still read from the WHOLE
+  // group, not just the checked subset -- unchecking a sibling doesn't
+  // un-corroborate a shared id, that's still real evidence either way.
   const rankTmdbTier = (item: DuplicateGroup['items'][number]) => {
     const trueYear = item.tmdb_id ? tmdbDetails?.[item.tmdb_id]?.year : undefined
     const corroborated = item.tmdb_id != null && (tmdbIdCounts.get(item.tmdb_id) ?? 0) > 1
@@ -2063,18 +2103,32 @@ function DuplicateGroupRow({ group, contentType, xcCredentials, onMerge, isPendi
     if (noMatchWhileSiblingHas) return -1
     return 1 // no tmdb signal either way -- neutral, defer to source/category order
   }
-  const bestDefaultId = group.items.reduce(
+  // "Keep" is scoped to the checked subset -- an unchecked item can never be
+  // the default (or a stale manual) keep pick. Falls back to the full group
+  // only in the (unreachable via UI, since unchecking below the last two
+  // items disables the checkbox) edge case of zero checked items.
+  const keepCandidates = checkedItems.length ? checkedItems : group.items
+  const bestDefaultId = keepCandidates.reduce(
     (best, item) => (rankTmdbTier(item) > rankTmdbTier(best) ? item : best),
-    group.items[0],
+    keepCandidates[0],
   ).id
   const [keepId, setKeepId] = useState(bestDefaultId)
   const [userPickedKeep, setUserPickedKeep] = useState(false)
   useEffect(() => {
+    // Current keep just got unchecked -- it can't stay keep, and a
+    // reviewer's earlier manual pick no longer applies to this new subset,
+    // so fall back to the best remaining checked candidate and let
+    // auto-ranking resume.
+    if (!checkedIds.has(keepId)) {
+      setKeepId(bestDefaultId)
+      setUserPickedKeep(false)
+      return
+    }
     // tmdbDetails resolves asynchronously after this group first renders;
     // re-rank once it lands, but never override a reviewer's manual pick.
     if (!userPickedKeep) setKeepId(bestDefaultId)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bestDefaultId, userPickedKeep])
+  }, [bestDefaultId, userPickedKeep, checkedIds])
   const [previewIds, setPreviewIds] = useState<Set<number>>(new Set())
   const togglePreview = (id: number) => setPreviewIds((prev) => {
     const next = new Set(prev)
@@ -2108,7 +2162,14 @@ function DuplicateGroupRow({ group, contentType, xcCredentials, onMerge, isPendi
   const artworkMatches = group.items.some((item) => item.poster_url && (posterCounts.get(item.poster_url) ?? 0) > 1)
 
   return (
-    <div className="border border-border rounded px-2 py-1.5 space-y-1.5">
+    // bg-card + shadow-sm (both absent before) give each group its own
+    // clearly-bounded card against the page background, on top of the
+    // wider inter-group gap at the call site -- see that comment for why
+    // (two adjacent correct-but-separate groups misread as one, live
+    // 2026-09-17). User feedback the same day, after seeing this live: the
+    // card boundary alone is unambiguous enough now -- a "Group N of M"
+    // text label on top of it was redundant, not a needed fallback.
+    <div className="border border-border rounded-lg bg-card shadow-sm px-2.5 py-2 space-y-1.5">
       <div className="flex items-center gap-1.5 flex-wrap">
         {sameTmdbMatch && (
           <span className="text-[10px] font-normal px-1.5 py-0.5 rounded-full bg-blue-500/15 text-blue-400 border border-blue-500/30">
@@ -2145,12 +2206,26 @@ function DuplicateGroupRow({ group, contentType, xcCredentials, onMerge, isPendi
         // see _split_by_tmdb_conflict).
         const isCorroborated = item.tmdb_id != null && (tmdbIdCounts.get(item.tmdb_id) ?? 0) > 1
         const otherHasTmdbId = group.items.some((other) => other.id !== item.id && other.tmdb_id != null)
+        const isChecked = checkedIds.has(item.id)
         return (
-          <div key={item.id} className="flex gap-2">
+          <div key={item.id} className={`flex gap-2 ${isChecked ? '' : 'opacity-50'}`}>
+            <input
+              type="checkbox"
+              className="mt-1.5 shrink-0"
+              checked={isChecked}
+              onChange={() => toggleChecked(item.id)}
+              title="Include this candidate in Merge selected / Ignore selected below -- uncheck it to leave it completely untouched instead"
+            />
             <PosterThumb url={item.poster_url} className="w-12 h-[72px] object-cover rounded shrink-0" fallback={null} />
             <div className="flex-1 min-w-0">
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input type="radio" checked={keepId === item.id} onChange={() => { setKeepId(item.id); setUserPickedKeep(true) }} />
+              <label className={`flex items-center gap-2 ${isChecked ? 'cursor-pointer' : 'cursor-not-allowed'}`}>
+                <input
+                  type="radio"
+                  checked={keepId === item.id}
+                  disabled={!isChecked}
+                  onChange={() => { setKeepId(item.id); setUserPickedKeep(true) }}
+                  title={isChecked ? undefined : 'Unchecked candidates can\'t be the keep pick'}
+                />
                 <span className={keepId === item.id ? 'font-medium' : ''}>{item.name}{item.year && !item.name.trim().endsWith(`(${item.year})`) ? ` (${item.year})` : ''}</span>
                 <span className="text-muted-foreground">
                   {item.source_count} source{item.source_count === 1 ? '' : 's'} · {item.category_count} categor{item.category_count === 1 ? 'y' : 'ies'}
@@ -2214,21 +2289,26 @@ function DuplicateGroupRow({ group, contentType, xcCredentials, onMerge, isPendi
       <div className="flex items-center gap-1.5">
         <Button
           size="sm"
-          disabled={isPending}
-          onClick={() => onMerge(keepId, group.items.filter((i) => i.id !== keepId).map((i) => i.id))}
+          disabled={isPending || checkedItems.length < 2}
+          title={checkedItems.length < 2 ? 'Check at least 2 candidates to merge' : undefined}
+          onClick={() => onMerge(keepId, checkedItems.filter((i) => i.id !== keepId).map((i) => i.id))}
         >
           {isPending ? <Loader2 size={12} className="animate-spin mr-1" /> : null}
-          Merge into selected
+          Merge selected{checkedItems.length < group.items.length ? ` (${checkedItems.length})` : ''}
         </Button>
         <Button
           size="sm"
           variant="outline"
-          disabled={isIgnorePending}
-          title="Not actually duplicates -- dismiss this group so it stops resurfacing"
-          onClick={() => onIgnore(group.items.map((i) => i.id))}
+          disabled={isIgnorePending || checkedItems.length < 2}
+          title={
+            checkedItems.length < 2
+              ? 'Check at least 2 candidates to dismiss as not-duplicates'
+              : 'Not actually duplicates of each other -- dismiss the checked candidates so this exact pairing stops resurfacing (any unchecked candidate is left untouched)'
+          }
+          onClick={() => onIgnore(checkedItems.map((i) => i.id))}
         >
           {isIgnorePending ? <Loader2 size={12} className="animate-spin mr-1" /> : null}
-          Ignore
+          Ignore selected{checkedItems.length < group.items.length ? ` (${checkedItems.length})` : ''}
         </Button>
       </div>
     </div>
@@ -5168,6 +5248,67 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
       )
     })
   }
+  // Import Country Exclusion -- sibling to Import Language Exclusion above,
+  // same shape/pattern, keyed on a title's trailing "(<country code>)" tag
+  // instead of a leading language prefix. Real motivating case: an
+  // internationally-franchised show importing several genuinely-different
+  // country editions under the same base title, with no way to keep just
+  // the ones wanted without archiving them one at a time by hand.
+  const importCountryExclusionQuery = useQuery<{ exclude_country_codes: string[] }>({
+    queryKey: ['vod-import-country-exclusion'],
+    queryFn:  () => api.get('/vod/import-country-exclusion/').then((r) => r.data),
+  })
+  const countryCodesQuery = useQuery<{ code: string; count: number }[]>({
+    queryKey: ['vod-import-country-codes'],
+    queryFn:  () => api.get('/vod/import-country-exclusion/codes/').then((r) => r.data),
+  })
+  const saveImportCountryExclusion = useMutation({
+    mutationFn: (body: { exclude_country_codes: string[] }) =>
+      api.post('/vod/import-country-exclusion/', body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vod-import-country-exclusion'] }),
+  })
+  const [countrySearch, setCountrySearch] = useState('')
+  const [countryShowFilter, setCountryShowFilter] = useState<'all' | 'selected' | 'unselected'>('all')
+  const [countryDraft, setCountryDraft] = useState<Set<string>>(new Set())
+  const [countryLastClickedIndex, setCountryLastClickedIndex] = useState<number | null>(null)
+  const countryDraftInitialized = useRef(false)
+  useEffect(() => {
+    if (countryDraftInitialized.current || !importCountryExclusionQuery.data) return
+    countryDraftInitialized.current = true
+    setCountryDraft(new Set(importCountryExclusionQuery.data.exclude_country_codes))
+  }, [importCountryExclusionQuery.data])
+  const allCountryCodes = (() => {
+    const counts = new Map((countryCodesQuery.data ?? []).map((p) => [p.code, p.count]))
+    for (const code of importCountryExclusionQuery.data?.exclude_country_codes ?? []) {
+      if (!counts.has(code)) counts.set(code, 0)
+    }
+    return [...counts.entries()]
+      .map(([code, count]) => ({ code, count }))
+      .sort((a, b) => b.count - a.count || a.code.localeCompare(b.code))
+  })()
+  const visibleCountryCodes = allCountryCodes.filter((c) => {
+    const label = `${c.code} ${COUNTRY_CODE_NAMES[c.code] ?? ''}`.toLowerCase()
+    if (countrySearch && !label.includes(countrySearch.toLowerCase())) return false
+    if (countryShowFilter === 'selected' && !countryDraft.has(c.code)) return false
+    if (countryShowFilter === 'unselected' && countryDraft.has(c.code)) return false
+    return true
+  })
+  function toggleCountrySelected(code: string, index: number, shiftKey: boolean) {
+    const willBeChecked = !countryDraft.has(code)
+    const next = new Set(countryDraft)
+    if (shiftKey && countryLastClickedIndex != null) {
+      const [start, end] = [countryLastClickedIndex, index].sort((a, b) => a - b)
+      for (let j = start; j <= end; j++) {
+        const c = visibleCountryCodes[j]?.code
+        if (c == null) continue
+        if (willBeChecked) next.add(c); else next.delete(c)
+      }
+    } else {
+      if (willBeChecked) next.add(code); else next.delete(code)
+    }
+    setCountryDraft(next)
+    setCountryLastClickedIndex(index)
+  }
   const [applyExclusionsJobId, setApplyExclusionsJobId] = useState<string | null>(null)
   const applyImportExclusionsNow = useMutation({
     mutationFn: () => api.post('/vod/import-exclusions/apply-now/'),
@@ -5425,22 +5566,41 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
     queryKey: ['vod-providers'],
     queryFn:  () => api.get('/vod/providers/').then((r) => r.data),
   })
+  type LibraryBackend = 'local' | 'smb' | 'sftp' | 's3' | 'gdrive' | 'dropbox' | 'box'
+  const REMOTE_BACKENDS: LibraryBackend[] = ['smb', 'sftp', 's3', 'gdrive', 'dropbox', 'box']
   const [providerForm, setProviderForm] = useState({
     name: '', base_url: '', username: '', password: '', max_streams: '0', priority: '0',
-    provider_type: 'xc' as 'xc' | 'plex' | 'emby' | 'jellyfin',
+    provider_type: 'xc' as 'xc' | 'plex' | 'emby' | 'jellyfin' | 'library',
+    library_backend: 'local' as LibraryBackend,
   })
+  const [libraryRemote, setLibraryRemote] = useState({
+    host: '', port: '', share: '', domain: '', path: '',
+    bucket: '', region: '', endpoint: '', s3_provider: '',
+    token: '', client_id: '',
+  })
+  const isRemoteLibrary = providerForm.provider_type === 'library' && REMOTE_BACKENDS.includes(providerForm.library_backend)
+  const isOAuthLibrary = providerForm.provider_type === 'library' && ['gdrive', 'dropbox', 'box'].includes(providerForm.library_backend)
   const addProvider = useMutation({
     mutationFn: () => api.post('/vod/providers/', {
       name: providerForm.name,
       base_url: providerForm.base_url,
-      username: providerForm.provider_type === 'xc' ? providerForm.username : '',
+      username: providerForm.provider_type === 'xc' || (isRemoteLibrary && !isOAuthLibrary) ? providerForm.username : '',
       password: providerForm.password,
       max_streams: Number(providerForm.max_streams) || 0,
       priority: Number(providerForm.priority) || 0, provider_type: providerForm.provider_type,
+      library_backend: providerForm.provider_type === 'library' ? providerForm.library_backend : 'local',
+      library_remote_config: isRemoteLibrary ? {
+        host: libraryRemote.host || undefined, port: libraryRemote.port ? Number(libraryRemote.port) : undefined,
+        share: libraryRemote.share || undefined, domain: libraryRemote.domain || undefined, path: libraryRemote.path || undefined,
+        bucket: libraryRemote.bucket || undefined, region: libraryRemote.region || undefined,
+        endpoint: libraryRemote.endpoint || undefined, s3_provider: libraryRemote.s3_provider || undefined,
+        token: libraryRemote.token || undefined, client_id: libraryRemote.client_id || undefined,
+      } : {},
     }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['vod-providers'] })
-      setProviderForm({ name: '', base_url: '', username: '', password: '', max_streams: '0', priority: '0', provider_type: 'xc' })
+      setProviderForm({ name: '', base_url: '', username: '', password: '', max_streams: '0', priority: '0', provider_type: 'xc', library_backend: 'local' })
+      setLibraryRemote({ host: '', port: '', share: '', domain: '', path: '', bucket: '', region: '', endpoint: '', s3_provider: '', token: '', client_id: '' })
     },
   })
   const syncProvider = useMutation({
@@ -5498,6 +5658,22 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
     queryKey: ['vod-provider-available-categories', excludeCategoriesProviderId],
     queryFn:  () => api.get(`/vod/providers/${excludeCategoriesProviderId}/available-categories/`).then((r) => r.data),
     enabled:  excludeCategoriesProviderId != null,
+    // Real bug found live 2026-09-17: this hits the provider's own API
+    // fresh every time (get_vod_categories/get_series_categories, not a
+    // cached snapshot -- see the backend route's docstring). React Query's
+    // default refetchOnWindowFocus:true meant switching windows (e.g. to
+    // take a screenshot) while the picker was open silently refetched live
+    // from the provider mid-session -- if that provider's own category
+    // list had shifted even slightly, the sorted list reordered/added/
+    // removed entries under the user, making checked boxes appear to
+    // randomly flip position while scrolling even though their actual
+    // saved selection never changed. Worse, saving while looking at a
+    // stale mid-refetch snapshot could silently save a wrong exclusion
+    // list. Deliberately NOT also setting staleTime:Infinity -- this still
+    // refetches fresh every time the picker is opened (enabled flips
+    // false->true, default staleTime:0 means that's still "stale"), just
+    // never again while it stays open and mounted.
+    refetchOnWindowFocus: false,
   })
   const setProviderImportExcludeCategories = useMutation({
     mutationFn: ({ id, category_names, exclude_uncategorized }: { id: number; category_names: string[]; exclude_uncategorized: boolean }) =>
@@ -6379,12 +6555,12 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
   // client-side against the cursor-paginated bulk-apply endpoint so one
   // huge library doesn't have to fit in a single request.
   //
-  // #knm (beads-bzg.5): a single batch's TMDB round-trip can run long
-  // enough to hit a reverse-proxy timeout (504) -- not a TMDB rate-limit
-  // (that's 429), just one slow batch. Batch size dropped 100->60 to make
-  // that less likely, each batch gets a few retries with backoff before
-  // giving up, and afterId is kept in state on failure so a "Resume" action
-  // can continue from there instead of restarting the whole scan at id 0.
+  // A single batch's TMDB round-trip can run long enough to hit a
+  // reverse-proxy timeout (504) -- not a TMDB rate-limit (that's 429), just
+  // one slow batch. Batch size dropped 100->60 to make that less likely,
+  // each batch gets a few retries with backoff before giving up, and
+  // afterId is kept in state on failure so a "Resume" action can continue
+  // from there instead of restarting the whole scan at id 0.
   const TMDB_BULK_APPLY_BATCH_SIZE = 60
   const TMDB_BULK_APPLY_MAX_RETRIES = 3
   const [tmdbBulkApply, setTmdbBulkApply] = useState<Record<'movie' | 'series', { running: boolean; checked: number; renamed: number; noChange: number; errors: number; errorSamples: string[]; afterId: number; totalInDb?: number; error?: string } | null>>({ movie: null, series: null })
@@ -7777,12 +7953,12 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
           Hide adult titles
           {metadataHideAdult && <span>({hiddenAdultMetadataCount} adult title{hiddenAdultMetadataCount === 1 ? '' : 's'} hidden; {filteredMetadataItems.length} shown of {metadataItems.length})</span>}
         </label>}
-        {activeMetadataQuery.isLoading && <p className="text-xs text-muted-foreground">Loading review queueâ€¦</p>}
+        {activeMetadataQuery.isLoading && <p className="text-xs text-muted-foreground">Loading review queue…</p>}
         {activeMetadataQuery.isError && <p className="text-xs text-destructive">Could not load the metadata review queue.</p>}
         {activeMetadataQuery.data && (
           <>
             {filteredMetadataItems.length === 0 ? (
-              <p className="text-xs text-muted-foreground pt-1">{hideAdultsInMetadata ? 'No non-adult titles match this review queue.' : 'Clean â€” no active titles need review.'}</p>
+              <p className="text-xs text-muted-foreground pt-1">{hideAdultsInMetadata ? 'No non-adult titles match this review queue.' : 'Clean — no active titles need review.'}</p>
             ) : (
               <>
                 <div className="flex items-center gap-2 flex-wrap rounded border border-primary/30 bg-primary/5 px-2 py-1.5 text-xs">
@@ -8086,7 +8262,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
       <>
       <SectionCard title="Providers" icon={<RefreshCw size={14} />}>
         <p className="text-sm text-muted-foreground">
-          Every catalog source feeding the pool -- Xtream Codes, Plex, Emby, Jellyfin. (DVR is enabled per Dispatcharr
+          Every catalog source feeding the pool -- Xtream Codes, Plex, Emby, Jellyfin, or a folder of your own files (local, SMB or NFS mount). (DVR is enabled per Dispatcharr
           connection in Configuration, not added here.)
         </p>
         <div className="overflow-x-auto rounded-xl border border-border">
@@ -8122,7 +8298,12 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
                         if (v && v !== p.name) setProviderName.mutate({ id: p.id, name: v })
                       }}
                     />
-                    {p.provider_type !== 'xc' && <Chip>{PROVIDER_TYPE_LABELS[p.provider_type]}</Chip>}
+                    {p.provider_type !== 'xc' && (
+                      <Chip>
+                        {PROVIDER_TYPE_LABELS[p.provider_type]}
+                        {p.provider_type === 'library' && p.library_backend !== 'local' && ` (${p.library_backend})`}
+                      </Chip>
+                    )}
                     <StatusPill tone={p.is_active ? 'success' : 'destructive'} label={p.is_active ? 'Active' : 'Inactive'} />
                   </span>
                 </td>
@@ -8310,13 +8491,16 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
                   />
                 </td>
                 <td className="py-1 flex items-center gap-1.5">
-                  <Button size="sm" variant="outline" disabled={syncProvider.isPending} onClick={() => syncProvider.mutate(p.id)}>
-                    Sync
-                  </Button>
+                  {p.provider_type !== 'library' && (
+                    <Button size="sm" variant="outline" disabled={syncProvider.isPending} onClick={() => syncProvider.mutate(p.id)}>
+                      Sync
+                    </Button>
+                  )}
                   <Button size="sm" variant="outline" disabled={importingId === p.id} onClick={() => importCatalog.mutate(p.id)}>
                     {importingId === p.id ? <Loader2 size={12} className="animate-spin mr-1" /> : <Download size={12} className="mr-1" />}
                     Import catalog
                   </Button>
+                  {p.provider_type !== 'library' && (<>
                   <Button
                     size="sm" variant="outline"
                     title="Categories to auto-archive on import, as this provider itself names them"
@@ -8356,6 +8540,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
                     />
                     Archive new categories
                   </label>
+                  </>)}
                   <Button
                     size="sm" variant="outline" disabled={toggleProviderActive.isPending}
                     onClick={() => toggleProviderActive.mutate({ id: p.id, active: !p.is_active })}
@@ -8380,37 +8565,104 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
           <select
             className={inputCls()}
             value={providerForm.provider_type}
-            onChange={(e) => setProviderForm({ ...providerForm, provider_type: e.target.value as 'xc' | 'plex' | 'emby' | 'jellyfin' })}
+            onChange={(e) => setProviderForm({ ...providerForm, provider_type: e.target.value as 'xc' | 'plex' | 'emby' | 'jellyfin' | 'library' })}
           >
             <option value="xc">Xtream-Codes</option>
             <option value="plex">Plex</option>
             <option value="emby">Emby</option>
             <option value="jellyfin">Jellyfin</option>
+            <option value="library">Folder / SMB / SFTP / Cloud</option>
           </select>
           <input className={inputCls()} placeholder="Name" value={providerForm.name} onChange={(e) => setProviderForm({ ...providerForm, name: e.target.value })} />
-          <input
-            className={inputCls()}
-            placeholder={providerForm.provider_type === 'plex' ? 'Base URL (e.g. https://plex.example.com)' : providerForm.provider_type === 'xc' ? 'Base URL' : 'Base URL (e.g. http://host:8096)'}
-            value={providerForm.base_url}
-            onChange={(e) => setProviderForm({ ...providerForm, base_url: e.target.value })}
-          />
-          {providerForm.provider_type === 'xc' && (
-            <input className={inputCls()} placeholder="Username" value={providerForm.username} onChange={(e) => setProviderForm({ ...providerForm, username: e.target.value })} />
+          {providerForm.provider_type === 'library' && (
+            <select
+              className={inputCls()}
+              value={providerForm.library_backend}
+              onChange={(e) => setProviderForm({ ...providerForm, library_backend: e.target.value as LibraryBackend })}
+              title="Where this library's files actually live"
+            >
+              <option value="local">Local folder / mounted path</option>
+              <option value="smb">SMB / CIFS share</option>
+              <option value="sftp">SFTP server</option>
+              <option value="s3">S3-compatible (AWS, MinIO, Wasabi, B2, ...)</option>
+              <option value="gdrive">Google Drive</option>
+              <option value="dropbox">Dropbox</option>
+              <option value="box">Box</option>
+            </select>
           )}
-          <input
+          {(providerForm.provider_type !== 'library' || providerForm.library_backend === 'local') && (
+            <input
+              className={inputCls()}
+              placeholder={providerForm.provider_type === 'plex' ? 'Base URL (e.g. https://plex.example.com)' : providerForm.provider_type === 'xc' ? 'Base URL' : providerForm.provider_type === 'library' ? 'Folder path inside the container (e.g. /mnt/media)' : 'Base URL (e.g. http://host:8096)'}
+              value={providerForm.base_url}
+              onChange={(e) => setProviderForm({ ...providerForm, base_url: e.target.value })}
+            />
+          )}
+          {(providerForm.provider_type === 'xc' || (isRemoteLibrary && !isOAuthLibrary)) && (
+            <input className={inputCls()} placeholder={isRemoteLibrary ? (providerForm.library_backend === 's3' ? 'Access key ID' : 'Username') : 'Username'} value={providerForm.username} onChange={(e) => setProviderForm({ ...providerForm, username: e.target.value })} />
+          )}
+          {providerForm.provider_type !== 'library' && <input
             className={inputCls()}
             type="password"
             placeholder={providerForm.provider_type === 'plex' ? 'Plex token (X-Plex-Token)' : providerForm.provider_type === 'xc' ? 'Password' : 'API key'}
             value={providerForm.password}
             onChange={(e) => setProviderForm({ ...providerForm, password: e.target.value })}
-          />
+          />}
+          {isRemoteLibrary && !isOAuthLibrary && (
+            <input
+              className={inputCls()}
+              type="password"
+              placeholder={providerForm.library_backend === 's3' ? 'Secret access key' : 'Password'}
+              value={providerForm.password}
+              onChange={(e) => setProviderForm({ ...providerForm, password: e.target.value })}
+            />
+          )}
+          {(providerForm.library_backend === 'smb' || providerForm.library_backend === 'sftp') && isRemoteLibrary && (
+            <input className={inputCls()} placeholder="Host (e.g. nas.local or 192.168.1.10)" value={libraryRemote.host} onChange={(e) => setLibraryRemote({ ...libraryRemote, host: e.target.value })} />
+          )}
+          {providerForm.library_backend === 'sftp' && isRemoteLibrary && (
+            <input className={inputCls('w-20')} type="number" placeholder="Port (22)" value={libraryRemote.port} onChange={(e) => setLibraryRemote({ ...libraryRemote, port: e.target.value })} />
+          )}
+          {providerForm.library_backend === 'smb' && isRemoteLibrary && (
+            <>
+              <input className={inputCls()} placeholder="Share name (e.g. media)" value={libraryRemote.share} onChange={(e) => setLibraryRemote({ ...libraryRemote, share: e.target.value })} />
+              <input className={inputCls()} placeholder="Domain/workgroup (optional)" value={libraryRemote.domain} onChange={(e) => setLibraryRemote({ ...libraryRemote, domain: e.target.value })} />
+            </>
+          )}
+          {(providerForm.library_backend === 'smb' || providerForm.library_backend === 'sftp') && isRemoteLibrary && (
+            <input className={inputCls()} placeholder="Path within the share (optional)" value={libraryRemote.path} onChange={(e) => setLibraryRemote({ ...libraryRemote, path: e.target.value })} />
+          )}
+          {providerForm.library_backend === 's3' && (
+            <>
+              <input className={inputCls()} placeholder="Bucket" value={libraryRemote.bucket} onChange={(e) => setLibraryRemote({ ...libraryRemote, bucket: e.target.value })} />
+              <input className={inputCls()} placeholder="Path within bucket (optional)" value={libraryRemote.path} onChange={(e) => setLibraryRemote({ ...libraryRemote, path: e.target.value })} />
+              <input className={inputCls()} placeholder="Region (optional)" value={libraryRemote.region} onChange={(e) => setLibraryRemote({ ...libraryRemote, region: e.target.value })} />
+              <input className={inputCls()} placeholder="Endpoint (for non-AWS, e.g. MinIO/Wasabi/B2 URL)" value={libraryRemote.endpoint} onChange={(e) => setLibraryRemote({ ...libraryRemote, endpoint: e.target.value })} />
+            </>
+          )}
+          {isOAuthLibrary && (
+            <>
+              <textarea
+                className={inputCls() + ' w-full min-h-[60px] font-mono text-xs'}
+                placeholder={'Paste the token JSON from running `rclone authorize ' + (providerForm.library_backend === 'gdrive' ? 'drive' : providerForm.library_backend) + '` on your own machine (opens a browser to sign in -- nothing here ever sees your real login)'}
+                value={libraryRemote.token}
+                onChange={(e) => setLibraryRemote({ ...libraryRemote, token: e.target.value })}
+              />
+              <input className={inputCls()} placeholder="Path within the remote (optional)" value={libraryRemote.path} onChange={(e) => setLibraryRemote({ ...libraryRemote, path: e.target.value })} />
+            </>
+          )}
           <input className={inputCls('w-24')} type="number" placeholder="Max streams" value={providerForm.max_streams} onChange={(e) => setProviderForm({ ...providerForm, max_streams: e.target.value })} />
           <input className={inputCls('w-20')} type="number" placeholder="Priority" value={providerForm.priority} onChange={(e) => setProviderForm({ ...providerForm, priority: e.target.value })} />
           <Button
             size="sm"
             disabled={
               !providerForm.name || addProvider.isPending ||
-              !providerForm.base_url || !providerForm.password || (providerForm.provider_type === 'xc' && !providerForm.username)
+              (providerForm.provider_type !== 'library' && (!providerForm.base_url || !providerForm.password)) ||
+              (providerForm.provider_type === 'xc' && !providerForm.username) ||
+              (providerForm.provider_type === 'library' && providerForm.library_backend === 'local' && !providerForm.base_url) ||
+              (providerForm.provider_type === 'library' && (providerForm.library_backend === 'smb' || providerForm.library_backend === 'sftp') && !libraryRemote.host) ||
+              (providerForm.provider_type === 'library' && providerForm.library_backend === 's3' && !libraryRemote.bucket) ||
+              (isOAuthLibrary && !libraryRemote.token)
             }
             onClick={() => addProvider.mutate()}
           >
@@ -8916,6 +9168,82 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
             </span>
           </div>
         ))}
+      </SectionCard>
+
+      <SectionCard title="Import Country Exclusion" icon={<Trash2 size={14} />}>
+        <p className="text-xs text-muted-foreground">
+          Sibling to Import Language Exclusion above, same rule either way (archives on import, never deletes, never
+          overrides a manual un-archive) — but keyed on a title's trailing "(XX)" country-of-origin tag instead of a
+          leading language prefix. Useful for an internationally-franchised show that imports several genuinely
+          different country editions under the same base title — check the ones you don't want and only those
+          editions get auto-archived, the rest of the catalog is untouched.
+        </p>
+        {allCountryCodes.length > 0 ? (
+          <>
+            <div className="flex items-center gap-1.5">
+              <input
+                className={inputCls('flex-1')}
+                placeholder="Search countries…"
+                value={countrySearch}
+                onChange={(e) => setCountrySearch(e.target.value)}
+              />
+              <div className="flex items-center gap-0.5 rounded border border-border p-0.5">
+                {(['all', 'selected', 'unselected'] as const).map((f) => (
+                  <button
+                    key={f}
+                    className={`px-1.5 py-0.5 rounded text-[10px] transition-colors ${countryShowFilter === f ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+                    onClick={() => setCountryShowFilter(f)}
+                  >
+                    {f === 'all' ? 'All' : f === 'selected' ? 'Selected' : 'Unselected'}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5 text-xs">
+              <button
+                className="text-muted-foreground hover:text-foreground underline decoration-dotted"
+                onClick={() => setCountryDraft(new Set([...countryDraft, ...visibleCountryCodes.map((c) => c.code)]))}
+              >
+                Select visible ({visibleCountryCodes.length})
+              </button>
+              <button
+                className="text-muted-foreground hover:text-foreground underline decoration-dotted"
+                onClick={() => { const next = new Set(countryDraft); visibleCountryCodes.forEach((c) => next.delete(c.code)); setCountryDraft(next) }}
+              >
+                Deselect visible ({visibleCountryCodes.filter((c) => countryDraft.has(c.code)).length})
+              </button>
+              <span className="text-muted-foreground ml-auto">{countryDraft.size} selected total · shift-click to select a range</span>
+            </div>
+            <div className="max-h-48 overflow-y-auto space-y-0.5 border border-border rounded p-2 text-xs">
+              {visibleCountryCodes.map((c, i) => (
+                <label key={c.code} className="flex items-center gap-1.5 select-none">
+                  <input
+                    type="checkbox"
+                    checked={countryDraft.has(c.code)}
+                    onChange={() => {}}
+                    onClick={(e) => toggleCountrySelected(c.code, i, e.shiftKey)}
+                  />
+                  <span className="font-mono">{c.code}</span>
+                  {COUNTRY_CODE_NAMES[c.code] && <span className="text-muted-foreground">— {COUNTRY_CODE_NAMES[c.code]}</span>}
+                  <span className="text-muted-foreground ml-auto">{c.count > 0 ? `${c.count} title${c.count === 1 ? '' : 's'}` : 'not currently in pool'}</span>
+                </label>
+              ))}
+              {visibleCountryCodes.length === 0 && <p className="text-muted-foreground">No countries match.</p>}
+            </div>
+          </>
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            No titles in the pool carry a recognized trailing country tag (e.g. "Title (US)", "Title (NZ)").
+          </p>
+        )}
+        <Button
+          size="sm"
+          disabled={saveImportCountryExclusion.isPending}
+          onClick={() => saveImportCountryExclusion.mutate({ exclude_country_codes: [...countryDraft] })}
+        >
+          {saveImportCountryExclusion.isPending ? <Loader2 size={12} className="animate-spin mr-1" /> : null}
+          Save selected countries
+        </Button>
       </SectionCard>
       </>
       )}
@@ -10207,7 +10535,18 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
           // already walked the whole pool in one query; thousands of groups
           // in the DOM at once (not just in memory) is what actually made
           // the page unusably slow, so only render one page's worth.
-          <div className="text-xs space-y-1.5">
+          //
+          // space-y-3 (up from space-y-1.5), not just cosmetic: a real user
+          // found live 2026-09-17 that two adjacent, CORRECT, separate
+          // 2-item groups (an unrelated same-base-name show's AU pair next
+          // to its NZ pair) were misread as one 4-item group -- the cards'
+          // subtle shared border + ~6px gap gave no reliable boundary. The
+          // wider gap here plus each card's own bg-card/shadow (see
+          // DuplicateGroupRow) together make the boundary unambiguous. A
+          // "Group N of M" text label was tried first but dropped same-day
+          // on user feedback -- the card boundary alone reads fine live,
+          // the label was redundant clutter once seen in the actual UI.
+          <div className="text-xs space-y-3">
             {duplicatesPageItems.map((group) => (
               <DuplicateGroupRow
                 key={group.items.map((i) => i.id).join('-')}

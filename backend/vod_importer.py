@@ -98,7 +98,8 @@ def _current_lang_settings() -> dict:
 
 def _should_exclude_from_import(
     name: str, provider_category_name: str | None = None, provider_exclude_categories: list[str] = (),
-    exclude_uncategorized: bool = False, lang: dict | None = None, raw_name: str | None = None,
+    exclude_uncategorized: bool = False, lang: dict | None = None, country: list[str] | None = None,
+    raw_name: str | None = None,
 ) -> bool:
     """Import-time equivalent of the manual Language Filter archive tool --
     deliberately NOT sibling-safe (see USERGUIDE's Language Filter section
@@ -152,7 +153,12 @@ def _should_exclude_from_import(
     row) correctly used the untouched raw_name and tagged the row's true
     language. Result: excluded-language content was tagged correctly in
     the DB yet was never actually excluded at import. Falls back to `name`
-    when no raw_name is supplied (existing direct callers/tests)."""
+    when no raw_name is supplied (existing direct callers/tests).
+
+    country (Import Country Exclusion): a trailing "(<country code>)" tag
+    (vod_db._country_suffix_code), checked against the configured exclude
+    list; callers pre-fetch it once per import, None reads config."""
+    check_name = raw_name if raw_name is not None else name
     lang = lang if lang is not None else _current_lang_settings()
     # _source_language's default applies here too: a name with no recognized
     # prefix is untagged EN/ES-convention content, not "unknown" -- without
@@ -177,6 +183,11 @@ def _should_exclude_from_import(
         return True
     if lang["exclude_non_latin"] and vod_db._is_non_latin_name(raw_name if raw_name is not None else name):
         return True
+    country = country if country is not None else config.get_import_country_exclusion()
+    if country:
+        code = vod_db._country_suffix_code(check_name)
+        if code and code in country:
+            return True
     if provider_category_name:
         if provider_category_name in provider_exclude_categories:
             return True
@@ -624,9 +635,10 @@ async def _import_movies_for_provider(
     fetch_elapsed = time.time() - fetch_started
     movie_name_rules = await asyncio.to_thread(vod_db.get_active_rules_for_field, "movie", "name")
     lang = _current_lang_settings()
+    country = config.get_import_country_exclusion()
     movie_items, seen_stream_ids = await asyncio.to_thread(
         _build_movie_import_items, streams, category_names, exclude_categories,
-        exclude_uncategorized, lang, movie_name_rules,
+        exclude_uncategorized, lang, movie_name_rules, country,
     )
     db_started = time.time()
     movie_result = await asyncio.to_thread(vod_db.bulk_import_movies, provider_id, movie_items)
@@ -639,7 +651,7 @@ async def _import_movies_for_provider(
     return movie_result, len(streams), seen_stream_ids
 
 
-def _build_movie_import_items(streams, category_names, exclude_categories, exclude_uncategorized, lang, movie_name_rules):
+def _build_movie_import_items(streams, category_names, exclude_categories, exclude_uncategorized, lang, movie_name_rules, country=None):
     """CPU-only list normalization; deliberately runs outside FastAPI's loop."""
     movie_items = []
     seen_stream_ids = set()
@@ -650,7 +662,7 @@ def _build_movie_import_items(streams, category_names, exclude_categories, exclu
         name = vod_db.apply_rules_to_value(name, movie_name_rules)
         category_name = category_names.get(str(s.get("category_id")))
         if _should_exclude_from_import(
-            name, category_name, exclude_categories, exclude_uncategorized, lang, raw_name=s.get("name") or "",
+            name, category_name, exclude_categories, exclude_uncategorized, lang, country=country, raw_name=s.get("name") or "",
         ):
             continue
         movie_items.append({
@@ -718,9 +730,10 @@ async def _import_series_for_provider(
         for field in ("genre", "description", "cast_list", "director")
     }
     lang = _current_lang_settings()
+    country = config.get_import_country_exclusion()
     series_items, seen_series_ids = await asyncio.to_thread(
         _build_series_import_items, series_list, series_category_names,
-        exclude_categories, exclude_uncategorized, lang, series_name_rules, detail_rules,
+        exclude_categories, exclude_uncategorized, lang, series_name_rules, detail_rules, country,
     )
     db_started = time.time()
     series_result = await asyncio.to_thread(vod_db.bulk_import_series, provider_id, series_items)
@@ -733,7 +746,7 @@ async def _import_series_for_provider(
     return series_result, len(series_list), seen_series_ids
 
 
-def _build_series_import_items(series_list, series_category_names, exclude_categories, exclude_uncategorized, lang, series_name_rules, detail_rules):
+def _build_series_import_items(series_list, series_category_names, exclude_categories, exclude_uncategorized, lang, series_name_rules, detail_rules, country=None):
     """CPU-only list normalization; deliberately runs outside FastAPI's loop."""
     series_items = []
     seen_series_ids = set()
@@ -744,7 +757,7 @@ def _build_series_import_items(series_list, series_category_names, exclude_categ
         name = vod_db.apply_rules_to_value(name, series_name_rules)
         category_name = series_category_names.get(str(s.get("category_id")))
         if _should_exclude_from_import(
-            name, category_name, exclude_categories, exclude_uncategorized, lang, raw_name=s.get("name") or "",
+            name, category_name, exclude_categories, exclude_uncategorized, lang, country=country, raw_name=s.get("name") or "",
         ):
             continue
         series_items.append({
@@ -1280,6 +1293,42 @@ async def _import_provider_catalog_impl(provider_id: int) -> dict:
             provider["name"], orphan_result["series_deleted"], orphan_result["movies_deleted"], orphan_result["episodes_deleted"],
         )
 
+    # Both list calls above completed successfully, so these are
+    # authoritative full-catalog snapshots -- safe to remove only this
+    # provider's source rows that are no longer advertised (canonical
+    # movies/series survive whenever another provider still has a source).
+    # Done before post-import enrichment so a stale source can't be picked
+    # as fallback work. If either call above had raised, we'd never reach
+    # here at all -- a provider outage (failed fetch) can't masquerade as
+    # "every title got removed".
+    reconcile_result = await asyncio.to_thread(
+        vod_db.reconcile_provider_catalog_sources,
+        provider_id,
+        seen_movie_stream_ids=seen_movie_stream_ids,
+        seen_series_ids=seen_series_ids,
+    )
+    if any(reconcile_result.values()):
+        logger.info(
+            "[vod_importer] provider=%s reconciled %d stale movie source(s), %d stale series source(s), %d stale episode source(s)",
+            provider["name"],
+            reconcile_result["movie_sources_removed"],
+            reconcile_result["series_sources_removed"],
+            reconcile_result["episode_sources_removed"],
+        )
+
+    # A successful catalog pass is a safe opportunity to remove any legacy
+    # rows with neither a provider source nor a playable episode source
+    # (ported from knmplace's fork) -- catches whatever slips through the
+    # choke points above (a bug elsewhere, a manual DB edit, an upgrade from
+    # before series_sources existed) instead of leaving it to sit until
+    # someone runs the Orphan Checker by hand.
+    orphan_result = await asyncio.to_thread(vod_db.purge_orphans)
+    if orphan_result["series_deleted"] or orphan_result["movies_deleted"] or orphan_result["episodes_deleted"]:
+        logger.info(
+            "[vod_importer] provider=%s purged %d source-less series, %d movie(s), %d episode(s)",
+            provider["name"], orphan_result["series_deleted"], orphan_result["movies_deleted"], orphan_result["episodes_deleted"],
+        )
+
     if provider.get("auto_create_categories"):
         try:
             created = await asyncio.to_thread(
@@ -1293,6 +1342,51 @@ async def _import_provider_catalog_impl(provider_id: int) -> dict:
                 logger.info("[vod_importer] provider=%s auto-created %d categor(y/ies) from its own category list", provider["name"], created)
         except Exception as exc:
             logger.warning("[vod_importer] provider=%s auto-create-categories failed: %s", provider["name"], exc)
+
+    # Catch-up companion to the auto-merge language gate (see
+    # vod_db.archive_disabled_language_content's docstring) -- runs on every
+    # import so a legacy disabled-language backlog (or content that only just
+    # lost its only enabled-language source, e.g. after narrowing Enabled
+    # Playback Languages) gets flagged for review without a separate manual
+    # step. Not scoped to this provider_id -- it evaluates every movie/series
+    # row's source languages regardless of which provider(s) they came from.
+    archive_result = await asyncio.to_thread(vod_db.archive_disabled_language_content)
+    if archive_result["movies_archived"] or archive_result["series_archived"]:
+        logger.info(
+            "[vod_importer] archived %d movie(s)/%d series with no source in an enabled language",
+            archive_result["movies_archived"], archive_result["series_archived"],
+        )
+
+    # Companion cleanup to _should_auto_archive: deletes rows that are
+    # currently auto-archived (review_excluded=1, review_excluded_manual=0)
+    # but ALSO still match a currently-active provider category/language
+    # exclusion rule -- e.g. a category a provider used to expose got added
+    # to that provider's import-exclude-categories list after the content
+    # was already imported+archived under the old rule set. Not scoped to
+    # this provider_id -- evaluates every archived row against every
+    # currently-configured provider's exclusion rules, same as
+    # archive_disabled_language_content above. Ported from knmplace's fork;
+    # see vod_db.purge_excluded_archived_content's docstring for why this
+    # still applies even though we haven't ported his bigger "skip at
+    # import" behavior change.
+    provider_exclusions = {
+        p["id"]: (p.get("import_exclude_categories") or [], bool(p.get("import_exclude_uncategorized")))
+        for p in vod_db.list_providers()
+        if p.get("import_exclude_categories") or p.get("import_exclude_uncategorized")
+    }
+    if provider_exclusions:
+        purge_lang = {
+            "enabled_languages": config.get_enabled_languages(),
+            "exclude_non_latin": config.get_import_language_exclusion()["exclude_non_latin"],
+        }
+        purge_result = await asyncio.to_thread(
+            vod_db.purge_excluded_archived_content, provider_exclusions, purge_lang,
+        )
+        if purge_result["movies_deleted"] or purge_result["series_deleted"]:
+            logger.info(
+                "[vod_importer] purged %d movie(s)/%d series matching an active import-exclusion rule",
+                purge_result["movies_deleted"], purge_result["series_deleted"],
+            )
 
     return {
         "provider": provider["name"],
@@ -1637,13 +1731,47 @@ async def _enrich_one_series_source(
         )
         return {"fetched": True, "reason": None, "detail_written": False}
 
+    if provider.get("provider_type") == "library":
+        # Episodes came from the files themselves at import time; what's left
+        # is TMDB's series detail and real episode titles (a folder has no
+        # get_series_info to call -- and its base_url is a path, so the XC
+        # client below must never be reached). Best-effort: a TMDB miss just
+        # leaves placeholders and is retried on the next TTL pass.
+        tmdb_id = series.get("tmdb_id")
+        if tmdb_id:
+            try:
+                detail = await tmdb_sync.get_series_full_details(str(tmdb_id))
+                if detail:
+                    await asyncio.to_thread(vod_db.set_series_enrichment, series_id, **_apply_field_rules("series", {
+                        k: detail.get(k) for k in ("genre", "description", "cast_list")
+                    }), poster_url=detail.get("poster_url"), rating=detail.get("rating"),
+                        release_date=detail.get("release_date"))
+                eps = await tmdb_sync.get_series_episode_list_cached(str(tmdb_id))
+                names = {(e["season_number"], e["episode_number"]): e["name"] for e in eps if e.get("name")}
+                if names:
+                    await asyncio.to_thread(vod_db.fill_placeholder_episode_names, series_id, names)
+            except Exception:
+                logger.warning("[_enrich_one_series_source] TMDB enrichment failed for library series_id=%s", series_id, exc_info=True)
+        await asyncio.to_thread(
+            vod_db.set_series_source_enrichment, series_id, source["provider_id"], source["provider_series_id"],
+        )
+        return {"fetched": True, "reason": None, "detail_written": False}
+
     client = XCProviderClient(provider)
     try:
         info = _as_dict(await client.get_series_info(str(source["provider_series_id"])))
     except Exception:
-        await asyncio.to_thread(
-            vod_db.record_series_source_failure, series_id, source["provider_id"], source["provider_series_id"],
-        )
+        # Best-effort bookkeeping: a 'database is locked' here must not mask
+        # the provider's own failure.
+        try:
+            await asyncio.to_thread(
+                vod_db.record_series_source_failure, series_id, source["provider_id"], source["provider_series_id"],
+            )
+        except Exception:
+            logger.exception(
+                "[_enrich_one_series_source] failed to record failure for series_id=%s provider_id=%s",
+                series_id, source["provider_id"],
+            )
         return {
             "fetched": False,
             "reason": f"get_series_info failed for provider {provider.get('name') or provider['id']}",

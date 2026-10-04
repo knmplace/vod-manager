@@ -45,9 +45,6 @@ _GLOBAL_TMDB_CONCURRENCY = 40
 _tmdb_semaphore = asyncio.Semaphore(_GLOBAL_TMDB_CONCURRENCY)
 
 
-class TmdbNotFoundError(Exception):
-    """The requested TMDB identity no longer exists (HTTP 404)."""
-
 # KNM: added 2026-09-09 -- one persistent client shared by every function in
 # this module instead of each opening/closing its own httpx.AsyncClient per
 # call (a fresh TCP+TLS handshake per single request). keepalive pool sized
@@ -84,6 +81,14 @@ async def _tmdb_get(url: str, params: dict) -> httpx.Response:
     return r
 
 _API_KEY_RE = re.compile(r"(api_key=)[^&\s'\"]+")
+
+
+class TmdbNotFoundError(Exception):
+    """The requested TMDB identity no longer exists (HTTP 404) -- distinct
+    from every other failure mode (network error, rate limit, TMDB down),
+    which stay silent/retryable. A 404 on an id we already have stored is a
+    confirmed-bad identity a human needs to correct, not a transient miss --
+    see vod_db.record_tmdb_lookup_failure / the Incorrect TMDB ID queue."""
 
 
 def _redact(exc: Exception) -> str:
@@ -338,6 +343,38 @@ async def get_tmdb_details_for_ids(tmdb_ids: list[str], content_type: str) -> di
 
     results = await asyncio.gather(*[_fetch(tid) for tid in set(tmdb_ids)])
     return dict(results)
+
+
+async def get_series_full_details(tmdb_id: str) -> dict | None:
+    """Series counterpart to get_movie_full_details (detail fields only, no
+    episodes -- see get_series_episode_list_cached for those). None on any
+    failure so the caller can leave the series as-is and retry later."""
+    api_key = get_tmdb_api_key()
+    if not api_key:
+        return None
+    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+        try:
+            async with _tmdb_semaphore:
+                r = await client.get(f"{_API_BASE}/tv/{tmdb_id}", params={"api_key": api_key, "append_to_response": "credits"})
+            r.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.warning("[tmdb_sync] failed to fetch series detail for tmdb_id=%s: %s", tmdb_id, _redact(exc))
+            if exc.response.status_code == 404:
+                raise TmdbNotFoundError(tmdb_id) from exc
+            return None
+        except Exception as exc:
+            logger.warning("[tmdb_sync] failed to fetch series detail for tmdb_id=%s: %s", tmdb_id, _redact(exc))
+            return None
+        data = r.json()
+    cast = [c["name"] for c in data.get("credits", {}).get("cast", [])[:10]]
+    return {
+        "genre": ", ".join(g["name"] for g in data.get("genres", [])) or None,
+        "description": data.get("overview") or None,
+        "cast_list": ", ".join(cast) or None,
+        "poster_url": f"https://image.tmdb.org/t/p/w500{data['poster_path']}" if data.get("poster_path") else None,
+        "rating": data.get("vote_average") or None,
+        "release_date": data.get("first_air_date") or None,
+    }
 
 
 async def get_movie_full_details(tmdb_id: str) -> dict | None:

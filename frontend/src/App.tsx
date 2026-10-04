@@ -186,7 +186,6 @@ export default function App() {
       ? `Details: ${runtimeStatusQuery.data.enrichment.movies_done}/${runtimeStatusQuery.data.enrichment.movies_total} movies · ${runtimeStatusQuery.data.enrichment.series_done}/${runtimeStatusQuery.data.enrichment.series_total} series`
       : workflow?.phase ?? 'Working on catalog…'
   const navGroups = hideDvrTabQuery.data?.hidden ? NAV_GROUPS.filter((g) => g.label !== 'DVR') : NAV_GROUPS
-
   useEffect(() => {
     if (isLoading) return
     if (!settings?.has_credentials) {
@@ -300,7 +299,7 @@ export default function App() {
               Catalog status
             </div>
             {runtimeStatusQuery.data?.import.queued ? (
-              <p className="mt-1">{runtimeStatusQuery.data.import.provider_name ?? 'Provider'} import queued{runtimeStatusQuery.data.import.queue_position && runtimeStatusQuery.data.import.queue_position > 1 ? ` (${runtimeStatusQuery.data.import.queue_position - 1} ahead)` : ''}â€¦</p>
+              <p className="mt-1">{runtimeStatusQuery.data.import.provider_name ?? 'Provider'} import queued{runtimeStatusQuery.data.import.queue_position && runtimeStatusQuery.data.import.queue_position > 1 ? ` (${runtimeStatusQuery.data.import.queue_position - 1} ahead)` : ''}…</p>
             ) : runtimeStatusQuery.data?.import.running ? (
               <p className="mt-1">Importing {runtimeStatusQuery.data.import.provider_name ?? 'provider'}…</p>
             ) : runtimeStatusQuery.data?.bulk_ai.running ? (

@@ -13,15 +13,20 @@
 > in-progress work.
 
 Curates movies and TV shows from multiple real sources — Xtream-Codes (XC)
-IPTV providers, Plex, and Emby/Jellyfin — into one deduplicated pool, then
-re-exposes that pool as its own XC-compatible catalog server so one or more
-Dispatcharr instances can pull it like any other provider.
+IPTV providers, Plex, Emby/Jellyfin, and your own media files (a local
+folder, SMB, SFTP, S3-compatible storage, Google Drive, Dropbox, or Box) —
+into one deduplicated pool, then re-exposes that pool as its own
+XC-compatible catalog server so one or more Dispatcharr instances can pull
+it like any other provider.
 
 Same real content is often available from several sources at once (a movie
 on both an XC reseller and your own Plex library, or the same title from two
 different resellers). VOD & DVR Manager treats those as multiple *sources* for one
 pool entry rather than duplicate entries, and automatically fails over
-between them if one goes down or hits its connection limit.
+between them if one goes down or hits its connection limit — series
+included, pulling episodes from every provider that matches, not just
+whichever matched first. A source's own trailer, when it has one, passes
+through to the re-exposed XC feed as-is.
 
 **New here?** See [USERGUIDE.md](USERGUIDE.md) for a full walkthrough with
 screenshots — installation, connecting Dispatcharr (single or multiple
@@ -72,6 +77,26 @@ one rather than skip it.
 From there: add your real providers (Curation & Maintenance → Providers)
 and import their catalogs, then connect Dispatcharr (below). Full
 walkthrough with screenshots in [USERGUIDE.md](USERGUIDE.md).
+
+## Library sources — your own media files
+
+Besides XC/Plex/Emby/Jellyfin, a provider can also be your own files,
+read directly instead of pulled from an IPTV panel: a **local folder** or
+mounted path (including NFS, via a Docker volume or host mount — there's
+no separate "NFS" backend since the underlying tool this feature is built
+on, [rclone](https://rclone.org), has no NFS client), an **SMB/CIFS
+share**, an **SFTP server**, **S3-compatible storage** (AWS, MinIO, Wasabi,
+B2, and similar), or **Google Drive / Dropbox / Box**. Each file's name is
+parsed for a title/year/season/episode and matched against TMDB
+conservatively — anything uncertain lands in the existing Missing
+Artwork/Needs Review queues instead of guessing, and your files are never
+deleted or modified by anything in VOD & DVR Manager. The three cloud
+providers use an OAuth token you generate yourself with `rclone authorize`
+on your own machine — VOD & DVR Manager never sees your real login for any of
+them. MediaFire isn't supported (not an rclone backend); Box uses the same
+mechanism as Drive/Dropbox but is less thoroughly tested. Full setup for
+each backend in
+[USERGUIDE.md](USERGUIDE.md#library-sources--local-folders-smb-sftp-and-cloud-storage).
 
 ## Connecting Dispatcharr instances
 
@@ -351,16 +376,26 @@ Curation & Maintenance and the Movies/TV Shows toolbars host a set of
 catalog-quality tools — **Missing Artwork** (bulk poster fixing, with a
 language-aware filter and sibling-safe bulk archiving), **Language Filter**
 (the same language filtering over your whole library, not just
-poster-missing items), **Duplicate Finder** (matches on punctuation
-variants, adjacent-year mislabeling, and TMDB id, with one-click bulk merges
-for both fully-corroborated TMDB-confirmed matches and a second, separate
-tier where only one candidate carries a self-consistent TMDB id; an opt-in,
-off-by-default checkbox also groups a quality-tagged title like "4K: Movie"
-with its plain "Movie" as a candidate, for consolidating with Stream
-Priority's quality mode below), **Needs
-Review** (resolves year-ambiguous imports), and **Orphan Checker** (finds
-dead rows a provider deletion can leave behind — a series whose only source
-provider no longer exists, or movies/episodes with zero sources at all).
+poster-missing items), **Enabled Playback Languages** (a live,
+instantly-reversible playback/export filter by source language — separate
+from the import-time Language Exclusion above; nothing archived or deleted,
+just hidden from playback while unchecked), **Duplicate Finder** (matches on
+punctuation variants, adjacent-year mislabeling, and TMDB id, with one-click
+bulk merges for both fully-corroborated TMDB-confirmed matches and a second,
+separate tier where only one candidate carries a self-consistent TMDB id; an
+opt-in, off-by-default checkbox also groups a quality-tagged title like "4K:
+Movie" with its plain "Movie" as a candidate, for consolidating with Stream
+Priority's quality mode below — matches sharing a confirmed TMDB id merge
+automatically the moment enrichment confirms it, before ever reaching this
+queue — and an archived item stays archived even when a different
+provider's own import later matches it by name; only re-importing from the
+exact same source it was archived from can bring it back), **Needs Review**
+and the broader sidebar **Metadata Review** (resolve year-ambiguous imports
+and titles a provider left without any TMDB identity at all) alongside its
+sibling **Incorrect TMDB IDs** (a stored id TMDB itself now confirms is
+gone), and **Orphan Checker** (finds dead rows a provider deletion can
+leave behind — a series whose only source provider no longer exists, or
+movies/episodes with zero sources at all).
 Every movie/series can also be manually renamed or have its year corrected
 from its own detail view, for whatever a provider's own catalog data got
 wrong with no other way to fix it — including setting its TMDB id directly

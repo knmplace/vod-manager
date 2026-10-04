@@ -17,6 +17,7 @@ walkthrough, see [README.md](README.md).
 3. [Installation](#3-installation)
 4. [First-run setup](#4-first-run-setup)
 5. [Adding your first provider](#5-adding-your-first-provider)
+   - [Library sources — local folders, SMB, SFTP, and cloud storage](#library-sources--local-folders-smb-sftp-and-cloud-storage)
 6. [Connecting Dispatcharr](#6-connecting-dispatcharr)
 7. [DVR recordings](#7-dvr-recordings)
 8. [Security hardening](#8-security-hardening)
@@ -73,6 +74,16 @@ Why this matters in practice:
   Manager treats those as multiple *sources* of one pool entry, not two
   separate catalog items — and automatically fails over between them if one
   goes down or hits its connection limit.
+- **Series get the same treatment.** A series matched by more than one
+  provider pulls episodes from every matching provider, not just whichever
+  one matched first — so a season missing from one reseller's catalog can
+  still play from another that has it, the same automatic failover movies
+  already got.
+- **Trailers pass through, too.** When a source provider's own catalog
+  listing includes a trailer, VOD & DVR Manager keeps it and re-exposes it
+  through its own XC feed, so Dispatcharr and other clients that read that
+  field can show it — nothing to configure, and nothing is fetched from
+  anywhere else on VOD & DVR Manager's side.
 - **Recommended deployment**: on the same host/stack as Dispatcharr, since
   the two talk to each other constantly. It's fully capable of running on
   its own separate host too — nothing about it requires colocation, it's
@@ -198,7 +209,13 @@ for the first time. This is a metadata-only pass (name/year/category/stream
 ID) — poster art, cast, and descriptions are fetched lazily per-item after
 that (see *Rich Metadata* at the top of the same tab for a manual bulk-fetch
 button, or just let the background refresh schedule handle it — §6 in
-[README.md](README.md#refresh-schedule)).
+[README.md](README.md#refresh-schedule)). The click queues the import and
+returns immediately — a confirmation names the queue position, and you can
+keep using the rest of the app right away instead of the page locking up
+for the whole catalog pull. Live progress (and any other provider still
+ahead of it) shows in the sidebar **Status** widget (§9 below); clicking
+**Import catalog** again on a provider already queued or importing just
+confirms it's already in progress instead of double-queueing it.
 
 **Plex/Emby/Jellyfin: only Movies and TV Shows libraries are imported.** A
 library's own **Content type** setting (in Plex/Emby/Jellyfin's own library
@@ -209,6 +226,109 @@ library you expected to see content from doesn't show up after importing,
 check that library's Content type is explicitly set to Movies or TV Shows;
 the import result now calls out any library it couldn't classify by name so
 this is visible instead of silently importing nothing.
+
+**Jellyfin: some installs don't alias the `/emby/*` compatibility paths.**
+VOD & DVR Manager talks to Emby and Jellyfin through the same client, since
+they share almost the entire API surface — including `/emby/*` path aliases
+Jellyfin kept for legacy Emby-client compatibility. Not every Jellyfin
+install has those aliases available, though; if adding a Jellyfin provider
+fails on the library-detection step, VOD & DVR Manager now automatically
+retries against Jellyfin's native (unprefixed) paths and remembers that
+choice for the rest of the request. It also sends the API key as both a
+query parameter and the `X-Emby-Token` header, since some Jellyfin
+deployments (typically ones behind a reverse proxy or with a hardened auth
+config) only accept one or the other. If a Jellyfin provider still can't
+import after this, it's worth checking whether anything sits in front of
+your Jellyfin server (a reverse proxy, an auth gateway) that might be
+altering the request before it reaches Jellyfin itself.
+
+### Library sources — local folders, SMB, SFTP, and cloud storage
+
+Besides XC/Plex/Emby/Jellyfin, a provider can also be a **Folder** — your own
+media files, read directly instead of pulled from an IPTV panel. Pick
+**Folder / SMB / SFTP / Cloud** as the provider type, then pick which of
+seven backends it actually is:
+
+- **Local folder / mounted path** — a directory already reachable inside the
+  VOD & DVR Manager container (a bind mount, or a Docker named volume — an NFS
+  share works this way too, mounted via a Docker volume with the `nfs`
+  driver, or a plain OS-level NFS mount bind-mounted in). Same "what path
+  goes in the field" rule as DVR's path field above: it's the path *as seen
+  from inside the container*, not on your host.
+- **SMB / CIFS share** and **SFTP server** — reached directly, no host mount
+  needed. Give it the host, and for SMB the share name; a username/password
+  and an optional path-within-the-share round it out.
+- **S3-compatible** (AWS, MinIO, Wasabi, Backblaze B2, and similar) — an
+  access key/secret key pair, a bucket, and for anything other than AWS
+  itself, that provider's own endpoint URL.
+- **Google Drive**, **Dropbox**, **Box** — see *Connecting a cloud account*
+  below.
+
+![Library provider form showing the backend selector](docs/screenshots/library-provider-form.jpg)
+
+Whichever backend, **Import catalog** works the same as any other
+provider: it walks the folder/share/bucket, parses each file's name for a
+title, year, and season/episode, and matches it against TMDB. A rescan
+picks up new and removed files; your media itself is **never deleted or
+modified** by anything in VOD & DVR Manager, regardless of what happens on the
+catalog side.
+
+**Matching is intentionally conservative.** A file's name has to match a
+TMDB title (and year, if one's in the name) exactly before it's
+auto-matched — anything less certain, or genuinely ambiguous (two different
+real titles sharing a name), lands in **Missing Artwork** or **Needs
+Review** (§11) like any provider-side unmatched item, for you to pick from
+or correct by hand. Once fixed there, that decision survives future
+rescans — it won't get silently re-matched to something else, or re-run
+through TMDB again. For certainty with zero ambiguity, name/tag files the
+way Plex and Jellyfin already do: a trailing `{tmdb-12345}` (or
+`[tmdbid=12345]`) in the folder or file name skips matching entirely and
+uses that id directly.
+
+**NFS has no equivalent of its own here** — there's no "NFS" option in the
+backend list, because the tool this feature is built on (rclone) has no NFS
+client at all. An NFS share is still fully supported, just through the
+**Local folder** backend above: mount it as a Docker named volume (`driver:
+local`, `opt: type=nfs`) or an OS-level NFS mount, bind-mount that into the
+container, and point Local folder at wherever it lands inside the
+container.
+
+#### Connecting a cloud account
+
+Google Drive, Dropbox, and Box all use the same OAuth-token approach, and
+VOD & DVR Manager never sees your actual login for any of them — you run a
+one-time command yourself, on your own machine, that opens your real
+browser to that provider's own real login page:
+
+```
+rclone authorize "drive"      # Google Drive
+rclone authorize "dropbox"    # Dropbox
+rclone authorize "box"        # Box
+```
+
+(Install rclone from [rclone.org/downloads](https://rclone.org/downloads/),
+or run it via Docker: `docker run --rm -p 53682:53682 rclone/rclone
+authorize "dropbox"`.) Log in and approve access in the browser window that
+opens; the command then prints a JSON token. Paste that whole blob into the
+**token** field on the provider form, along with an optional path if you
+only want a specific folder within that account. Nothing else is needed —
+VOD & DVR Manager stores the token encrypted at rest, the same way it already
+stores every other provider credential.
+
+**Google Drive specifically:** rclone's own default app registration is
+being retired during 2026 (`rclone authorize "drive"` prints a warning
+about this). If Drive access stops working, the fix is registering your
+own small OAuth client in Google Cloud Console and supplying its client ID
+in the provider form's optional **client ID** field — see
+[rclone.org/drive/#making-your-own-client-id](https://rclone.org/drive/#making-your-own-client-id).
+
+**Box** uses the identical mechanism as Drive/Dropbox but hasn't been
+verified against a real Box account as of this release — it should work,
+but if you hit anything odd, that's the one to report first.
+
+**MediaFire is not supported.** It isn't one of the storage backends rclone
+(the tool this feature is built on) implements, so there's no way to add it
+as a provider through this mechanism.
 
 ### Excluding content on import
 
@@ -230,13 +350,25 @@ titles currently carry it, so you're picking from what's really there instead
 of guessing codes. Search, **Select visible** / **Deselect visible**, and
 shift-click to select a range all work the same way as the provider category
 picker below. Codes are recognized whether a provider tags titles with a pipe
-(`AR| Movie Title`) or a colon (`AR: Movie Title`) — colon-style matching only
-ever applies to a known language code, never any two-to-six-letter prefix, so
-it won't misfire on a real title like *Kill Bill: Volume 1* or *CSI: Miami*.
+(`AR| Movie Title`), a colon (`AR: Movie Title`), or a dash (`FR - Movie
+Title`) — colon/dash-style matching only ever applies to a known language
+code, never any two-to-six-letter prefix, so it won't misfire on a real title
+like *Kill Bill: Volume 1*, *CSI: Miami*, or *Spider-Man*.
 There's also a toggle to exclude any title with non-Latin-script characters in
 its name.
 
 ![Import Language Exclusion settings](docs/screenshots/import-language-exclusion.png)
+
+**Country** (Curation & Maintenance → *Import Country Exclusion*) is the
+same idea as Language above, just keyed on a title's trailing `(XX)`
+country-of-origin tag instead of a leading language prefix — a separate
+provider convention (`Married at First Sight (NZ)` vs. `EN| Married at
+First Sight`), so it's its own picker rather than folded into the language
+one. Most useful for an internationally-franchised show that imports
+several genuinely different country editions under one base title: check
+the editions you don't want and only those get auto-archived, everything
+else stays untouched. Same searchable-checklist pattern as Language, with
+live counts pulled from what's actually in your pool right now.
 
 **Category** (the **Exclude Categories** button on each provider row) is
 per-provider, since available categories genuinely differ from one provider
@@ -283,6 +415,27 @@ category list — e.g. exclude a "Music Videos" or "Home Videos" library the
 same way you'd exclude an XC category. **Archive new categories** and
 **Auto-create categories** remain XC-only for now — those need their own
 design pass for what "newly discovered" means for a library-based source.
+
+### Enabled Playback Languages
+
+A second, *separate* language control (Curation & Maintenance → **Enabled
+Playback Languages**), easy to confuse with Import Language Exclusion above
+but built for a different job: that one is a one-way, import-time archive
+rule; this one is a **live playback/export filter**, instantly reversible,
+that never archives or touches any row in your pool. A checkbox list of
+every source language detected across your catalog (English, French,
+Arabic, and so on), each with its own live title count. Unchecking a
+language immediately hides any movie or episode whose *only* source is that
+language from playback and the exported Dispatcharr catalog — nothing is
+deleted, and re-checking it brings that content back instantly. A
+movie/series with at least one source in a still-enabled language stays
+fully visible either way, even if it also has sources in languages you've
+unchecked.
+
+Use Import Language Exclusion when you never want a language cluttering
+your pool at all; use Enabled Playback Languages when you just want to
+narrow what's currently exported/playable without deciding anything
+permanent about content you might want back later.
 
 ### Multiple profiles on one subscription
 
@@ -842,6 +995,12 @@ it's reachable from the public internet at all — do these:
 
 ## 9. Browsing and managing your catalog
 
+A small **Status** widget in the sidebar (bottom-left, always visible) shows
+whether any background job — import, enrichment, bulk AI resolve — is
+currently running, plus the app's own process CPU usage, so you can tell at
+a glance whether something's actively working before digging into a
+specific tab's own progress display.
+
 Above the catalog itself, the dashboard always shows two live cards:
 
 - **Activity** — what's playing right now, across every viewer, refreshed
@@ -864,6 +1023,24 @@ Above the catalog itself, the dashboard always shows two live cards:
   episode that happened to fail.
 
 ![Failed Streams, showing a mid-stream crash and an every-source-exhausted failure](docs/screenshots/failed-streams.png)
+
+### Stream Recovery
+
+A separate, dedicated page (its own sidebar entry under Operations) for the
+case Failed Streams alone can't fully resolve: a movie whose *every* active,
+enabled-language source has failed repeatedly gets automatically hidden from
+client VOD listings — Dispatcharr and any downstream player simply won't see
+it any more, instead of continuing to advertise a stream that's actually
+dead. Nothing is deleted; its sources stay intact.
+
+Stream Recovery lists every currently-hidden movie with each of its
+sources and how many times that specific source has failed. Click **Test
+source** on any one of them to try it directly, bypassing the normal
+priority/failover ordering — a successful test immediately restores the
+movie to client listings; a failed test leaves it blocked and moves on to
+the next thing to try. This is the fastest way to tell "this whole title is
+actually gone everywhere" apart from "one provider copy is bad, but another
+one would work if the client just retried."
 
 The **Movies** and **TV Shows** tabs below that are the main catalog views,
 each with a **list** or **grid** (poster wall) mode.
@@ -927,7 +1104,12 @@ each with a **list** or **grid** (poster wall) mode.
   touches items with an already-confirmed match; it doesn't go looking for
   new matches itself. Large libraries process in bounded batches, so this
   can take a little while — the button's label updates with a running "N
-  renamed" count as it works.
+  renamed, N checked" count as it works, and finishes with a summary
+  breaking out how many were renamed vs. needed no change vs. hit an error
+  (hover the summary for the first few error reasons). If a batch fails
+  partway through (e.g. a slow TMDB round-trip timing out), a **Resume**
+  button appears next to the error and picks up from where it left off
+  instead of restarting the whole library from the beginning.
 - **Client Title Format** (Curation & Maintenance) is a separate, ongoing
   setting rather than a one-time rename: *Append year to titles served to
   clients* controls what Dispatcharr/TiviMate/etc. actually display for
@@ -1229,15 +1411,33 @@ commit to it.
 
 ### Duplicate Finder
 
-Finds pool entries that look like the same real title split into two rows,
-three ways at once:
+Some duplicates now resolve themselves automatically, before you'd ever see
+them here: whenever enrichment confirms or refreshes a movie's or series'
+TMDB id, anything else in your pool sharing that exact id gets merged in
+right away — a shared TMDB id is unambiguous proof, so there's nothing for a
+human to review. This never merges on a fuzzy or heuristic match, only an
+exact shared id, and it still respects any pair you've already told the
+Duplicate Finder to **Ignore** (below) — a dismissed pair stays split even
+if it later shares an id. Auto-archiving disabled-language content (see
+[Enabled Playback Languages](#enabled-playback-languages) above) works the
+same automatic way. An item archived this way (or by an import-exclusion
+rule) also stays archived when a *different* provider's own import later
+matches it by name — only re-importing from the exact same source it was
+archived from can bring it back, so one provider's catalog never silently
+resurrects something another provider's rules already hid. What's left for
+Duplicate Finder itself is everything that isn't (yet) that clear-cut,
+found three ways at once:
 
 - **Cosmetic punctuation** — a colon, a dash, quote style — the same title
   formatted slightly differently by different providers.
 - **Adjacent-year mislabeling** — the same name with years one apart (a
   provider getting a release year wrong by one is a common, real pattern).
   A gap of two or more years never clusters — that's almost always two
-  different films that happen to share a title, not a duplicate.
+  different films that happen to share a title, not a duplicate. A same-name
+  row with **no year at all** (a common provider pattern) still joins the
+  group when it shares a confirmed TMDB id with a dated row already in it —
+  the same proof standard used to split conflicting matches apart, just
+  applied the other way to join a matching one.
 - **A shared TMDB id** — when two candidates carry the same TMDB id, that's
   confirmed proof they're the same real title, even across a bigger year
   gap than the rule above alone would allow. A *conflicting* TMDB id is
@@ -1246,12 +1446,16 @@ three ways at once:
 
 There's also an **opt-in fourth check, off by default**: a checkbox above the
 scan button groups a quality-tagged title with its plain version — e.g.
-"4K: Predator" with "Predator" — as candidates too. Leave it off and those
-stay two separate, unrelated pool entries, same as today. Turn it on, merge
-the group, and Stream Priority's "quality" mode (Configuration) then picks
-whichever source is actually the best quality automatically — this is purely
-about getting split rows *grouped* for review; nothing merges on its own just
-from turning the checkbox on.
+"4K: Predator" with "Predator", "4K-DE - Severance (2022) (US)" with
+"Severance (2022)" (a compound quality+country prefix and trailing
+country-code suffix, both allowlist-only against known codes so a real title
+that happens to end in a parenthetical is never mistaken for one) — as
+candidates too. Leave it off and those stay two separate, unrelated pool
+entries, same as today. Turn it on, merge the group, and Stream Priority's
+"quality" mode (Configuration) then picks whichever source is actually the
+best quality automatically — this is purely about getting split rows
+*grouped* for review; nothing merges on its own just from turning the
+checkbox on.
 
 Each candidate shows its poster, a **same TMDB match** badge when a shared id
 confirms the group, and a per-candidate **true match**/**year mismatch** badge
@@ -1316,16 +1520,76 @@ the same name — too ambiguous to auto-merge, so they're held out of every
 category until you (or the AI, as a suggestion) pick the right one, usually
 from a real TMDB match rather than having to research it yourself.
 
+### Metadata Review
+
+A broader, sidebar-level version of the same idea (**Metadata Review** nav
+item) — fixes titles a provider left without *both* a TMDB identity and a
+release year, plus the same ambiguous-year hold queue Needs Review covers
+above. A provider supplying neither a TMDB id nor a year never even entered
+the ambiguity detector Needs Review relies on, and is a common real cause of
+duplicate-looking titles that Duplicate Finder can't cleanly resolve on its
+own. Movies/TV Shows tabs, a **Hide adult titles** toggle, and bulk select
+with **Archive selected** and **Resolve selected with AI** (the same
+AI-assisted TMDB matching described in [§10](#10-ai-assisted-features), just
+scoped to this queue) — search TMDB and select the exact result to record a
+confirmed TMDB id and year; if the corrected identity already matches an
+existing pool entry, sources and categories merge into it automatically,
+same as everywhere else in the app.
+
+A series that already carries a TMDB id but no year gets resolved
+automatically in the background after each provider import, straight from
+that id — no provider detail request and no manual step needed — so it
+often never appears in this queue at all. Any duplicate this uncovers
+(two rows that turn out to share the same id) merges the same automatic
+way described in Duplicate Finder above.
+
+### Incorrect TMDB IDs
+
+A sibling queue on the same page — different problem from Metadata Review
+above, which is for titles with no TMDB identity at all. This one catches
+a *stored* TMDB id that TMDB itself has since confirmed no longer exists (a
+404 on lookup), so the item is surfaced here instead of silently carrying a
+dead id forever. Same shape as Metadata Review: Movies/TV Shows tabs and
+bulk select with **Resolve selected with AI** — search TMDB and select the
+exact result to replace the bad id, same merge-if-it-already-exists
+behavior as everywhere else. Empty most of the time; a clean message says
+so when there's nothing currently flagged.
+
 ### Orphan Checker
 
 Finds dead rows a provider deletion (or a bug) can leave behind — a series
-whose only source provider no longer exists, or movies/episodes with zero
-sources at all. Run it periodically, especially after removing a provider.
-It won't flag a series with no episodes yet — that's normal for anything
-not yet lazily enriched, not broken. Once a scan finds anything, a **Delete
-N orphans** button purges everything the scan found in one action — useful
-when a provider's fully abandoned and its dead rows just need to go, rather
-than investigating one at a time.
+with neither a provider-level source nor a single episode source anywhere,
+or movies/episodes with zero sources at all. A series that still has real
+sources from another provider is never flagged, even if the provider it was
+originally imported from is long gone — only a series with *zero* sources
+left, from any provider, is actually broken. Run it periodically, especially
+after removing a provider. It won't flag a series with no episodes yet —
+that's normal for anything not yet lazily enriched, not broken. Once a scan
+finds anything, a **Delete N orphans** button purges everything the scan
+found in one action — useful when a provider's fully abandoned and its dead
+rows just need to go, rather than investigating one at a time.
+
+### Language Backfill and Language Split
+
+Two related maintenance tools, both scanning the whole catalog and safe to
+re-run any time (each becomes a no-op once nothing's left to fix):
+
+- **Language Backfill** — every source's language (used by Enabled Playback
+  Languages, Import Language Exclusion, and Duplicate Finder's language
+  matching) is detected from its raw title and provider category. A source
+  written before that detection existed on a given import path — or
+  classified by a since-fixed version of it — sits with the wrong value
+  until backfilled. Scan shows what's missing or outdated per table/language
+  code with sample titles; **Backfill N rows** applies it.
+- **Language Split** — a movie or series with sources in two languages that
+  share no common source can end up merged into a single catalog entry from
+  before the auto-merge language gate existed (a shared TMDB id used to be
+  the only thing auto-merge checked). Language Split finds and undoes those:
+  the largest-source language stays on the original entry, and every other
+  language gets split off into its own new entry with its own sources (and,
+  for a series, its own episodes) and the same category placements. Run
+  this after Language Backfill — it depends on accurate per-source
+  language.
 
 ---
 

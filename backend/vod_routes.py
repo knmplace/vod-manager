@@ -16,6 +16,7 @@ from config import (
     get_enabled_languages,
     get_gemini_api_key,
     get_hide_dvr_tab,
+    get_import_country_exclusion,
     get_import_language_exclusion,
     get_lockout_settings,
     get_mdblist_api_key,
@@ -31,6 +32,7 @@ from config import (
     save_duplicate_finder_quality_prefix_matching,
     save_enabled_languages,
     save_gemini_api_key,
+    save_import_country_exclusion,
     save_import_language_exclusion,
     save_lockout_settings,
     save_mdblist_api_key,
@@ -52,6 +54,8 @@ import dispatcharr_dvr_importer
 import duplicate_confirm
 import emby_vod_client
 import emby_vod_importer
+import library_importer
+import rclone_client
 import plex_client
 import plex_importer
 import portal_auth
@@ -118,6 +122,10 @@ class HideDvrTabRequest(BaseModel):
 class ImportLanguageExclusionRequest(BaseModel):
     exclude_prefixes: list[str] = []
     exclude_non_latin: bool = False
+
+
+class ImportCountryExclusionRequest(BaseModel):
+    exclude_country_codes: list[str] = []
 
 
 class EnabledLanguagesRequest(BaseModel):
@@ -199,6 +207,13 @@ class ProviderRequest(BaseModel):
     max_streams: int = 0
     priority: int = 0
     provider_type: str = "xc"
+    library_backend: str = "local"
+    # Backend-specific fields for a non-local library source (host, share,
+    # port, bucket, region, endpoint, domain, ...) plus secret sub-fields
+    # (see vod_routes._LIBRARY_REMOTE_SECRET_KEYS). A secret field left
+    # blank/omitted here means "keep the saved one", same convention as a
+    # blank password -- see the merge logic in upsert_provider below.
+    library_remote_config: dict = {}
 
 
 class CatalogSyncDeleteRequest(BaseModel):
@@ -779,10 +794,11 @@ async def clear_stream_failures():
 
 @router.get("/stream-recovery/movies/", dependencies=_GUARDS)
 async def list_blocked_movies():
-    """Movies hidden after every playable source reached the failure limit.
-    The returned source IDs are used by the existing authenticated preview
-    route, whose successful playback clears the block automatically."""
-    return vod_db.list_blocked_movies()
+    """Movies hidden after every playable source reached the failure limit
+    (see vod_db.record_source_failure's stream_blocked logic). The returned
+    source IDs are used by the existing authenticated preview route, whose
+    successful playback clears the block automatically."""
+    return await asyncio.to_thread(vod_db.list_blocked_movies)
 
 
 # ── Content-mismatch flagging ────────────────────────────────────────────────
@@ -970,6 +986,22 @@ async def preview_enabled_languages_impact_endpoint(body: EnabledLanguagesImpact
     Curation tab warn with an accurate number before the user removes a
     language. See vod_db.preview_enabled_languages_impact."""
     return await asyncio.to_thread(vod_db.preview_enabled_languages_impact, body.codes)
+
+
+@router.get("/import-country-exclusion/", dependencies=_GUARDS)
+async def get_import_country_exclusion_settings():
+    return {"exclude_country_codes": get_import_country_exclusion()}
+
+
+@router.post("/import-country-exclusion/", dependencies=_GUARDS)
+async def save_import_country_exclusion_settings(body: ImportCountryExclusionRequest):
+    save_import_country_exclusion(body.exclude_country_codes)
+    return {"ok": True}
+
+
+@router.get("/import-country-exclusion/codes/", dependencies=_GUARDS)
+async def list_import_country_exclusion_codes():
+    return vod_db.list_all_pool_country_suffixes()
 
 
 @router.post("/import-exclusions/apply-now/", dependencies=_GUARDS)
@@ -1177,9 +1209,20 @@ async def sync_category_now(category_id: int):
 
 # ── Providers ────────────────────────────────────────────────────────────────
 
+# Sub-fields of library_remote_config that are themselves real credentials
+# (an rclone OAuth token, an S3 secret key when not using username/password)
+# -- never sent to the frontend in plaintext, same bar as providers.password.
+_LIBRARY_REMOTE_SECRET_KEYS = frozenset({"token", "oauth_token", "secret_access_key", "pass"})
+
+
 def _redact_provider(p: dict) -> dict:
     p = dict(p)
     p["has_password"] = bool(p.pop("password", None))
+    remote_config = p.get("library_remote_config") or {}
+    p["library_remote_config"] = {
+        k: v for k, v in remote_config.items() if k not in _LIBRARY_REMOTE_SECRET_KEYS
+    }
+    p["has_library_remote_secret"] = any(remote_config.get(k) for k in _LIBRARY_REMOTE_SECRET_KEYS)
     return p
 
 
@@ -1233,8 +1276,19 @@ async def upsert_provider(body: ProviderRequest):
                     "the password to fix this provider."
                 ),
             )
+    remote_config = body.library_remote_config or {}
+    if body.provider_type == "library" and body.library_backend != "local":
+        existing = next((p for p in vod_db.list_providers() if p["name"] == body.name), None)
+        existing_secrets = (existing or {}).get("library_remote_config") or {}
+        merged = dict(remote_config)
+        for key in _LIBRARY_REMOTE_SECRET_KEYS:
+            if not merged.get(key):
+                merged[key] = existing_secrets.get(key)
+        remote_config = merged
+
     provider_id = vod_db.upsert_provider(
         body.name, body.base_url, body.username, password, body.max_streams, body.priority, body.provider_type,
+        library_backend=body.library_backend, library_remote_config=remote_config or None,
     )
     # Connection settings (base_url/username/password) may have just changed;
     # evict any pooled client built under the old ones so the next call opens
@@ -1242,6 +1296,9 @@ async def upsert_provider(body: ProviderRequest):
     await vod_importer.evict_provider_client(provider_id)
 
     sync_error = None
+    if body.provider_type == "library":
+        # A folder on disk has nothing to relay through Dispatcharr's XC account.
+        return {"id": provider_id, "sync_error": None}
     try:
         await vod_sync.sync_provider(provider_id)
     except vod_sync.VodXcAccountNotConfigured:
@@ -1604,6 +1661,7 @@ async def delete_provider(provider_id: int):
     # (including the Activity poll) while it runs.
     await asyncio.to_thread(vod_db.delete_provider, provider_id)
     await vod_importer.evict_provider_client(provider_id)
+    await rclone_client.stop_daemon(provider_id)
     return {"ok": True}
 
 
@@ -1625,8 +1683,11 @@ async def merge_providers_into_subaccounts(provider_id: int, body: MergeProvider
 
 @router.post("/providers/{provider_id}/sync/", dependencies=_GUARDS)
 async def sync_provider(provider_id: int):
-    if not vod_db.get_provider(provider_id):
+    provider = vod_db.get_provider(provider_id)
+    if not provider:
         raise HTTPException(404, detail="provider not found")
+    if provider.get("provider_type") == "library":
+        raise HTTPException(400, detail="a folder source has nothing to sync to Dispatcharr")
     try:
         results = await vod_sync.sync_provider(provider_id)
     except vod_sync.VodXcAccountNotConfigured as exc:
@@ -1634,12 +1695,24 @@ async def sync_provider(provider_id: int):
     return {"results_by_connection": results}
 
 
+# Manual imports used to keep the HTTP request open for the entire catalog
+# pull. Queue them instead: a browser can keep using the app (Metadata
+# Review and every other page stay responsive), and large XC providers
+# never compete with each other or the periodic refresher for SQLite's one
+# writer -- found live 2026-09-15/16 as one of the dominant sources of
+# "database is locked" under sustained concurrent load.
+_MANUAL_IMPORT_QUEUE: list[int] = []
+_MANUAL_IMPORT_TASK: asyncio.Task | None = None
+
+
 async def _run_provider_catalog_import(provider_id: int) -> dict:
     provider = vod_db.get_provider(provider_id)
     if not provider:
         raise ValueError("provider not found")
-    # XC updates the shared sidebar lifecycle itself.  The other adapters do
-    # not, so publish their transition from queued -> running here.
+    # vod_importer.import_provider_catalog tracks XC lifecycle itself
+    # (_IMPORT_PROGRESS); the other adapters don't touch that state at all,
+    # so publish their queued -> running transition here instead of leaving
+    # the sidebar stuck on "queued" for the whole import.
     track_lifecycle = provider.get("provider_type") != "xc"
     if track_lifecycle:
         vod_importer.mark_import_running(provider_id, provider["name"])
@@ -1648,6 +1721,8 @@ async def _run_provider_catalog_import(provider_id: int) -> dict:
             result = await plex_importer.import_plex_library(provider_id)
         elif provider.get("provider_type") in ("emby", "jellyfin"):
             result = await emby_vod_importer.import_emby_library(provider_id)
+        elif provider.get("provider_type") == "library":
+            result = await library_importer.import_library(provider_id)
         elif provider.get("provider_type") == "dispatcharr_dvr":
             result = await dispatcharr_dvr_importer.import_dvr_recordings(provider_id)
         else:
@@ -2191,12 +2266,15 @@ async def resolve_missing_episode(series_id: int, body: MissingEpisodeResolveReq
                 await dispatcharr_dvr_importer._apply_download_backfill(match, body.provider_id)
             else:
                 await dispatcharr_dvr_importer._apply_pointer_backfill(match)
-            # beads-4o6: don't re-surface an archived (review_excluded) series
-            # by placing it in a category -- the backfill itself (episode/
-            # pointer data) still succeeded and should count as resolved,
-            # only the category placement is skipped.
-            matched_series = vod_db.get_series(match["series_id"])
-            if target_category_id and matched_series and not matched_series.get("review_excluded"):
+            # Checked before calling placement, not caught via the ValueError
+            # place_series_in_category now raises for an archived row (see
+            # its docstring) -- the pointer/download transfer above already
+            # succeeded, so an archived pool match should still count as
+            # resolved/handled, not surface as "backfill failed" via the
+            # broad except below just because its category placement was
+            # skipped.
+            series_row = vod_db.get_series(match["series_id"])
+            if target_category_id and series_row and not series_row.get("review_excluded"):
                 vod_db.place_series_in_category(match["series_id"], target_category_id)
         except Exception as exc:
             raise HTTPException(502, detail=f"Found in the pool but backfill failed: {exc}")
@@ -2349,8 +2427,12 @@ async def backfill_series_past_seasons(series_id: int, provider_id: int, schedul
                 # (review_excluded) series -- see the matching comment in
                 # backfill_missing_episode above.
                 target_category_id = (rule or {}).get("target_series_category_id")
-                matched_series = vod_db.get_series(match["series_id"])
-                if target_category_id and matched_series and not matched_series.get("review_excluded"):
+                # See resolve_missing_episode's identical comment -- the
+                # backfill above already succeeded, so an archived pool
+                # match should still count as resolved rather than a skipped
+                # placement surfacing as a failure via the except below.
+                match_series = vod_db.get_series(match["series_id"])
+                if target_category_id and match_series and not match_series.get("review_excluded"):
                     vod_db.place_series_in_category(match["series_id"], target_category_id)
                 vod_db.clear_unresolved_missing_episode(series_id, season, episode)
                 results.append({"season_number": season, "episode_number": episode, "name": name, "status": "already_in_pool"})
@@ -2733,6 +2815,14 @@ async def set_category_eval_schedule(category_id: int, body: CategoryScheduleReq
 @router.get("/needs-review/", dependencies=_GUARDS)
 async def list_needs_year_review(content_type: Optional[str] = None):
     return vod_db.list_needs_year_review(content_type)
+
+
+@router.get("/tmdb-lookup-failures/bulk-resolve/{job_id}/", dependencies=_GUARDS)
+async def bulk_resolve_tmdb_lookup_failures_progress(job_id: str):
+    job = vod_bulk_ai_service.get_bulk_ai_job(job_id)
+    if job is None:
+        raise HTTPException(404, detail="job not found")
+    return job
 
 
 # ── Orphan checker ───────────────────────────────────────────────────────────
@@ -3817,6 +3907,15 @@ async def enrich_series(series_id: int, force: bool = False):
     except vod_importer.ProviderBackoffError as exc:
         raise HTTPException(503, detail=str(exc))
     series = vod_db.get_series(series_id)
+    if not series:
+        # Found live 2026-09-15: a concurrent auto-merge (see
+        # auto_merge_series_by_tmdb, which enrich_series above can itself
+        # trigger) can delete this exact series_id as a merge's from_id
+        # between the 404 check above and here -- the merge already moved
+        # its episodes/placements onto the survivor, so this isn't an
+        # error, just the same "no longer here" outcome as the pre-enrich
+        # check, surfaced consistently as 404 instead of a raw 500.
+        raise HTTPException(404, detail="series not found (merged into another series during enrichment)")
     series["episodes"] = vod_db.list_episodes(series_id)
     episode_sources_by_id = vod_db.list_episode_sources_for_episode_ids([e["id"] for e in series["episodes"]])
     for e in series["episodes"]:
