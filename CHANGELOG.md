@@ -43,6 +43,9 @@ instead of opening a duplicate request.
   re-runs TMDB matching for all of them. Titles imported before this change
   switch over quietly on their next refresh, without being counted as
   changed.
+  Verified live: the first refresh after upgrading showed 0 changed titles
+  on all 4 providers (one provider had shown about 25,800 the run before),
+  and no TMDB re-matching ran.
 - ✅ 🔀 **Opening a show loads its missing episodes.** Proposed upstream in
   [#45](https://github.com/jstevenscl/vod-manager/pull/45) (stacked on #43).
   Imports no longer wait on an episode-sync phase; the background preloader
