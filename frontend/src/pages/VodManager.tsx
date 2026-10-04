@@ -4593,6 +4593,11 @@ function PossibleMetadataMatches({ contentType }: { contentType: 'movie' | 'seri
       qc.invalidateQueries({ queryKey: [contentType === 'movie' ? 'vod-movies' : 'vod-series'] })
       notify(`Merged ${r.data.merged}; skipped ${r.data.skipped.length}.`)
     },
+    // KNM: 2026-10-03 a failed bulk merge used to fail silently; surface it and refresh the list.
+    onError: (e: any) => {
+      qc.invalidateQueries({ queryKey: ['vod-possible-matches', contentType] })
+      notify(e?.response?.data?.detail ?? 'Bulk merge failed.')
+    },
   })
   const items = query.data?.items ?? []
   const allVisibleSelected = items.length > 0 && items.every((item) => selected.has(item.id))

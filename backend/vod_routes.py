@@ -1635,6 +1635,25 @@ async def set_provider_import_exclude_categories(provider_id: int, body: Provide
     return {"ok": True}
 
 
+@router.post("/providers/{provider_id}/purge-excluded-content/", dependencies=_GUARDS)
+async def purge_excluded_content(provider_id: int, dry_run: bool = True):
+    """KNM: added 2026-10-03 -- preview (default) or apply removal of content
+    already imported in this provider's now-excluded categories. The next
+    catalog import applies the same purge automatically."""
+    provider = vod_db.get_provider(provider_id)
+    if not provider:
+        raise HTTPException(404, detail="provider not found")
+    result = await asyncio.to_thread(
+        vod_db.purge_excluded_category_sources, provider_id,
+        provider.get("import_exclude_categories") or [],
+        bool(provider.get("import_exclude_uncategorized")),
+        dry_run=dry_run,
+    )
+    result.pop("affected_movie_ids", None)
+    result.pop("affected_series_ids", None)
+    return result
+
+
 @router.post("/providers/{provider_id}/deactivate/", dependencies=_GUARDS)
 async def deactivate_provider(provider_id: int):
     if not vod_db.get_provider(provider_id):

@@ -1223,6 +1223,21 @@ async def _import_provider_catalog_impl(provider_id: int) -> dict:
             reconcile_result["episode_sources_removed"],
         )
 
+    # KNM: added 2026-10-03 -- reconcile above keeps sources the provider
+    # still lists, including ones in categories excluded after they were
+    # imported. Remove those now (see vod_db.purge_excluded_category_sources).
+    category_purge = await asyncio.to_thread(
+        vod_db.purge_excluded_category_sources, provider_id, exclude_categories, exclude_uncategorized,
+    )
+    changed_movie_ids.update(category_purge.pop("affected_movie_ids"))
+    changed_series_ids.update(category_purge.pop("affected_series_ids"))
+    if category_purge["movie_sources_removed"] or category_purge["series_sources_removed"]:
+        logger.info(
+            "[vod_importer] provider=%s removed %d movie/%d series source(s) in excluded categories; deleted %d movie(s)/%d series",
+            provider["name"], category_purge["movie_sources_removed"], category_purge["series_sources_removed"],
+            category_purge["movies_deleted"], category_purge["series_deleted"],
+        )
+
     catalog_changed = bool(changed_movie_ids or changed_series_ids or any(reconcile_result.values()))
 
     # Companion cleanup to the skip-at-import filtering above: content that
@@ -1395,6 +1410,7 @@ async def _import_provider_catalog_impl(provider_id: int) -> dict:
         **_merge_import_counts(movie_result, series_result),
         **reconcile_summary,
         **purge_summary,
+        "excluded_category_purge": category_purge,
         **archive_result,
         **{f"orphan_{key}": value for key, value in orphan_result.items() if key.endswith("deleted")},
         "catalog_changed": catalog_changed,
@@ -2248,6 +2264,13 @@ async def _post_import_enrichment(
         if track_catalog_workflow:
             mark_catalog_workflow_ready(run_id=pinned_run_id)
         _schedule_background_tmdb_work()
+    except asyncio.CancelledError:
+        # KNM: 2026-10-03 CancelledError is a BaseException, so cancellation skipped
+        # the handler below and left the run "running" with leaked phase stamps.
+        logger.warning("[vod_importer] post-import enrichment cancelled")
+        if track_catalog_workflow:
+            _mark_catalog_workflow_failed("automatic enrichment cancelled", run_id=pinned_run_id)
+        raise
     except Exception:
         logger.exception("[vod_importer] post-import enrichment failed")
         if track_catalog_workflow:

@@ -245,3 +245,28 @@ def test_episode_only_series_phase_preserves_tmdb_metadata(db, monkeypatch):
     assert result["fetched"] is True
     assert db.get_series(series_id)["name"] == "TMDB Name"
     assert len(db.list_episodes(series_id)) == 1
+
+
+def test_cancelled_enrichment_finalizes_run_and_drops_phase_stamps(db, monkeypatch):
+    """A cancelled enrichment task (shutdown, redeploy) used to skip the
+    `except Exception` handler: the run stayed "running" forever and its
+    _RUN_PHASE_STAMPS entry leaked."""
+    import pytest
+
+    older_run = db.create_catalog_sync_run(None, "prov1")
+    newer_run = db.create_catalog_sync_run(None, "prov2")
+    # A newer import owns the live header, so the older run's stamps live in _RUN_PHASE_STAMPS.
+    monkeypatch.setitem(vod_importer._CATALOG_WORKFLOW_PROGRESS, "run_id", newer_run)
+
+    async def cancelled_phase(**_kwargs):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(vod_importer, "bulk_enrich_tmdb_movies", cancelled_phase)
+    monkeypatch.setattr(vod_importer.vod_db, "count_movies_pending_tmdb_enrichment", lambda *_: 0)
+    monkeypatch.setattr(vod_importer.vod_db, "count_series_pending_tmdb_metadata_enrichment", lambda *_: 0)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(vod_importer._post_import_enrichment(workflow_run_id=older_run))
+
+    assert db.get_catalog_sync_run(older_run)["status"] == "failed"
+    assert older_run not in vod_importer._RUN_PHASE_STAMPS

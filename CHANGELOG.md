@@ -31,6 +31,80 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-03
+
+- ✅ **Upstream v0.2.20 adopted into the fork (version label now 0.2.20).**
+  One combined change: the upstream merge plus the fixes found while
+  validating it. A single upstream pull request will be proposed once this
+  build has been validated live.
+
+  **Adopted from upstream v0.2.20**
+  - Library sources (local folder, SMB, SFTP, S3, Google Drive, Dropbox, Box)
+    via rclone, alongside XC/Plex/Emby/Jellyfin providers. The Docker image
+    now installs rclone; rclone daemons are stopped on provider delete and on
+    shutdown. Library imports follow the fork's skip-at-import exclusion model
+    (excluded files are never stored, but still count as "seen").
+  - Import country exclusion (country-suffix tags), wired into XC, Plex, Emby
+    and library imports, with its own Curation card.
+  - Duplicate Finder partial groups: check only the candidates you want to
+    merge or ignore.
+  - Cross-process config lock: every settings write now goes through one
+    locked read-modify-write, including the fork-only duplicate-finder and
+    enabled-language settings.
+  - TMDB lookup-failure queue, metadata-review partial indexes, and
+    archive preservation fixes.
+  - Jellyfin `X-Emby-Token` fallback and Dispatcharr same-name profile adoption.
+  - Recovered stream failures now clear only recoverable failures; terminal
+    failures are kept.
+
+  **Kept fork behavior where the two overlapped**
+  - Fork post-import enrichment pipeline (changed-ids-only TMDB passes,
+    per-run sync reports) instead of upstream's known-series identity
+    reconciliation.
+  - Fork language backfill / retroactive split and Enabled Playback Languages
+    UI; upstream's parallel language backfill/split routes and cards were
+    removed so there is one implementation.
+  - Fork catalog-status panel and workflow banner in the header.
+  - Language detection: fork prefix and country-suffix checks run first;
+    upstream's category-tag fallback is used last.
+
+  **Fixes found during validation**
+  - **Excluded categories now remove content already imported.** Adding a
+    provider category to the import exclusion list used to stop only *new*
+    items; anything imported earlier stayed forever. XC imports now remove that
+    provider's sources in excluded categories (and uncategorized sources when
+    "exclude uncategorized" is on). A card is deleted only when it has no
+    source left from any provider, and manually curated cards are never touched.
+    A preview/apply endpoint is also available:
+    `POST /api/vod/providers/{id}/purge-excluded-content/?dry_run=true`
+    (default is preview; `dry_run=false` applies).
+    **Back up your database before upgrading** — the first XC import after
+    upgrading applies this cleanup automatically.
+  - Possible Metadata Matches:
+    - Reciprocal pairs (A→B and B→A) are now listed once.
+    - Pairs that share no source language (which the merge always refuses) are
+      no longer listed.
+    - Candidates are ordered best first (has a TMDB id, then has a year), so
+      the pre-selected candidate is the strongest match.
+    - A failing pair in a bulk merge is reported as skipped with its reason
+      instead of aborting the batch, and the UI now shows an error if the
+      request fails.
+  - Sync History reports: movie and series counters no longer overwrite each
+    other in the combined summary. Each run's phase timings stay with that run
+    even when a newer import starts. Review timing now starts after enrichment
+    instead of wrapping it. A cancelled enrichment (shutdown or redeploy) now
+    marks its run as failed instead of leaving it "running".
+  - TMDB review search (needs-review, missing-artwork, AI suggest, bulk AI)
+    strips a trailing year and country tag from the stored name before
+    searching, so titles like `Show (2014) (US)` find their match.
+  - Removed an internal tracker reference from the Language Backfill card text
+    and fixed garbled characters (`â€¦`/`â€”`) in the UI.
+
+  Database migrations were tested against a copy of a production-sized
+  database: additive only (new library-match table, indexes and columns),
+  repeat runs are no-ops, there are no row-count changes, and integrity and
+  foreign-key checks pass.
+
 ## 2026-09-24
 
 - ✅ Provider Sync History now separates catalog change events into Movies and
