@@ -31,6 +31,19 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-04 (Excluded-category purge review fixes)
+
+- ✅ 🔀 **The excluded-category cleanup now uses only your saved exclusion
+  list.** Follow-up to the review of
+  [#39](https://github.com/jstevenscl/vod-manager/pull/39). Categories that
+  "archive new categories" flags for one run are no longer treated as
+  excluded by the cleanup, so their content isn't deleted.
+- ✅ 🔀 **The cleanup logs a warning summary** with counts and example titles
+  every time it removes content during an import.
+- ✅ 🔀 **The cleanup preview/apply endpoint is XC-only.** Plex, Emby and
+  library providers get an error instead of risking removal of
+  uncategorized content.
+
 ## 2026-10-04 (Artwork changes no longer count as catalog changes)
 
 - ✅ 🔀 **New posters from a provider no longer count as catalog changes.**

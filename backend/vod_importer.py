@@ -1196,6 +1196,11 @@ async def _import_provider_catalog_impl(provider_id: int) -> dict:
     client = XCProviderClient(provider)
 
     exclude_categories = provider.get("import_exclude_categories") or []
+    # KNM: 2026-10-04 (upstream #39 review) -- saved list only. exclude_categories
+    # gains newly discovered categories below (archive_new_categories); purging
+    # with that list deleted their just-archived content, which then came back
+    # active on the next import.
+    saved_exclude_categories = list(exclude_categories)
     exclude_uncategorized = bool(provider.get("import_exclude_uncategorized"))
 
     # Stripped for the same reason vod_routes.get_provider_available_categories
@@ -1284,15 +1289,18 @@ async def _import_provider_catalog_impl(provider_id: int) -> dict:
     # still lists, including ones in categories excluded after they were
     # imported. Remove those now (see vod_db.purge_excluded_category_sources).
     category_purge = await asyncio.to_thread(
-        vod_db.purge_excluded_category_sources, provider_id, exclude_categories, exclude_uncategorized,
+        vod_db.purge_excluded_category_sources, provider_id, saved_exclude_categories, exclude_uncategorized,
     )
     changed_movie_ids.update(category_purge.pop("affected_movie_ids"))
     changed_series_ids.update(category_purge.pop("affected_series_ids"))
     if category_purge["movie_sources_removed"] or category_purge["series_sources_removed"]:
-        logger.info(
-            "[vod_importer] provider=%s removed %d movie/%d series source(s) in excluded categories; deleted %d movie(s)/%d series",
+        logger.warning(
+            "[vod_importer] provider=%s removed %d movie/%d series source(s) in excluded categories; "
+            "deleted %d movie(s)/%d series (e.g. %s). Preview with POST /providers/%s/purge-excluded-content/",
             provider["name"], category_purge["movie_sources_removed"], category_purge["series_sources_removed"],
             category_purge["movies_deleted"], category_purge["series_deleted"],
+            ", ".join((category_purge["sample_movies"] + category_purge["sample_series"])[:5]) or "none deleted",
+            provider_id,
         )
 
     catalog_changed = bool(changed_movie_ids or changed_series_ids or any(reconcile_result.values()))
