@@ -556,6 +556,12 @@ _REFRESH_DEFAULTS = {
     "catalog_refresh_seconds_jellyfin": 6 * 3600,
     "enrichment_ttl_seconds":           24 * 3600,
     "tmdb_sync_interval_seconds":       None,
+    # KNM: 2026-10-03 -- paced episode trickle: at most this many pending
+    # series sources per provider every 45 min, one request at a time with
+    # a few seconds between them, so a big backlog never looks like a burst.
+    "episode_trickle_batch":            100,
+    "episode_trickle_interval_seconds": 45 * 60,
+    "episode_trickle_spacing_seconds":  3,
 }
 
 

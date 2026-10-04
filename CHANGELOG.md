@@ -31,6 +31,23 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-03 (Episode trickle pacing)
+
+- ✅ **Paced background episode discovery.** Episode lists and stream ids
+  for shows that haven't been opened yet are now fetched on their own
+  schedule instead of a handful at a time once every enrichment cycle.
+  - Every 45 minutes, up to 100 pending series sources per provider are
+    fetched, one request at a time with 3 seconds between requests.
+  - A provider's batch stops early as soon as it goes into backoff or fails
+    3 requests in a row; the rest stay pending for the next run.
+  - Batch size, interval and spacing are config settings
+    (`episode_trickle_batch`, `episode_trickle_interval_seconds`,
+    `episode_trickle_spacing_seconds`).
+  - Opening a show still fetches its episodes immediately.
+- ✅ **Provider credentials hidden in "Apply rules" errors.** A failed
+  provider in the apply-rules summary no longer shows the provider's
+  username and password in the error URL.
+
 ## 2026-10-03 (Curation layout)
 
 - ✅ **Curation tab: language and country filters side by side.** Separate

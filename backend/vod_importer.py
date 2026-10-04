@@ -2124,6 +2124,7 @@ async def bulk_enrich_tmdb_series_metadata(
 
 async def bulk_enrich_series_episodes(
     concurrency: int = 6, limit: int | None = None, series_ids: set[int] | None = None,
+    request_spacing: float = 0, max_consecutive_failures: int | None = None,
 ) -> list[dict]:
     """Fetch provider detail only for pending series episode sources.
 
@@ -2169,6 +2170,7 @@ async def bulk_enrich_series_episodes(
                 provider, series_sem, False, write_queue=write_queue,
                 provider_count=len(selected), pending_only=True, episodes_only=True,
                 pending_sources=pending_by_provider[provider["id"]],
+                request_spacing=request_spacing, max_consecutive_failures=max_consecutive_failures,
             ) for provider in selected
         ))
         for provider, result in zip(selected, results):
@@ -2306,18 +2308,39 @@ def schedule_post_import_enrichment(
 
 
 async def _background_tmdb_enrichment() -> None:
-    """Process one small low-priority scheduled batch.
+    """Process one small low-priority scheduled TMDB batch.
 
-    Episode synchronization is source-gated and only visits a few missing
-    provider sources per scheduler tick. A show opened by a user uses the
-    on-demand path instead.
+    Episode discovery is not done here: run_episode_trickle_tick paces it on
+    its own schedule, and a show opened by a user uses the on-demand path.
     """
-    if await asyncio.to_thread(vod_db.count_pending_series_sources):
-        await bulk_enrich_series_episodes(concurrency=1, limit=8)
     if await asyncio.to_thread(vod_db.count_movies_pending_tmdb_enrichment):
         await bulk_enrich_tmdb_movies(concurrency=2, limit=_TMDB_BACKGROUND_BATCH)
     if await asyncio.to_thread(vod_db.count_series_pending_tmdb_metadata_enrichment):
         await bulk_enrich_tmdb_series_metadata(concurrency=2, limit=_TMDB_BACKGROUND_BATCH)
+
+
+# KNM: 2026-10-03 -- indirection so tests can observe the trickle's pacing.
+_trickle_sleep = asyncio.sleep
+_TRICKLE_MAX_CONSECUTIVE_FAILURES = 3
+
+
+async def run_episode_trickle_tick(
+    batch_size: int | None = None, spacing_seconds: float | None = None,
+) -> list[dict]:
+    """One paced episode-discovery pass: up to batch_size pending series
+    sources per provider, one request at a time, spacing_seconds apart.
+    A provider's lane stops early once it is in backoff or fails
+    _TRICKLE_MAX_CONSECUTIVE_FAILURES times in a row; the rest stay pending
+    for the next tick."""
+    settings = config.get_refresh_settings()
+    batch = int(batch_size if batch_size is not None else settings["episode_trickle_batch"])
+    spacing = float(spacing_seconds if spacing_seconds is not None else settings["episode_trickle_spacing_seconds"])
+    if batch <= 0:
+        return []
+    return await bulk_enrich_series_episodes(
+        concurrency=1, limit=batch, request_spacing=spacing,
+        max_consecutive_failures=_TRICKLE_MAX_CONSECUTIVE_FAILURES,
+    )
 
 
 def _schedule_background_tmdb_work() -> None:
@@ -2616,6 +2639,7 @@ async def _run_provider_series_phase(
     provider: dict, sem: asyncio.Semaphore, force: bool, write_queue: "asyncio.Queue | None" = None,
     provider_count: int = 1, pending_only: bool = False, episodes_only: bool = False,
     pending_sources: list[dict] | None = None,
+    request_spacing: float = 0, max_consecutive_failures: int | None = None,
 ) -> tuple[bool, list]:
     """Runs one provider's series phase to completion. Same ok semantics as
     _run_provider_movie_phase. write_queue: see _run_provider_movie_phase's
@@ -2648,15 +2672,25 @@ async def _run_provider_series_phase(
     for item in pending_sources if pending_sources is not None else series_ids:
         queue.put_nowait(item)
 
+    # KNM: 2026-10-03 -- paced trickle: optional gap between requests, and
+    # stop this provider's lane once it is backing off or keeps failing.
+    consecutive_failures = 0
+    started = False
+
     async def _worker() -> None:
-        nonlocal ok
+        nonlocal ok, consecutive_failures, started
         while True:
             if _ENRICH_CANCEL_REQUESTED:
+                return
+            if max_consecutive_failures and consecutive_failures >= max_consecutive_failures:
                 return
             try:
                 item = queue.get_nowait()
             except asyncio.QueueEmpty:
                 return
+            if request_spacing and started:
+                await _trickle_sleep(request_spacing)
+            started = True
             try:
                 if pending_sources is not None:
                     outcome = await _enrich_one(
@@ -2672,6 +2706,11 @@ async def _run_provider_series_phase(
                 outcome = False
             if outcome is False:
                 ok = False
+                consecutive_failures += 1
+                if max_consecutive_failures and _provider_backoff_remaining(provider["id"]) > 0:
+                    consecutive_failures = max_consecutive_failures
+            else:
+                consecutive_failures = 0
 
     await asyncio.gather(*(_worker() for _ in range(min(worker_count, len(series_ids) or 1))))
 
