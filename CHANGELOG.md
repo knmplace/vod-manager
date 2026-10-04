@@ -44,6 +44,16 @@ instead of opening a duplicate request.
   batches and the gap between requests. It explains what each one does and
   shows a live shows-per-hour estimate. Setting 0 shows turns preloading off.
   The card's help text is also brighter.
+- ✅ 🔀 **Shows whose episode list failed to load move to the back of the
+  queue.** Proposed upstream in [#43](https://github.com/jstevenscl/vod-manager/pull/43).
+  The preloader used to keep a failed show at the front, so every batch started
+  by re-trying the same dead shows. Now failed shows are tried only after every
+  other pending show, and at most once a day. Opening or playing a show still
+  loads its episodes right away.
+- ✅ 🔀 **A provider that keeps failing stops its batch early, as intended.**
+  Proposed upstream in [#43](https://github.com/jstevenscl/vod-manager/pull/43).
+  A failed episode-list request was not counted toward the "3 failures in a row"
+  stop, so a failing provider was still sent the whole batch.
 - Verified live after deploy: batches of 100 now start about 20.6 minutes
   apart (was about 51), about 291 shows per hour per provider (was about
   118). Requests stay about 3.3 seconds apart, with 0 failures and 0 errors
