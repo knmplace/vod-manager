@@ -31,6 +31,14 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-04 (Upstream PRs consolidated into #35)
+
+- 🔀 **[#35](https://github.com/jstevenscl/vod-manager/pull/35) now carries the import reporting, staged TMDB/episode
+  workflow, episode preloading, artwork-fingerprint and load-on-open work.**
+  It was rebuilt as one commit on upstream v0.2.20 and answers every review
+  finding from #31 and #35. [#31](https://github.com/jstevenscl/vod-manager/pull/31), [#43](https://github.com/jstevenscl/vod-manager/pull/43), [#44](https://github.com/jstevenscl/vod-manager/pull/44) and [#45](https://github.com/jstevenscl/vod-manager/pull/45) were
+  closed as superseded. #39–#42 remain open as separate PRs.
+
 ## 2026-10-04 (Excluded-category purge review fixes)
 
 - ✅ 🔀 **The excluded-category cleanup now uses only your saved exclusion
@@ -47,7 +55,7 @@ instead of opening a duplicate request.
 ## 2026-10-04 (Artwork changes no longer count as catalog changes)
 
 - ✅ 🔀 **New posters from a provider no longer count as catalog changes.**
-  Proposed upstream in [#44](https://github.com/jstevenscl/vod-manager/pull/44).
+  Proposed upstream in [#35](https://github.com/jstevenscl/vod-manager/pull/35) (originally [#44](https://github.com/jstevenscl/vod-manager/pull/44), closed as superseded).
   A refresh now counts a title as changed only when something that affects
   playback or placement changes: stream id, file type, TMDB id, name,
   category, or (for series) the provider's new-episodes timestamp. Posters,
@@ -60,7 +68,7 @@ instead of opening a duplicate request.
   on all 4 providers (one provider had shown about 25,800 the run before),
   and no TMDB re-matching ran.
 - ✅ 🔀 **Opening a show loads its missing episodes.** Proposed upstream in
-  [#45](https://github.com/jstevenscl/vod-manager/pull/45) (stacked on #43).
+  [#35](https://github.com/jstevenscl/vod-manager/pull/35) (originally [#45](https://github.com/jstevenscl/vod-manager/pull/45), closed as superseded).
   Imports no longer wait on an episode-sync phase; the background preloader
   fills episodes over time, and opening a show fetches any provider that
   has none yet, even when another provider already supplied some.
@@ -68,24 +76,24 @@ instead of opening a duplicate request.
 ## 2026-10-04 (Episode list preloading settings)
 
 - ✅ 🔀 **Episode lists preload about 3x faster, still gently.** Proposed upstream
-  in [#43](https://github.com/jstevenscl/vod-manager/pull/43) (with the pacing, stacked on #35). The background
+  in [#35](https://github.com/jstevenscl/vod-manager/pull/35) (originally [#43](https://github.com/jstevenscl/vod-manager/pull/43), closed as superseded). The background
   preloader now pauses 15 minutes between batches instead of 45, so it does
   about 290 shows per hour per provider instead of about 100. It still sends
   one request at a time with 3 seconds between requests.
 - ✅ 🔀 **Preloading is adjustable in Settings → Refresh Schedule.** Proposed
-  upstream in [#43](https://github.com/jstevenscl/vod-manager/pull/43). The new
+  upstream in [#35](https://github.com/jstevenscl/vod-manager/pull/35) (originally [#43](https://github.com/jstevenscl/vod-manager/pull/43)). The new
   "Episode list preloading" section sets shows per batch, the pause between
   batches and the gap between requests. It explains what each one does and
   shows a live shows-per-hour estimate. Setting 0 shows turns preloading off.
   The card's help text is also brighter.
 - ✅ 🔀 **Shows whose episode list failed to load move to the back of the
-  queue.** Proposed upstream in [#43](https://github.com/jstevenscl/vod-manager/pull/43).
+  queue.** Proposed upstream in [#35](https://github.com/jstevenscl/vod-manager/pull/35) (originally [#43](https://github.com/jstevenscl/vod-manager/pull/43)).
   The preloader used to keep a failed show at the front, so every batch started
   by re-trying the same dead shows. Now failed shows are tried only after every
   other pending show, and at most once a day. Opening or playing a show still
   loads its episodes right away.
 - ✅ 🔀 **A provider that keeps failing stops its batch early, as intended.**
-  Proposed upstream in [#43](https://github.com/jstevenscl/vod-manager/pull/43).
+  Proposed upstream in [#35](https://github.com/jstevenscl/vod-manager/pull/35) (originally [#43](https://github.com/jstevenscl/vod-manager/pull/43)).
   A failed episode-list request was not counted toward the "3 failures in a row"
   stop, so a failing provider was still sent the whole batch.
 - Verified live after deploy: batches of 100 now start about 20.6 minutes
@@ -288,7 +296,7 @@ discovery changes that upstream doesn't have.
   matching non-null years; conflicting or missing years remain for user review.
   Episode progress reports provider sources separately from canonical series,
   and bounded work drains incrementally in the background. Proposed upstream
-  in [#31](https://github.com/jstevenscl/vod-manager/pull/31).
+  in [#35](https://github.com/jstevenscl/vod-manager/pull/35) (originally [#31](https://github.com/jstevenscl/vod-manager/pull/31), closed as superseded).
 
 - ✅🔼 Language policy now applies consistently at import: XC, Plex, and
   Emby catalogs use the enabled playback languages, classify from the raw
@@ -356,7 +364,7 @@ discovery changes that upstream doesn't have.
 
 - ✅ Post-import series episode discovery now runs with automatic concurrency
   of six provider requests, while preserving persistent provider HTTP clients.
-  This is the current value documented in upstream [#31](https://github.com/jstevenscl/vod-manager/pull/31).
+  This is the current value documented in upstream [#35](https://github.com/jstevenscl/vod-manager/pull/35) (originally [#31](https://github.com/jstevenscl/vod-manager/pull/31)).
 
 - ✅ Enrichment progress now counts canonical series once instead of counting
   each provider source separately, preventing misleading totals above 100%.
@@ -365,7 +373,7 @@ discovery changes that upstream doesn't have.
   when a reviewer confirms a same-title catalog match that has no TMDB ID.
   Automatic matching remains disabled in that case; the merge requires an
   explicit confirmation. Proposed upstream in
-  [#31](https://github.com/jstevenscl/vod-manager/pull/31).
+  [#35](https://github.com/jstevenscl/vod-manager/pull/35) (originally [#31](https://github.com/jstevenscl/vod-manager/pull/31)).
 
 - ✅ Stream Recovery is now a dedicated Operations page for movies blocked
   after every playable source repeatedly fails. It lists the blocked title,
