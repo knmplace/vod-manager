@@ -1240,11 +1240,20 @@ async def _import_provider_catalog_impl(provider_id: int) -> dict:
     # refreshed below regardless of the setting, so turning this on later
     # never retroactively archives the whole existing category list.
     seen_category_names = {n for n in category_names.values() if n} | {n for n in series_category_names.values() if n}
-    if provider.get("archive_new_categories"):
-        known_categories = set(provider.get("known_import_categories") or [])
-        new_categories = seen_category_names - known_categories
+    # KNM: 2026-10-05 -- persist newly discovered categories to the saved
+    # exclusion list. known_import_categories is updated below in this same
+    # run, so a run-only exclusion let the category's content import as active
+    # on the next import. Skipped on a provider's first import (nothing known
+    # yet), otherwise every category would be excluded for good.
+    known_categories = set(provider.get("known_import_categories") or [])
+    if provider.get("archive_new_categories") and known_categories:
+        new_categories = seen_category_names - known_categories - set(exclude_categories)
         if new_categories:
-            exclude_categories = list(exclude_categories) + list(new_categories)
+            exclude_categories = list(exclude_categories) + sorted(new_categories)
+            await asyncio.to_thread(
+                vod_db.set_provider_import_exclude_categories, provider_id,
+                exclude_categories, exclude_uncategorized,
+            )
             logger.info("[vod_importer] provider=%s auto-archiving %d newly discovered categor(y/ies): %s",
                         provider["name"], len(new_categories), ", ".join(sorted(new_categories)))
     await asyncio.to_thread(

@@ -31,6 +31,14 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-05 (Newly discovered categories stay excluded)
+
+- ✅ **"Archive new categories" now keeps a new category excluded.** A
+  category first seen on an import was only excluded for that one run; the
+  next import imported its content as active. New categories are now added
+  to the provider's saved category exclusions, where you can untick them to
+  import. A provider's very first import no longer excludes every category.
+
 ## 2026-10-04 (Upstream PRs consolidated into #35)
 
 - 🔀 **[#35](https://github.com/jstevenscl/vod-manager/pull/35) now carries the import reporting, staged TMDB/episode
