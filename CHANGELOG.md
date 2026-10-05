@@ -33,19 +33,22 @@ instead of opening a duplicate request.
 
 ## 2026-10-05 (Auto-merge same TMDB ID up to 2 years apart)
 
-- ✅ **Cards with the same TMDB ID now auto-merge when their years differ by
+All four entries below are proposed upstream as a follow-up commit on
+[#35](https://github.com/jstevenscl/vod-manager/pull/35), which introduced the exact-year gate.
+
+- ✅ 🔀 **Cards with the same TMDB ID now auto-merge when their years differ by
   1 or 2.** Providers often list a festival or regional year, which left the
   same film as two cards (e.g. *All Roads to Pearla* 2019 / *Sleeping in
   Plastic* 2020). A shared source language is still required, and gaps of 3+
   years stay for manual review.
-- ✅ **Duplicate Finder explains each group.** A line under the badges says
+- ✅ 🔀 **Duplicate Finder explains each group.** A line under the badges says
   why the cards were not auto-merged: no TMDB ID, different TMDB IDs, no
   shared language, years too far apart, auto-merge turned off, or that the
   group qualifies and merges on the next refresh.
-- ✅ **Year gap is adjustable.** Settings → Duplicate Finder has a 0–3 year
+- ✅ 🔀 **Year gap is adjustable.** Settings → Duplicate Finder has a 0–3 year
   dropdown (default 2; 0 = exact year only). Lowering it later does not split
   cards that already merged.
-- ✅ **"Merge existing duplicates now" button.** Automatic merges only
+- ✅ 🔀 **"Merge existing duplicates now" button.** Automatic merges only
   re-check cards an import or refresh touched, so pairs that already qualify
   can sit split. The button runs the same auto-merge (same language and year
   rules) across the whole catalog once. Merges can't be undone, so download a
