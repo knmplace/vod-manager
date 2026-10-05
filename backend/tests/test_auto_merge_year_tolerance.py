@@ -119,3 +119,52 @@ def test_reason_auto_merge_off(db, provider_id):
     a = _movie(db, provider_id, "Terrifier", 2018, "one", 420634)
     b = _movie(db, provider_id, "Terrifier", 2017, "two", 420634)
     assert "turned off" in _reasons(db, a, b)
+
+
+def test_year_tolerance_setting_defaults_to_two_and_clamps():
+    assert config.get_duplicate_finder_auto_merge_year_tolerance() == 2
+    config.save_duplicate_finder_auto_merge_year_tolerance(9)
+    assert config.get_duplicate_finder_auto_merge_year_tolerance() == 3
+    config.save_duplicate_finder_auto_merge_year_tolerance(-1)
+    assert config.get_duplicate_finder_auto_merge_year_tolerance() == 0
+
+
+def test_tolerance_zero_requires_exact_year(db, provider_id):
+    config.save_duplicate_finder_auto_merge_year_tolerance(0)
+    first = _movie(db, provider_id, "Terrifier", 2018, "one", 420634)
+    second = _movie(db, provider_id, "Terrifier", 2017, "two", 420634)
+
+    db.auto_merge_movie_by_tmdb(first["id"])
+
+    assert db.get_movie(second["id"]) is not None
+    assert "2018 vs 2017" in _reasons(db, first, second)
+
+
+def test_tolerance_three_merges_three_year_gap(db, provider_id):
+    config.save_duplicate_finder_auto_merge_year_tolerance(3)
+    first = _movie(db, provider_id, "Burn Your Maps", 2016, "one", 352504)
+    second = _movie(db, provider_id, "Burn Your Maps", 2019, "two", 352504)
+
+    db.auto_merge_movie_by_tmdb(first["id"])
+
+    assert db.get_movie(second["id"]) is None
+
+
+def test_reason_names_configured_tolerance(db, provider_id):
+    config.save_duplicate_finder_auto_merge_year_tolerance(1)
+    a = _movie(db, provider_id, "Burn Your Maps", 2016, "one", 352504)
+    b = _movie(db, provider_id, "Burn Your Maps", 2018, "two", 352504)
+    assert "more than 1 year apart" in _reasons(db, a, b)
+
+
+def test_merge_existing_route_runs_full_catalog_merge(db, provider_id):
+    import asyncio
+    import vod_routes
+
+    a = _movie(db, provider_id, "Terrifier", 2018, "one", 420634)
+    b = _movie(db, provider_id, "Terrifier", 2017, "two", 420634)
+
+    result = asyncio.run(vod_routes.merge_existing_tmdb_duplicates())
+
+    assert result == {"movies_merged": 1, "series_merged": 0}
+    assert (db.get_movie(a["id"]) is None) != (db.get_movie(b["id"]) is None)

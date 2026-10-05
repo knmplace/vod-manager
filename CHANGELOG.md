@@ -42,6 +42,15 @@ instead of opening a duplicate request.
   why the cards were not auto-merged: no TMDB ID, different TMDB IDs, no
   shared language, years too far apart, auto-merge turned off, or that the
   group qualifies and merges on the next refresh.
+- ✅ **Year gap is adjustable.** Settings → Duplicate Finder has a 0–3 year
+  dropdown (default 2; 0 = exact year only). Lowering it later does not split
+  cards that already merged.
+- ✅ **"Merge existing duplicates now" button.** Automatic merges only
+  re-check cards an import or refresh touched, so pairs that already qualify
+  can sit split. The button runs the same auto-merge (same language and year
+  rules) across the whole catalog once. Merges can't be undone, so download a
+  database backup first. On the test bed it merged 219 movies and 26 TV shows,
+  taking Duplicate Finder from 381 movie groups to 169.
 
 ## 2026-10-05 (Newly discovered categories stay excluded)
 

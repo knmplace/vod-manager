@@ -27,6 +27,7 @@ from pathlib import Path
 
 from config import (
     DATA_DIR, get_config, get_duplicate_finder_auto_merge_tmdb,
+    get_duplicate_finder_auto_merge_year_tolerance,
     get_duplicate_finder_quality_prefix_matching, get_enabled_languages,
     get_refresh_settings, get_stream_priority_mode, get_vod_xc_account_id,
 )
@@ -9976,18 +9977,16 @@ def merge_movie(from_id: int, into_id: int) -> None:
 
 
 # KNM: 2026-10-05 -- cards sharing a tmdb_id whose years differ by at most
-# this much auto-merge: TMDB already identifies them as one title, and a 1-2
-# year gap is almost always a provider using a festival/regional year. Live
-# catalog check 2026-10-04: 212 same-id movie pairs 1y apart, 31 at 2y.
-_AUTO_MERGE_TMDB_YEAR_TOLERANCE = 2
-
-
+# the configured tolerance (default 2) auto-merge: TMDB already identifies
+# them as one title, and a 1-2 year gap is almost always a provider using a
+# festival/regional year. Live catalog check 2026-10-04: 212 same-id movie
+# pairs 1y apart, 31 at 2y.
 def _tmdb_merge_year_status(this_year, other_year) -> str:
     if this_year is None or other_year is None:
         return "one_missing"
     if this_year == other_year:
         return "agree"
-    if abs(this_year - other_year) <= _AUTO_MERGE_TMDB_YEAR_TOLERANCE:
+    if abs(this_year - other_year) <= get_duplicate_finder_auto_merge_year_tolerance():
         return "near"
     return "MISMATCH"
 
@@ -10207,8 +10206,11 @@ def _auto_merge_pair_reason(a: dict, b: dict, langs: dict) -> str | None:
         return f"No shared language ({', '.join(sorted(langs_a))} vs {', '.join(sorted(langs_b))})"
     status = _tmdb_merge_year_status(a.get("year"), b.get("year"))
     if status == "MISMATCH":
+        tolerance = get_duplicate_finder_auto_merge_year_tolerance()
+        if not tolerance:
+            return f"Years {a.get('year')} vs {b.get('year')} differ (exact year required)"
         return (f"Years {a.get('year')} vs {b.get('year')} are more than "
-                f"{_AUTO_MERGE_TMDB_YEAR_TOLERANCE} years apart")
+                f"{tolerance} year{'s' if tolerance != 1 else ''} apart")
     if status == "one_missing" and _dedup_name_key(a.get("name") or "") != _dedup_name_key(b.get("name") or ""):
         return "Year missing and titles differ"
     return None

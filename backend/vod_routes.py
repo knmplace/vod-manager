@@ -12,6 +12,7 @@ from config import (
     get_ai_provider,
     get_anthropic_api_key,
     get_default_categories_prompt_dismissed,
+    get_duplicate_finder_auto_merge_year_tolerance,
     get_duplicate_finder_quality_prefix_matching,
     get_enabled_languages,
     get_gemini_api_key,
@@ -29,6 +30,7 @@ from config import (
     has_credentials,
     save_ai_provider,
     save_anthropic_api_key,
+    save_duplicate_finder_auto_merge_year_tolerance,
     save_duplicate_finder_quality_prefix_matching,
     save_enabled_languages,
     save_gemini_api_key,
@@ -2907,6 +2909,39 @@ class DuplicateFinderQualityPrefixMatchingRequest(BaseModel):
 async def save_duplicate_finder_quality_prefix_matching_route(body: DuplicateFinderQualityPrefixMatchingRequest):
     save_duplicate_finder_quality_prefix_matching(body.enabled)
     return {"ok": True}
+
+
+# KNM: 2026-10-05 -- max year gap for same-TMDB-ID auto-merge (0-3, default 2).
+@router.get("/duplicates/auto-merge-year-tolerance/", dependencies=_GUARDS)
+async def get_duplicate_finder_auto_merge_year_tolerance_route():
+    return {"years": get_duplicate_finder_auto_merge_year_tolerance()}
+
+
+class DuplicateFinderAutoMergeYearToleranceRequest(BaseModel):
+    years: int
+
+
+@router.post("/duplicates/auto-merge-year-tolerance/", dependencies=_GUARDS)
+async def save_duplicate_finder_auto_merge_year_tolerance_route(body: DuplicateFinderAutoMergeYearToleranceRequest):
+    save_duplicate_finder_auto_merge_year_tolerance(body.years)
+    return {"years": get_duplicate_finder_auto_merge_year_tolerance()}
+
+
+def _merge_existing_tmdb_duplicates() -> dict:
+    movies = vod_db.auto_merge_movie_tmdb_collisions(None) or []
+    series = vod_db.auto_merge_series_tmdb_collisions(None) or []
+    return {
+        "movies_merged": sum(1 for e in movies if e.get("action") == "merged"),
+        "series_merged": sum(1 for e in series if e.get("action") == "merged"),
+    }
+
+
+# KNM: 2026-10-05 -- automatic merges only re-check cards an import or refresh
+# touched, so pairs that already qualify sit split until then. This runs the
+# same TMDB-ID auto-merge (same language/year gates) over the whole catalog.
+@router.post("/duplicates/merge-existing/", dependencies=_GUARDS)
+async def merge_existing_tmdb_duplicates():
+    return await asyncio.to_thread(_merge_existing_tmdb_duplicates)
 
 
 @router.get("/duplicates/", dependencies=_GUARDS)
