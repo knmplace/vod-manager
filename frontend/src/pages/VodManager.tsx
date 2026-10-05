@@ -440,6 +440,7 @@ interface DuplicateGroupItem {
 
 interface DuplicateGroup {
   items: DuplicateGroupItem[]
+  auto_merge_reasons?: string[]
 }
 
 interface XcClient {
@@ -2185,6 +2186,11 @@ function DuplicateGroupRow({ group, contentType, xcCredentials, onMerge, isPendi
           </span>
         )}
       </div>
+      {group.auto_merge_reasons && group.auto_merge_reasons.length > 0 && (
+        <p className="text-[11px] text-muted-foreground">
+          {group.auto_merge_reasons[0].startsWith('Qualifies') ? '' : 'Not auto-merged: '}{group.auto_merge_reasons.join(' · ')}
+        </p>
+      )}
       {group.items.map((item) => {
         // trueYear is TMDB's own canonical release year for this item's
         // tmdb_id -- undefined while loading, null if the lookup failed, a

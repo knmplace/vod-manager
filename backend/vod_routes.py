@@ -2918,7 +2918,9 @@ async def scan_duplicates(content_type: str):
     # and since it's plain sync sqlite3 code, that froze the ENTIRE server
     # (every other request, including unrelated ones) for the whole scan --
     # not just this endpoint. to_thread hands it to a worker thread instead.
-    return await asyncio.to_thread(vod_db.find_duplicate_groups, content_type)
+    groups = await asyncio.to_thread(vod_db.find_duplicate_groups, content_type)
+    # KNM: 2026-10-05 -- per-group "why not auto-merged" line for the reviewer.
+    return await asyncio.to_thread(vod_db.annotate_auto_merge_reasons, content_type, groups)
 
 
 @router.post("/duplicates/merge/", dependencies=_GUARDS)

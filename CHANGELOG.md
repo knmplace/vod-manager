@@ -31,6 +31,18 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-05 (Auto-merge same TMDB ID up to 2 years apart)
+
+- ✅ **Cards with the same TMDB ID now auto-merge when their years differ by
+  1 or 2.** Providers often list a festival or regional year, which left the
+  same film as two cards (e.g. *All Roads to Pearla* 2019 / *Sleeping in
+  Plastic* 2020). A shared source language is still required, and gaps of 3+
+  years stay for manual review.
+- ✅ **Duplicate Finder explains each group.** A line under the badges says
+  why the cards were not auto-merged: no TMDB ID, different TMDB IDs, no
+  shared language, years too far apart, auto-merge turned off, or that the
+  group qualifies and merges on the next refresh.
+
 ## 2026-10-05 (Newly discovered categories stay excluded)
 
 - ✅ **"Archive new categories" now keeps a new category excluded.** A
