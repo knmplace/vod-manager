@@ -33,21 +33,22 @@ instead of opening a duplicate request.
 
 ## 2026-10-05 (Automatic TMDB matching for titles without an ID)
 
-Prepared as a standalone upstream PR on top of #47 (it needs the local TMDB
-library). It will be opened once the live test here passes.
+Proposed upstream as a standalone PR,
+[#48](https://github.com/jstevenscl/vod-manager/pull/48), built on #47 (it
+needs the local TMDB library).
 
-- ✅ **Titles without a TMDB ID are matched automatically.** After each fill
+- ✅ 🔀 **Titles without a TMDB ID are matched automatically.** After each fill
   burst (or when you click "Match titles without a TMDB ID"), up to 2,000
   catalog titles without an ID are matched by name and year. Series are matched
   first. The local TMDB library is checked first, and TMDB is searched only if
   it has no match. A match is applied the same way a reviewer would apply it,
   so cards for the same show from different providers merge into one.
-- ✅ **Unclear results go to Metadata Review.** The title stays visible while
+- ✅ 🔀 **Unclear results go to Metadata Review.** The title stays visible while
   it waits there, and nothing is guessed. Unclear means more than one possible
   match, a year that doesn't agree with TMDB's, or no year when TMDB has other
   titles with the same name. Titles TMDB doesn't know are tried again a week
   later.
-- ✅ **Local hit rate.** The TMDB Library page shows how many of today's
+- ✅ 🔀 **Local hit rate.** The TMDB Library page shows how many of today's
   lookups were answered locally.
 - **Tests:** 13 new tests. Full backend suite: 487 passed. Frontend build is
   clean.
