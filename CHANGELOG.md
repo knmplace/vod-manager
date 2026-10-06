@@ -31,6 +31,19 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-06 (Every TMDB answer is kept locally)
+
+- ✅ **The same question is never sent to TMDB twice.** Name searches and IMDb
+  lookups made by automatic matching, library import, Metadata Review and the
+  TMDB Library page are now saved in the local TMDB library. Asking again is
+  answered locally and counts as a local lookup, not a TMDB request.
+- ✅ **"Nothing found" is remembered for 7 days**, then TMDB is asked again.
+  Found answers don't expire.
+- ✅ **Search results are saved in full.** Full details for the top 5 results
+  of each search are stored, so they can be matched locally later.
+- ✅ **TMDB list sync saves the titles it returns.** List contents are still
+  checked live.
+
 ## 2026-10-05 (Automatic TMDB matching for titles without an ID)
 
 Proposed upstream as a standalone PR,
