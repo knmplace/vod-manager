@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import App from './App'
 import PortalApp from './PortalApp'
+import { ToastHost } from './lib/toast'
 import './index.css'
 
 class AppErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
@@ -45,6 +46,7 @@ createRoot(document.getElementById('root')!).render(
     <QueryClientProvider client={queryClient}>
       <AppErrorBoundary>
         {isPortal ? <PortalApp /> : <App />}
+        <ToastHost />
       </AppErrorBoundary>
     </QueryClientProvider>
   </StrictMode>

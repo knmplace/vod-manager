@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { CheckCircle2, CircleAlert, Database, Loader2, Play, RefreshCw, Search, Settings as SettingsIcon } from 'lucide-react'
+import { Database, Loader2, Play, RefreshCw, Search, Settings as SettingsIcon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { inputCls, SectionCard, StatusPill } from '@/components/dvr-shared'
 import api from '@/lib/api'
+import { toast } from '@/lib/toast'
 
 type MediaType = 'movie' | 'tv'
 
@@ -76,13 +77,6 @@ export default function TmdbStore() {
   })
   const status = statusQuery.data
 
-  const [toast, setToast] = useState<{ ok: boolean; text: string } | null>(null)
-  useEffect(() => {
-    if (!toast) return
-    const t = setTimeout(() => setToast(null), 3000)
-    return () => clearTimeout(t)
-  }, [toast])
-
   const [form, setForm] = useState<StoreSettings | null>(null)
   useEffect(() => {
     if (status && !form) setForm(status.settings)
@@ -92,10 +86,10 @@ export default function TmdbStore() {
     mutationFn: (s: StoreSettings) => api.put('/tmdb-store/settings', s).then((r) => r.data),
     onSuccess: (data: StoreSettings) => {
       setForm(data)
-      setToast({ ok: true, text: 'Settings saved' })
+      toast.success('Settings saved')
       qc.invalidateQueries({ queryKey: ['tmdb-store-status'] })
     },
-    onError: () => setToast({ ok: false, text: 'Could not save settings' }),
+    onError: () => toast.error('Could not save settings'),
   })
   const runJob = useMutation({
     mutationFn: (job: 'burst' | 'changes' | 'export') => api.post(`/tmdb-store/run/${job}`).then((r) => r.data),
@@ -281,18 +275,6 @@ export default function TmdbStore() {
             {saveSettings.isPending ? <Loader2 size={12} className="animate-spin" /> : 'Save settings'}
           </Button>
         </SectionCard>
-      )}
-
-      {toast && (
-        <div
-          role="status"
-          className={`fixed bottom-4 right-4 z-50 flex items-center gap-2 rounded-md border px-3 py-2 text-sm font-medium shadow-lg bg-card ${
-            toast.ok ? 'text-success border-success/40' : 'text-destructive border-destructive/40'
-          }`}
-        >
-          {toast.ok ? <CheckCircle2 size={14} /> : <CircleAlert size={14} />}
-          {toast.text}
-        </div>
       )}
     </div>
   )
