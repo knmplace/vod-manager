@@ -31,6 +31,46 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-05 (Local TMDB library)
+
+Proposed upstream as a standalone PR,
+[#47](https://github.com/jstevenscl/vod-manager/pull/47), based on current
+upstream `main` and independent of #35.
+
+- ✅ 🔀 **TMDB lookups are saved locally and reused.** Once a TMDB API key is
+  set, every title the app looks up is stored in `data/tmdb.sqlite` and served
+  from there next time. This covers enrichment, Metadata Review search, AI
+  resolve candidates, library matching and episode lists. Name searches use
+  the local copy only when it finds an exact title match; anything else still
+  goes to TMDB.
+- ✅ 🔀 **Background fill.** The most popular titles are pre-fetched in small
+  bursts (defaults: 2,000 × 4 bursts a day, 20,000 requests/day cap,
+  4 at a time, top 100,000 per type). TMDB's change feed keeps stored titles
+  current.
+- ✅ 🔀 **TMDB Library page** under Curation & Maintenance shows:
+  - store status
+  - fill settings
+  - a lookup box
+  - a Clear button
+- ✅ 🔀 **On/off switch.** Off stops the fill and sends every lookup straight
+  to TMDB, as before. Use it if disk space is tight. The existing file stays
+  until you clear it.
+- ✅ 🔀 **Shared toast messages.** "Settings saved" and future confirmations
+  use one reusable toast component.
+- **Disk usage — expect up to ~1.5 GB.** Measured on the test bed:
+  - after loading TMDB's ID lists (~1.4M IDs) and ~2,000 titles, the file was
+    ~155 MB, of which ~143 MB is a fixed cost for the ID lists
+  - each stored title adds about 6 KB
+  - a full pre-fill at the defaults (100k movies + 100k shows) comes to
+    roughly 1.3–1.5 GB and takes a few weeks at the default rate
+  - lowering "Pre-fill top N" shrinks that proportionally
+- **Tests:**
+  - 36 new tests cover the store, the fill and the on/off routing
+  - full backend suite: 251 passed on the upstream PR branch
+  - frontend build is clean
+  - live: the first fill run stored ~2,000 titles, and lookups were then
+    served locally; with the switch off they went to TMDB.
+
 ## 2026-10-05 (Auto-merge same TMDB ID up to 2 years apart)
 
 All four entries below are proposed upstream as a follow-up commit on
