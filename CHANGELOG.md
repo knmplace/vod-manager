@@ -33,6 +33,9 @@ instead of opening a duplicate request.
 
 ## 2026-10-05 (Automatic TMDB matching for titles without an ID)
 
+Prepared as a standalone upstream PR on top of #47 (it needs the local TMDB
+library). It will be opened once the live test here passes.
+
 - ✅ **Titles without a TMDB ID are matched automatically.** After each fill
   burst (or when you click "Match titles without a TMDB ID"), up to 2,000
   catalog titles without an ID are matched by name and year. Series are matched
