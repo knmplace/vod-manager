@@ -19,7 +19,7 @@ import time
 
 import httpx
 
-from config import get_tmdb_api_key
+from config import get_tmdb_api_key, get_tmdb_store_settings
 import tmdb_store
 import vod_db
 
@@ -106,8 +106,14 @@ def _redact(exc: Exception) -> str:
 # caller below needs, so one stored payload answers all of them.
 _STORE_APPEND = {
     "movie": "credits,release_dates,alternative_titles",
-    "tv": "credits,content_ratings,alternative_titles",
+    "tv": "credits,content_ratings,external_ids,alternative_titles",
 }
+
+
+def store_enabled() -> bool:
+    """The local TMDB library switch. Off: nothing is read from or written to
+    the store and every lookup goes straight to TMDB."""
+    return bool(get_tmdb_store_settings()["enabled"])
 
 
 async def fetch_title_payload(media_type: str, tmdb_id, *, use_store: bool = True) -> dict | None:
@@ -115,7 +121,7 @@ async def fetch_title_payload(media_type: str, tmdb_id, *, use_store: bool = Tru
     (stored on success). Raises TmdbNotFoundError on a TMDB 404; returns
     None on any other failure or when no API key is configured."""
     key = str(tmdb_id).strip()
-    local_ok = key.isdigit()
+    local_ok = key.isdigit() and store_enabled()
     if use_store and local_ok:
         try:
             cached = await asyncio.to_thread(tmdb_store.get_payload, media_type, int(key))
@@ -217,6 +223,34 @@ def normalize_list_items(raw_items: list[dict]) -> list[dict]:
     return out
 
 
+async def search_local(media_type: str, query: str, year: int | None = None, limit: int = 10) -> list[dict] | None:
+    """Local-library name search, or None when the library is off or can't
+    answer with certainty (see tmdb_store.search_confident) -- callers then
+    ask TMDB's /search."""
+    if not store_enabled():
+        return None
+    try:
+        return await asyncio.to_thread(tmdb_store.search_confident, media_type, query, year, limit)
+    except Exception as exc:
+        logger.warning("[tmdb_sync] local search failed for %r: %s", query, exc)
+        return None
+
+
+def as_search_item(media_type: str, row: dict) -> dict:
+    """A tmdb_store row in TMDB's own /search result-item shape."""
+    is_movie = media_type == "movie"
+    return {
+        "id": row["tmdb_id"],
+        "title" if is_movie else "name": row.get("title"),
+        "original_title" if is_movie else "original_name": row.get("original_title"),
+        "release_date" if is_movie else "first_air_date": row.get("release_date") or "",
+        "poster_path": row.get("poster_path"),
+        "overview": row.get("overview") or "",
+        "vote_average": row.get("vote_average"),
+        "popularity": row.get("popularity"),
+    }
+
+
 async def search_title(query: str, content_type: str) -> list[dict]:
     """Real TMDB search results for a query -- used by the year-review flow so
     a user picks from actual candidates (title/year/poster/tmdb_id/cast)
@@ -253,13 +287,17 @@ async def search_title(query: str, content_type: str) -> list[dict]:
         raise ValueError("TMDB API key not configured")
 
     endpoint = "movie" if content_type == "movie" else "tv"
-    async with _tmdb_semaphore:
-        r = await _tmdb_get(
-            f"{_API_BASE}/search/{endpoint}",
-            params={"api_key": api_key, "query": query},
-        )
-    r.raise_for_status()
-    data = r.json()
+    local = await search_local(endpoint, query)
+    if local:
+        data = {"results": [as_search_item(endpoint, row) for row in local]}
+    else:
+        async with _tmdb_semaphore:
+            r = await _tmdb_get(
+                f"{_API_BASE}/search/{endpoint}",
+                params={"api_key": api_key, "query": query},
+            )
+        r.raise_for_status()
+        data = r.json()
 
     async def _build(item: dict) -> dict:
         date = item.get("release_date") if content_type == "movie" else item.get("first_air_date")
@@ -297,6 +335,9 @@ async def search_title(query: str, content_type: str) -> list[dict]:
     return list(await asyncio.gather(*[_build(item) for item in candidates]))
 
 
+_LATEST_SEASON_MAX_AGE = 86400
+
+
 async def get_series_episode_list(tmdb_id: str) -> list[dict]:
     """Every canonical episode TMDB knows about for a series -- the DVR
     Library's Sonarr/Radarr-style missing-episode view diffs this against
@@ -305,24 +346,39 @@ async def get_series_episode_list(tmdb_id: str) -> list[dict]:
     pool, or an EPG search/schedule) rather than requiring an admin to
     notice and go look for a specific episode themselves.
 
-    One /tv/{id} call for the season list, then one /tv/{id}/season/{n}
-    call per real season (TMDB's season 0 is "Specials", excluded --
+    The show payload (season list) comes via fetch_title_payload, then one
+    /tv/{id}/season/{n} per real season not already in the local library (TMDB's season 0 is "Specials", excluded --
     Dispatcharr recordings/EPG data essentially never carry a specials
     numbering VOD Manager could match against), fetched concurrently."""
     api_key = get_tmdb_api_key()
     if not api_key:
         raise ValueError("TMDB API key not configured")
-    async with _tmdb_semaphore:
-        r = await _tmdb_get(f"{_API_BASE}/tv/{tmdb_id}", params={"api_key": api_key})
-    r.raise_for_status()
-    seasons = [s["season_number"] for s in r.json().get("seasons", []) if s.get("season_number")]
+    show = await fetch_title_payload("tv", tmdb_id)
+    if show is None:
+        raise RuntimeError(f"TMDB series {tmdb_id} unavailable")
+    seasons = [s["season_number"] for s in show.get("seasons", []) if s.get("season_number")]
+    latest = max(seasons, default=None)
+    # Seasons are stored locally; a show's rows are dropped when TMDB reports
+    # it changed, and the newest season is also refreshed daily for airing shows.
+    store_on = store_enabled() and str(tmdb_id).isdigit()
 
     async def _season(season_number: int) -> list[dict]:
+        if store_on:
+            try:
+                cached = await asyncio.to_thread(
+                    tmdb_store.get_season, int(tmdb_id), season_number,
+                    _LATEST_SEASON_MAX_AGE if season_number == latest else None,
+                )
+            except Exception as exc:
+                logger.warning("[tmdb_sync] local season read failed for tmdb_id=%s: %s", tmdb_id, exc)
+                cached = None
+            if cached is not None:
+                return cached
         try:
             async with _tmdb_semaphore:
                 sr = await _tmdb_get(f"{_API_BASE}/tv/{tmdb_id}/season/{season_number}", params={"api_key": api_key})
             sr.raise_for_status()
-            return [
+            episodes = [
                 {
                     "season_number": season_number,
                     "episode_number": ep["episode_number"],
@@ -334,6 +390,13 @@ async def get_series_episode_list(tmdb_id: str) -> list[dict]:
         except Exception as exc:
             logger.warning("[tmdb_sync] failed to fetch season %d for tmdb_id=%s: %s", season_number, tmdb_id, _redact(exc))
             return []
+        if store_on:
+            try:
+                await asyncio.to_thread(tmdb_store.put_season, int(tmdb_id), season_number, episodes)
+                await asyncio.to_thread(tmdb_store.add_requests, 1)
+            except Exception as exc:
+                logger.warning("[tmdb_sync] local season write failed for tmdb_id=%s: %s", tmdb_id, exc)
+        return episodes
 
     results = await asyncio.gather(*[_season(n) for n in seasons])
     return [ep for season_eps in results for ep in season_eps]
@@ -400,24 +463,11 @@ async def get_tmdb_details_for_ids(tmdb_ids: list[str], content_type: str) -> di
 async def get_series_full_details(tmdb_id: str) -> dict | None:
     """Series counterpart to get_movie_full_details (detail fields only, no
     episodes -- see get_series_episode_list_cached for those). None on any
-    failure so the caller can leave the series as-is and retry later."""
-    api_key = get_tmdb_api_key()
-    if not api_key:
+    failure so the caller can leave the series as-is and retry later.
+    Raises TmdbNotFoundError on a TMDB 404."""
+    data = await fetch_title_payload("tv", tmdb_id)
+    if data is None:
         return None
-    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-        try:
-            async with _tmdb_semaphore:
-                r = await client.get(f"{_API_BASE}/tv/{tmdb_id}", params={"api_key": api_key, "append_to_response": "credits"})
-            r.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            logger.warning("[tmdb_sync] failed to fetch series detail for tmdb_id=%s: %s", tmdb_id, _redact(exc))
-            if exc.response.status_code == 404:
-                raise TmdbNotFoundError(tmdb_id) from exc
-            return None
-        except Exception as exc:
-            logger.warning("[tmdb_sync] failed to fetch series detail for tmdb_id=%s: %s", tmdb_id, _redact(exc))
-            return None
-        data = r.json()
     cast = [c["name"] for c in data.get("credits", {}).get("cast", [])[:10]]
     return {
         "genre": ", ".join(g["name"] for g in data.get("genres", [])) or None,

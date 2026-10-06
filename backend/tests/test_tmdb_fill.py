@@ -25,7 +25,7 @@ def store(tmp_path, monkeypatch):
 def _seed_export(store, media_type, ids):
     with store._conn() as conn:
         conn.executemany(
-            "INSERT INTO export_ids VALUES (?,?,?,?)",
+            "INSERT INTO export_ids (media_type, tmdb_id, name, popularity) VALUES (?,?,?,?)",
             [(media_type, i, f"name {i}", 100.0 - i) for i in ids],
         )
 

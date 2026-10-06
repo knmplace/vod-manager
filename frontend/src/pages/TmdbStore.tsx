@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Database, Loader2, Play, RefreshCw, Search, Settings as SettingsIcon } from 'lucide-react'
+import { Database, Loader2, Play, Power, RefreshCw, Search, Settings as SettingsIcon, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { inputCls, SectionCard, StatusPill } from '@/components/dvr-shared'
 import api from '@/lib/api'
+import { askConfirm, ConfirmDialogHost } from '@/lib/confirm'
 import { toast } from '@/lib/toast'
 
 type MediaType = 'movie' | 'tv'
@@ -83,13 +84,30 @@ export default function TmdbStore() {
   }, [status, form])
 
   const saveSettings = useMutation({
-    mutationFn: (s: StoreSettings) => api.put('/tmdb-store/settings', s).then((r) => r.data),
+    mutationFn: (s: StoreSettings) =>
+      api.put('/tmdb-store/settings', Object.fromEntries(SETTING_FIELDS.map((f) => [f.key, s[f.key]]))).then((r) => r.data),
     onSuccess: (data: StoreSettings) => {
       setForm(data)
       toast.success('Settings saved')
       qc.invalidateQueries({ queryKey: ['tmdb-store-status'] })
     },
     onError: () => toast.error('Could not save settings'),
+  })
+  const toggle = useMutation({
+    mutationFn: (enabled: boolean) => api.put('/tmdb-store/settings', { enabled }).then((r) => r.data as StoreSettings),
+    onSuccess: (data) => {
+      setForm((f) => (f ? { ...f, enabled: data.enabled } : data))
+      toast.success(data.enabled ? 'Local TMDB library turned on' : 'Local TMDB library turned off')
+      qc.invalidateQueries({ queryKey: ['tmdb-store-status'] })
+    },
+    onError: () => toast.error('Could not change the setting'),
+  })
+  const clearStore = useMutation({
+    mutationFn: () => api.post('/tmdb-store/clear').then((r) => r.data),
+    onSuccess: () => toast.success('Stored TMDB data deleted'),
+    onError: (err: { response?: { data?: { detail?: string } } }) =>
+      toast.error(err.response?.data?.detail ?? 'Could not delete stored data'),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['tmdb-store-status'] }),
   })
   const runJob = useMutation({
     mutationFn: (job: 'burst' | 'changes' | 'export') => api.post(`/tmdb-store/run/${job}`).then((r) => r.data),
@@ -108,9 +126,52 @@ export default function TmdbStore() {
   })
 
   const runError = (runJob.error as { response?: { data?: { detail?: string } } } | null)?.response?.data?.detail
+  const enabled = status?.settings.enabled ?? true
+  const canRun = !!status?.has_api_key && enabled && !status?.job.running
 
   return (
     <div className="space-y-4">
+      <ConfirmDialogHost />
+      {status && (
+        <SectionCard title="Use local TMDB library" icon={<Power size={14} />}>
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="inline-flex rounded-md border border-border overflow-hidden text-xs">
+              {[true, false].map((on) => (
+                <button
+                  key={String(on)}
+                  type="button"
+                  disabled={toggle.isPending}
+                  onClick={() => on !== enabled && toggle.mutate(on)}
+                  className={`px-3 py-1.5 font-medium ${on === enabled ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}`}
+                >
+                  {on ? 'On' : 'Off'}
+                </button>
+              ))}
+            </div>
+            <p className="text-xs text-muted-foreground flex-1 min-w-[16rem]">
+              {enabled
+                ? 'On: TMDB details are saved locally and reused, and a light background fill adds popular titles.'
+                : 'Off: nothing is stored; every lookup goes straight to TMDB. Use this if disk space is tight.'}
+            </p>
+            {!enabled && status.db_size_bytes > 0 && (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={clearStore.isPending || status.job.running}
+                onClick={() =>
+                  askConfirm(
+                    `Delete all stored TMDB data (${fmtBytes(status.db_size_bytes)})? It is rebuilt from TMDB if the library is turned back on.`,
+                    () => clearStore.mutate(),
+                  )
+                }
+              >
+                {clearStore.isPending ? <Loader2 size={12} className="animate-spin mr-1" /> : <Trash2 size={12} className="mr-1" />}
+                Delete stored data ({fmtBytes(status.db_size_bytes)})
+              </Button>
+            )}
+          </div>
+        </SectionCard>
+      )}
       <SectionCard title="TMDB Library" icon={<Database size={14} />}>
         <p className="text-xs text-muted-foreground">
           A local copy of TMDB movie and TV details. Every title this app looks up is kept here, and a light background
@@ -125,7 +186,7 @@ export default function TmdbStore() {
               {status.active ? (
                 <StatusPill label="Active" tone="success" />
               ) : (
-                <StatusPill label={status.has_api_key ? 'Disabled' : 'Inactive — no TMDB API key'} tone="warning" />
+                <StatusPill label={status.has_api_key ? 'Off' : 'Inactive — no TMDB API key'} tone="warning" />
               )}
               <span className="text-muted-foreground">
                 Requests today: <b>{fmtNum(status.requests_today)}</b> / {fmtNum(status.settings.daily_budget)}
@@ -181,13 +242,13 @@ export default function TmdbStore() {
             </div>
 
             <div className="flex flex-wrap gap-1.5">
-              <Button size="sm" variant="outline" disabled={!status.has_api_key || status.job.running} onClick={() => runJob.mutate('burst')}>
+              <Button size="sm" variant="outline" disabled={!canRun} onClick={() => runJob.mutate('burst')}>
                 <Play size={12} className="mr-1" /> Run fill burst now
               </Button>
-              <Button size="sm" variant="outline" disabled={!status.has_api_key || status.job.running} onClick={() => runJob.mutate('changes')}>
+              <Button size="sm" variant="outline" disabled={!canRun} onClick={() => runJob.mutate('changes')}>
                 <RefreshCw size={12} className="mr-1" /> Check TMDB changes
               </Button>
-              <Button size="sm" variant="outline" disabled={!status.has_api_key || status.job.running} onClick={() => runJob.mutate('export')}>
+              <Button size="sm" variant="outline" disabled={!canRun} onClick={() => runJob.mutate('export')}>
                 <Database size={12} className="mr-1" /> Refresh TMDB ID list
               </Button>
             </div>
@@ -221,7 +282,7 @@ export default function TmdbStore() {
         {lookup.data && (
           <div className="space-y-2">
             <p className="text-xs text-muted-foreground">
-              {lookup.data.results.length} result(s) — {lookup.data.source === 'local' ? 'from the local library' : 'from TMDB (now saved locally)'}
+              {lookup.data.results.length} result(s) — {lookup.data.source === 'local' ? 'from the local library' : enabled ? 'from TMDB (now saved locally)' : 'from TMDB (not saved — library off)'}
             </p>
             {lookup.data.results.map((r) => (
               <div key={r.tmdb_id} className="flex gap-3 rounded-md border border-border p-2">
@@ -253,10 +314,6 @@ export default function TmdbStore() {
 
       {form && (
         <SectionCard title="Background fill settings" icon={<SettingsIcon size={14} />}>
-          <label className="flex items-center gap-2 text-xs">
-            <input type="checkbox" checked={form.enabled} onChange={(e) => setForm({ ...form, enabled: e.target.checked })} />
-            Background fill enabled (lookups are still saved when off)
-          </label>
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
             {SETTING_FIELDS.map((f) => (
               <label key={f.key} className="text-xs space-y-1">

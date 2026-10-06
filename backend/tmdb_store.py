@@ -20,6 +20,8 @@ import sqlite3
 import time
 import unicodedata
 import zlib
+from contextlib import contextmanager
+from typing import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -49,6 +51,7 @@ CREATE TABLE IF NOT EXISTS titles (
     raw             BLOB,
     fetched_at      REAL NOT NULL,
     changed_at      REAL,
+    imdb_id         TEXT,
     PRIMARY KEY (media_type, tmdb_id)
 );
 CREATE TABLE IF NOT EXISTS title_names (
@@ -75,6 +78,7 @@ CREATE TABLE IF NOT EXISTS export_ids (
     tmdb_id     INTEGER NOT NULL,
     name        TEXT,
     popularity  REAL,
+    name_key    INTEGER,
     PRIMARY KEY (media_type, tmdb_id)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS export_ids_by_popularity ON export_ids(media_type, popularity DESC);
@@ -83,10 +87,22 @@ CREATE TABLE IF NOT EXISTS gone (
     tmdb_id     INTEGER NOT NULL,
     PRIMARY KEY (media_type, tmdb_id)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS seasons (
+    tmdb_id        INTEGER NOT NULL,
+    season_number  INTEGER NOT NULL,
+    episodes       BLOB NOT NULL,
+    fetched_at     REAL NOT NULL,
+    PRIMARY KEY (tmdb_id, season_number)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS meta (
     key    TEXT PRIMARY KEY,
     value  TEXT
 );
+"""
+# After _upgrade, so they also apply to a store created before these columns existed.
+_INDEXES = """
+CREATE INDEX IF NOT EXISTS titles_by_imdb ON titles(imdb_id) WHERE imdb_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS export_ids_by_name ON export_ids(media_type, name_key);
 """
 
 _initialized_path: Path | None = None
@@ -100,17 +116,58 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+@contextmanager
+def _open() -> Iterator[sqlite3.Connection]:
+    # KNM: sqlite3's own `with conn` only commits -- it never closes, so the
+    # file stayed open and clear() couldn't delete it on Windows. 2026-10-05
+    conn = _connect()
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
+
+
 def init_db() -> None:
     global _initialized_path
-    with _connect() as conn:
+    with _open() as conn:
         conn.executescript(_SCHEMA)
+        _upgrade(conn)
+        conn.executescript(_INDEXES)
     _initialized_path = DB_PATH
 
 
-def _conn() -> sqlite3.Connection:
+def _upgrade(conn: sqlite3.Connection) -> None:
+    """Add columns introduced after a store was first created."""
+    def columns(table: str) -> set[str]:
+        return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+    if "imdb_id" not in columns("titles"):
+        conn.execute("ALTER TABLE titles ADD COLUMN imdb_id TEXT")
+        updates = []
+        for row in conn.execute("SELECT media_type, tmdb_id, raw FROM titles WHERE raw IS NOT NULL").fetchall():
+            imdb = _imdb_id(json.loads(zlib.decompress(row["raw"])))
+            if imdb:
+                updates.append((imdb, row["media_type"], row["tmdb_id"]))
+        conn.executemany("UPDATE titles SET imdb_id=? WHERE media_type=? AND tmdb_id=?", updates)
+    if "name_key" not in columns("export_ids"):
+        conn.execute("ALTER TABLE export_ids ADD COLUMN name_key INTEGER")
+        # existing rows have no name_key -- re-import the export on the next fill tick
+        conn.execute("UPDATE meta SET value='0' WHERE key='exports_imported_at'")
+
+
+def clear() -> None:
+    """Delete the whole store to free its disk space (recreated empty on next use)."""
+    global _initialized_path
+    _initialized_path = None
+    for path in DB_PATH.parent.glob(DB_PATH.name + "*"):
+        path.unlink(missing_ok=True)
+
+
+def _conn():
     if _initialized_path != DB_PATH:
         init_db()
-    return _connect()
+    return _open()
 
 
 def normalize(text: str | None) -> str:
@@ -118,6 +175,16 @@ def normalize(text: str | None) -> str:
     text = unicodedata.normalize("NFKD", text or "")
     text = "".join(ch for ch in text if not unicodedata.combining(ch)).lower()
     return " ".join(re.sub(r"[^\w]+", " ", text).split())
+
+
+def name_key(norm: str) -> int | None:
+    """Compact index key for an exact normalized name. A crc32 collision only
+    makes search_confident more cautious, never wrong."""
+    return zlib.crc32(norm.encode()) if norm else None
+
+
+def _imdb_id(data: dict) -> str | None:
+    return data.get("imdb_id") or (data.get("external_ids") or {}).get("imdb_id") or None
 
 
 def _year(date: str | None) -> int | None:
@@ -179,22 +246,22 @@ def upsert_payload(media_type: str, data: dict) -> None:
         conn.execute(
             """INSERT INTO titles (media_type, tmdb_id, title, original_title, year, release_date,
                    poster_path, overview, vote_average, popularity, content_rating, top_cast, genres,
-                   raw, fetched_at, changed_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)
+                   raw, fetched_at, changed_at, imdb_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?)
                ON CONFLICT(media_type, tmdb_id) DO UPDATE SET
                    title=excluded.title, original_title=excluded.original_title, year=excluded.year,
                    release_date=excluded.release_date, poster_path=excluded.poster_path,
                    overview=excluded.overview, vote_average=excluded.vote_average,
                    popularity=excluded.popularity, content_rating=excluded.content_rating,
                    top_cast=excluded.top_cast, genres=excluded.genres, raw=excluded.raw,
-                   fetched_at=excluded.fetched_at, changed_at=NULL""",
+                   fetched_at=excluded.fetched_at, changed_at=NULL, imdb_id=excluded.imdb_id""",
             (
                 media_type, tmdb_id, title, original, _year(date), date,
                 data.get("poster_path") or None, data.get("overview") or None,
                 data.get("vote_average") or None, data.get("popularity"),
                 _us_rating(media_type, data), ", ".join(cast) or None,
                 ", ".join(g["name"] for g in data.get("genres") or [] if g.get("name")) or None,
-                raw, time.time(),
+                raw, time.time(), _imdb_id(data),
             ),
         )
         conn.execute("DELETE FROM title_names WHERE media_type=? AND tmdb_id=?", (media_type, tmdb_id))
@@ -270,9 +337,63 @@ def search(media_type: str, query: str, year: int | None = None, limit: int = 10
     return out
 
 
+def search_confident(media_type: str, query: str, year: int | None = None, limit: int = 10) -> list[dict] | None:
+    """search(), or None when the local answer may be incomplete and TMDB
+    should be asked instead. Confident only when a stored title matches the
+    name exactly AND every title TMDB's ID export lists under that exact
+    (original) name is stored or known gone -- so a same-named title the
+    store doesn't have yet is never silently missed."""
+    hits = search(media_type, query, year, limit)
+    if not any(h["exact"] for h in hits):
+        return None
+    with _conn() as conn:
+        listed, missing = conn.execute(
+            """SELECT COUNT(*),
+                      SUM(NOT EXISTS (SELECT 1 FROM titles t WHERE t.media_type=e.media_type AND t.tmdb_id=e.tmdb_id)
+                          AND NOT EXISTS (SELECT 1 FROM gone g WHERE g.media_type=e.media_type AND g.tmdb_id=e.tmdb_id))
+               FROM export_ids e WHERE e.media_type=? AND e.name_key=?""",
+            (media_type, name_key(normalize(query))),
+        ).fetchone()
+    return hits if listed and not missing else None
+
+
+def find_by_imdb(media_type: str, imdb_id: str) -> dict | None:
+    with _conn() as conn:
+        row = conn.execute(
+            """SELECT media_type, tmdb_id, title, original_title, year, popularity FROM titles
+               WHERE imdb_id=? AND media_type=? LIMIT 1""",
+            (imdb_id, media_type),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_season(tmdb_id: int, season_number: int, max_age: float | None = None) -> list[dict] | None:
+    """Stored episode list for one TV season, or None when missing or older
+    than max_age seconds. Rows are dropped when TMDB reports the show changed."""
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT episodes, fetched_at FROM seasons WHERE tmdb_id=? AND season_number=?",
+            (int(tmdb_id), int(season_number)),
+        ).fetchone()
+    if row is None or (max_age is not None and time.time() - row["fetched_at"] > max_age):
+        return None
+    return json.loads(zlib.decompress(row["episodes"]))
+
+
+def put_season(tmdb_id: int, season_number: int, episodes: list[dict]) -> None:
+    raw = zlib.compress(json.dumps(episodes, separators=(",", ":")).encode())
+    with _conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO seasons (tmdb_id, season_number, episodes, fetched_at) VALUES (?,?,?,?)",
+            (int(tmdb_id), int(season_number), raw, time.time()),
+        )
+
+
 def mark_changed(media_type: str, tmdb_ids: list[int]) -> int:
     now = time.time()
     with _conn() as conn:
+        if media_type == "tv":
+            conn.executemany("DELETE FROM seasons WHERE tmdb_id=?", [(int(i),) for i in tmdb_ids])
         cur = conn.executemany(
             "UPDATE titles SET changed_at=? WHERE media_type=? AND tmdb_id=?",
             [(now, media_type, int(i)) for i in tmdb_ids],
@@ -285,6 +406,8 @@ def mark_gone(media_type: str, tmdb_id: int) -> None:
         conn.execute("INSERT OR IGNORE INTO gone (media_type, tmdb_id) VALUES (?,?)", (media_type, int(tmdb_id)))
         conn.execute("DELETE FROM titles WHERE media_type=? AND tmdb_id=?", (media_type, int(tmdb_id)))
         conn.execute("DELETE FROM title_names WHERE media_type=? AND tmdb_id=?", (media_type, int(tmdb_id)))
+        if media_type == "tv":
+            conn.execute("DELETE FROM seasons WHERE tmdb_id=?", (int(tmdb_id),))
 
 
 def list_stale_ids(media_type: str, limit: int) -> list[int]:
@@ -316,7 +439,7 @@ def list_fill_candidates(media_type: str, limit: int, top_n: int) -> list[int]:
 def import_export_file(media_type: str, path: Path) -> int:
     """Replace export_ids for media_type from a TMDB daily export (.json.gz,
     one JSON object per line). Adult and video-only entries are skipped."""
-    name_key = "original_title" if media_type == "movie" else "original_name"
+    name_field = "original_title" if media_type == "movie" else "original_name"
     batch: list[tuple] = []
     count = 0
     with _conn() as conn:
@@ -332,13 +455,15 @@ def import_export_file(media_type: str, path: Path) -> int:
                     continue
                 if item.get("adult") or item.get("video") or "id" not in item:
                     continue
-                batch.append((media_type, int(item["id"]), item.get(name_key), item.get("popularity") or 0.0))
+                name = item.get(name_field)
+                batch.append((media_type, int(item["id"]), name, item.get("popularity") or 0.0,
+                              name_key(normalize(name))))
                 if len(batch) >= 5000:
-                    conn.executemany("INSERT OR REPLACE INTO export_ids VALUES (?,?,?,?)", batch)
+                    conn.executemany("INSERT OR REPLACE INTO export_ids VALUES (?,?,?,?,?)", batch)
                     count += len(batch)
                     batch.clear()
         if batch:
-            conn.executemany("INSERT OR REPLACE INTO export_ids VALUES (?,?,?,?)", batch)
+            conn.executemany("INSERT OR REPLACE INTO export_ids VALUES (?,?,?,?,?)", batch)
             count += len(batch)
     return count
 

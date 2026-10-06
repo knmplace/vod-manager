@@ -205,9 +205,55 @@ def _present(row: dict) -> dict:
     return row
 
 
+def _row_from_tmdb(media_type: str, item: dict) -> dict:
+    """A TMDB detail payload or /search item in the stored-row shape _present takes."""
+    is_movie = media_type == "movie"
+    date = item.get("release_date" if is_movie else "first_air_date") or None
+    cast = [c.get("name") for c in (item.get("credits") or {}).get("cast", [])[:5] if c.get("name")]
+    return {
+        "media_type": media_type,
+        "tmdb_id": int(item["id"]),
+        "title": item.get("title" if is_movie else "name"),
+        "original_title": item.get("original_title" if is_movie else "original_name"),
+        "year": tmdb_store._year(date),
+        "release_date": date,
+        "poster_path": item.get("poster_path") or None,
+        "overview": item.get("overview") or None,
+        "vote_average": item.get("vote_average") or None,
+        "popularity": item.get("popularity"),
+        "content_rating": tmdb_store._us_rating(media_type, item),
+        "top_cast": ", ".join(cast) or None,
+        "genres": ", ".join(g["name"] for g in item.get("genres") or [] if g.get("name")) or None,
+    }
+
+
+async def _live_lookup(query: str, media_type: str, year: int | None) -> dict:
+    """Library off: straight to TMDB, nothing stored."""
+    if query.isdigit():
+        try:
+            data = await tmdb_sync.fetch_title_payload(media_type, query)
+        except tmdb_sync.TmdbNotFoundError:
+            data = None
+        return {"source": "tmdb", "results": [_present(_row_from_tmdb(media_type, data))] if data else []}
+    api_key = get_tmdb_api_key()
+    if not api_key or not query:
+        return {"source": "tmdb", "results": []}
+    params = {"api_key": api_key, "query": query}
+    if year:
+        params["year" if media_type == "movie" else "first_air_date_year"] = year
+    async with tmdb_sync._tmdb_semaphore:
+        r = await tmdb_sync._tmdb_get(f"{tmdb_sync._API_BASE}/search/{media_type}", params=params)
+    r.raise_for_status()
+    items = [i for i in r.json().get("results", [])[:10] if i.get("id") is not None]
+    return {"source": "tmdb", "results": [_present(_row_from_tmdb(media_type, i)) for i in items]}
+
+
 async def lookup(query: str, media_type: str, year: int | None = None, limit: int = 10) -> dict:
-    """Local first; on a miss, live TMDB search whose top results get stored."""
+    """Local first; on a miss, live TMDB search whose top results get stored.
+    With the library off, always live and nothing is stored."""
     query = (query or "").strip()
+    if not tmdb_sync.store_enabled():
+        return await _live_lookup(query, media_type, year)
     if query.isdigit():
         local = await asyncio.to_thread(tmdb_store.get_title, media_type, int(query))
         if local:

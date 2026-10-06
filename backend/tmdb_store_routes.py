@@ -1,4 +1,4 @@
-"""API for the local TMDB store page: status/stats, lookup, settings, manual runs."""
+"""API for the local TMDB store page: status/stats, lookup, settings, manual runs, clear."""
 
 import asyncio
 
@@ -63,9 +63,23 @@ async def run(job: str):
         raise HTTPException(400, detail="job must be export, changes or burst")
     if not get_tmdb_api_key():
         raise HTTPException(400, detail="Save a TMDB API key first")
+    if not get_tmdb_store_settings()["enabled"]:
+        raise HTTPException(400, detail="The local TMDB library is turned off")
     if tmdb_fill.status["running"]:
         raise HTTPException(409, detail="A TMDB store job is already running")
     task = asyncio.create_task(tmdb_fill.run_job(job))
     _tasks.add(task)
     task.add_done_callback(_tasks.discard)
     return {"started": job}
+
+
+@router.post("/clear", dependencies=_GUARDS)
+async def clear():
+    """Delete all stored data to free disk space. Only while the library is
+    off, so nothing refills it straight away."""
+    if get_tmdb_store_settings()["enabled"]:
+        raise HTTPException(400, detail="Turn the local library off first")
+    if tmdb_fill.status["running"]:
+        raise HTTPException(409, detail="A TMDB store job is still running -- try again when it finishes")
+    await asyncio.to_thread(tmdb_store.clear)
+    return {"cleared": True}
