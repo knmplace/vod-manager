@@ -42,3 +42,11 @@ def _reset_enrich_done_ids():
     import vod_importer
     vod_importer._reset_enrich_done_ids()
     yield
+
+
+@pytest.fixture(autouse=True)
+def _isolated_tmdb_store(tmp_path, monkeypatch):
+    """Every test gets its own tmdb.sqlite so stored payloads never leak
+    between tests (tmdb_sync reads through the store)."""
+    import tmdb_store
+    monkeypatch.setattr(tmdb_store, "DB_PATH", tmp_path / "tmdb.sqlite")

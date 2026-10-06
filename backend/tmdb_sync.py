@@ -20,6 +20,7 @@ import time
 import httpx
 
 from config import get_tmdb_api_key
+import tmdb_store
 import vod_db
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,63 @@ def _redact(exc: Exception) -> str:
     a TMDB call, or a real API key ends up in plaintext in container logs
     (and, via sync_all's error dict, in an API response body)."""
     return _API_KEY_RE.sub(r"\1***", str(exc))
+
+
+# KNM: 2026-10-05 local TMDB store -- every title detail fetch reads through
+# tmdb_store first and saves what TMDB returns, so a title is fetched from
+# TMDB once and served locally afterwards. The append set is the union every
+# caller below needs, so one stored payload answers all of them.
+_STORE_APPEND = {
+    "movie": "credits,release_dates,alternative_titles",
+    "tv": "credits,content_ratings,alternative_titles",
+}
+
+
+async def fetch_title_payload(media_type: str, tmdb_id, *, use_store: bool = True) -> dict | None:
+    """Full /movie/{id} or /tv/{id} payload: local store first, then TMDB
+    (stored on success). Raises TmdbNotFoundError on a TMDB 404; returns
+    None on any other failure or when no API key is configured."""
+    key = str(tmdb_id).strip()
+    local_ok = key.isdigit()
+    if use_store and local_ok:
+        try:
+            cached = await asyncio.to_thread(tmdb_store.get_payload, media_type, int(key))
+        except Exception as exc:
+            logger.warning("[tmdb_sync] local store read failed for %s %s: %s", media_type, key, exc)
+            cached = None
+        if cached is not None:
+            return cached
+    api_key = get_tmdb_api_key()
+    if not api_key:
+        return None
+    try:
+        async with _tmdb_semaphore:
+            r = await _tmdb_get(
+                f"{_API_BASE}/{media_type}/{key}",
+                params={"api_key": api_key, "append_to_response": _STORE_APPEND[media_type]},
+            )
+        r.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        logger.warning("[tmdb_sync] failed to fetch %s detail for tmdb_id=%s: %s", media_type, key, _redact(exc))
+        if exc.response.status_code == 404:
+            if local_ok:
+                try:
+                    await asyncio.to_thread(tmdb_store.mark_gone, media_type, int(key))
+                except Exception:
+                    pass
+            raise TmdbNotFoundError(key) from exc
+        return None
+    except Exception as exc:
+        logger.warning("[tmdb_sync] failed to fetch %s detail for tmdb_id=%s: %s", media_type, key, _redact(exc))
+        return None
+    data = r.json()
+    if local_ok and data.get("id") is not None:
+        try:
+            await asyncio.to_thread(tmdb_store.upsert_payload, media_type, data)
+            await asyncio.to_thread(tmdb_store.add_requests, 1)
+        except Exception as exc:
+            logger.warning("[tmdb_sync] local store write failed for %s %s: %s", media_type, key, exc)
+    return data
 
 
 async def fetch_list_items(list_id: str) -> list[dict]:
@@ -218,13 +276,7 @@ async def search_title(query: str, content_type: str) -> list[dict]:
             "cast": [],
         }
         try:
-            async with _tmdb_semaphore:
-                dr = await _tmdb_get(
-                    f"{_API_BASE}/{endpoint}/{item['id']}",
-                    params={"api_key": api_key, "append_to_response": "credits"},
-                )
-            dr.raise_for_status()
-            dd = dr.json()
+            dd = await fetch_title_payload(endpoint, item["id"]) or {}
             if content_type == "series":
                 out["season_count"] = dd.get("number_of_seasons")
                 out["episode_count"] = dd.get("number_of_episodes")
@@ -328,11 +380,11 @@ async def get_tmdb_details_for_ids(tmdb_ids: list[str], content_type: str) -> di
     semaphore = asyncio.Semaphore(_YEAR_LOOKUP_CONCURRENCY)
 
     async def _fetch(tmdb_id: str) -> tuple[str, dict]:
-        async with semaphore, _tmdb_semaphore:
+        async with semaphore:
             try:
-                r = await _tmdb_get(f"{_API_BASE}/{endpoint}/{tmdb_id}", params={"api_key": api_key})
-                r.raise_for_status()
-                data = r.json()
+                data = await fetch_title_payload(endpoint, tmdb_id)
+                if data is None:
+                    return tmdb_id, {"year": None, "title": None}
                 date = data.get("release_date") if content_type == "movie" else data.get("first_air_date")
                 year = int(date[:4]) if date and len(date) >= 4 and date[:4].isdigit() else None
                 title = data.get("title") if content_type == "movie" else data.get("name")
@@ -387,26 +439,9 @@ async def get_movie_full_details(tmdb_id: str) -> dict | None:
     anything else this app does against that provider). Returns None on any
     failure (bad id, TMDB down, no API key) so the caller can fall back to
     the provider rather than leaving the movie unenriched."""
-    api_key = get_tmdb_api_key()
-    if not api_key:
+    data = await fetch_title_payload("movie", tmdb_id)
+    if data is None:
         return None
-
-    try:
-        async with _tmdb_semaphore:
-            r = await _tmdb_get(
-                f"{_API_BASE}/movie/{tmdb_id}",
-                params={"api_key": api_key, "append_to_response": "credits,release_dates"},
-            )
-        r.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        logger.warning("[tmdb_sync] failed to fetch movie detail for tmdb_id=%s: %s", tmdb_id, _redact(exc))
-        if exc.response.status_code == 404:
-            raise TmdbNotFoundError(tmdb_id) from exc
-        return None
-    except Exception as exc:
-        logger.warning("[tmdb_sync] failed to fetch movie detail for tmdb_id=%s: %s", tmdb_id, _redact(exc))
-        return None
-    data = r.json()
 
     director = next(
         (c["name"] for c in data.get("credits", {}).get("crew", []) if c.get("job") == "Director"),
@@ -453,22 +488,14 @@ async def get_tv_content_rating(tmdb_id: str) -> str | None:
     ever asked the provider for episodes/detail. This is deliberately the
     smallest addition that makes a real content-rating field possible for
     series smart categories, not a rework of series enrichment."""
-    api_key = get_tmdb_api_key()
-    if not api_key:
-        return None
     try:
-        async with _tmdb_semaphore:
-            r = await _tmdb_get(
-                f"{_API_BASE}/tv/{tmdb_id}/content_ratings",
-                params={"api_key": api_key},
-            )
-        r.raise_for_status()
-    except Exception as exc:
-        logger.warning("[tmdb_sync] failed to fetch content rating for tv tmdb_id=%s: %s", tmdb_id, _redact(exc))
+        payload = await fetch_title_payload("tv", tmdb_id)
+    except TmdbNotFoundError:
         return None
-    data = r.json()
+    if payload is None:
+        return None
 
-    for country in data.get("results", []):
+    for country in payload.get("content_ratings", {}).get("results", []):
         if country.get("iso_3166_1") == "US":
             rating = (country.get("rating") or "").strip()
             return rating or None
@@ -481,25 +508,9 @@ async def get_tv_full_details(tmdb_id: str) -> dict | None:
     The bulk importer calls this once per canonical series before provider
     episode discovery, avoiding a separate title lookup and rating request.
     """
-    api_key = get_tmdb_api_key()
-    if not api_key:
+    data = await fetch_title_payload("tv", tmdb_id)
+    if data is None:
         return None
-    try:
-        async with _tmdb_semaphore:
-            response = await _tmdb_get(
-                f"{_API_BASE}/tv/{tmdb_id}",
-                params={"api_key": api_key, "append_to_response": "content_ratings"},
-            )
-        response.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        logger.warning("[tmdb_sync] failed to fetch TV detail for tmdb_id=%s: %s", tmdb_id, _redact(exc))
-        if exc.response.status_code == 404:
-            raise TmdbNotFoundError(tmdb_id) from exc
-        return None
-    except Exception as exc:
-        logger.warning("[tmdb_sync] failed to fetch TV detail for tmdb_id=%s: %s", tmdb_id, _redact(exc))
-        return None
-    data = response.json()
     title = (data.get("name") or "").strip()
     if not title:
         return None
