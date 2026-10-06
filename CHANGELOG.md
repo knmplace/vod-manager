@@ -31,6 +31,24 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-05 (Automatic TMDB matching for titles without an ID)
+
+- ✅ **Titles without a TMDB ID are matched automatically.** After each fill
+  burst (or when you click "Match titles without a TMDB ID"), up to 2,000
+  catalog titles without an ID are matched by name and year. Series are matched
+  first. The local TMDB library is checked first, and TMDB is searched only if
+  it has no match. A match is applied the same way a reviewer would apply it,
+  so cards for the same show from different providers merge into one.
+- ✅ **Unclear results go to Metadata Review.** The title stays visible while
+  it waits there, and nothing is guessed. Unclear means more than one possible
+  match, a year that doesn't agree with TMDB's, or no year when TMDB has other
+  titles with the same name. Titles TMDB doesn't know are tried again a week
+  later.
+- ✅ **Local hit rate.** The TMDB Library page shows how many of today's
+  lookups were answered locally.
+- **Tests:** 13 new tests. Full backend suite: 487 passed. Frontend build is
+  clean.
+
 ## 2026-10-05 (Local TMDB library)
 
 Proposed upstream as a standalone PR,
