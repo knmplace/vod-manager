@@ -453,3 +453,8 @@ This product uses TMDB and the TMDB APIs but is not endorsed, certified, or othe
 You supply your own TMDB API key and are responsible for following
 [TMDB's API terms of use](https://www.themoviedb.org/api-terms-of-use) -- notably that information obtained from
 TMDB may not be cached for longer than 6 months.
+
+When the optional local TMDB library is enabled, it keeps details only for current
+catalog titles, refreshes them after 150 days, and automatically removes
+unreferenced or 170-day-old records. Its cleanup screen always provides a preview
+before deleting anything.

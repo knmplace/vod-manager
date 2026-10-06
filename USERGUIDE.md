@@ -1641,6 +1641,11 @@ just the features below. TMDB's terms require attribution (shown on the
 Configuration page and in the README) and limit how long TMDB data may be
 cached (6 months); the key is yours, so following
 [TMDB's API terms](https://www.themoviedb.org/api-terms-of-use) is up to you.
+The optional local TMDB library is catalog-first: it fills known movie and show
+IDs only, refreshes retained records after 150 days, removes unreferenced data
+daily, and never serves data older than 170 days. Configuration â†’ Local TMDB
+Library has a cleanup preview, so you can review the affected records before
+applying removal.
 It unlocks real TMDB search for the Needs Review
 and Missing Artwork flows above, plus two ways to auto-populate
 categories from a public list — both only ever place items already present
