@@ -33,7 +33,9 @@ instead of opening a duplicate request.
 
 ## 2026-10-07 (Local TMDB name search is fast again)
 
-- ✅ **Matching titles without a TMDB ID no longer stalls.** Each name search
+Added to upstream PR [#49](https://github.com/jstevenscl/vod-manager/pull/49).
+
+- ✅ 🔀 **Matching titles without a TMDB ID no longer stalls.** Each name search
   in the local TMDB library was taking about 35 seconds once it held ~200K
   names, so automatic matching managed only about one title every 30 seconds.
   The search now takes milliseconds.
