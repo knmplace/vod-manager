@@ -42,6 +42,9 @@ instead of opening a duplicate request.
   details and smart-category updates are now limited to the changed titles,
   as they already were for Xtream providers. A folder library import that
   removed files still updates all categories.
+- ✅ **A file replaced under the same name counts as a change.** For example,
+  a quality upgrade that keeps the filename, on a local folder, NFS/CIFS mount
+  or rclone remote (SMB, SFTP, cloud), or in Plex, Emby or Jellyfin.
 
 ## 2026-10-07 (Local TMDB name search is fast again)
 

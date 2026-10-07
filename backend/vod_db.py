@@ -9242,10 +9242,17 @@ def _apply_plex_detail(conn: sqlite3.Connection, table: str, row_id: int, detail
 
 
 def _source_is_new(conn: sqlite3.Connection, table: str, owner_col: str, provider_id: int,
-                   id_col: str, source_id, owner_id: int) -> bool:
-    row = conn.execute(f"SELECT {owner_col} FROM {table} WHERE provider_id=? AND {id_col}=?",
+                   id_col: str, source_id, owner_id: int, size: int | None = None) -> bool:
+    """True for a new source, one moved to another card, or (when both sizes
+    are known) the same path now holding a different file."""
+    # KNM: 2026-10-06 -- size check so a file replaced in place (same name,
+    # e.g. a quality upgrade on a library share) counts as a change.
+    size_col = ", file_size_bytes" if size is not None else ""
+    row = conn.execute(f"SELECT {owner_col}{size_col} FROM {table} WHERE provider_id=? AND {id_col}=?",
                        (provider_id, source_id)).fetchone()
-    return row is None or row[0] != owner_id
+    if row is None or row[0] != owner_id:
+        return True
+    return size is not None and row[1] is not None and row[1] != size
 
 
 def provider_stream_ids_with_episode_source(provider_id: int) -> set[str]:
@@ -9421,7 +9428,8 @@ def bulk_import_plex_movies(provider_id: int, items: list[dict]) -> dict:
                             did_create = True
                             did_archive = should_archive
                     source_new = _source_is_new(conn, "movie_sources", "movie_id", provider_id,
-                                                "provider_stream_id", item["provider_stream_id"], movie_id)
+                                                "provider_stream_id", item["provider_stream_id"], movie_id,
+                                                item.get("file_size_bytes"))
                     conn.execute(
                         """INSERT INTO movie_sources (movie_id, provider_id, provider_stream_id, container_extension, plex_rating_key, file_size_bytes, provider_category_name, added_at, last_seen_at)
                            VALUES (?,?,?,?,?,?,?,?,?)
@@ -9666,7 +9674,8 @@ def bulk_import_plex_series(provider_id: int, items: list[dict]) -> dict:
                                     episode_id = cur.lastrowid
                                     episode_added = True
                                 source_new = _source_is_new(conn, "episode_sources", "episode_id", provider_id,
-                                                            "provider_stream_id", ep["provider_stream_id"], episode_id)
+                                                            "provider_stream_id", ep["provider_stream_id"], episode_id,
+                                                            ep.get("file_size_bytes"))
                                 conn.execute(
                                     """INSERT INTO episode_sources (episode_id, provider_id, provider_stream_id, container_extension, plex_rating_key, file_size_bytes, provider_category_name, added_at, last_seen_at)
                                        VALUES (?,?,?,?,?,?,?,?,?)

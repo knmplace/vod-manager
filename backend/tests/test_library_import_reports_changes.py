@@ -166,3 +166,64 @@ def test_merge_changed_ids_goes_unscoped_on_full_resweep():
     import vod_importer
     assert vod_importer.merge_changed_ids({1}, {"changed_movie_ids": [2]}, "changed_movie_ids") == {1, 2}
     assert vod_importer.merge_changed_ids({1}, {"changed_movie_ids": [2], "full_resweep": True}, "changed_movie_ids") is None
+
+
+def test_same_file_with_new_size_reports_changed(db):
+    """A file replaced in place (same path, e.g. a quality upgrade) is a change;
+    an unknown size (None) never is."""
+    pid = db.upsert_provider("Plex", "http://plex.invalid", "u", "p")
+    mid = db.bulk_import_plex_movies(pid, [_movie(file_size_bytes=100)])["created_movie_ids"][0]
+    assert db.bulk_import_plex_movies(pid, [_movie(file_size_bytes=100)])["changed_movie_ids"] == []
+    assert db.bulk_import_plex_movies(pid, [_movie(file_size_bytes=200)])["changed_movie_ids"] == [mid]
+    assert db.bulk_import_plex_movies(pid, [_movie()])["changed_movie_ids"] == []
+
+    show = _show([1])
+    show["episodes"][0]["file_size_bytes"] = 100
+    sid = db.bulk_import_plex_series(pid, [show])["created_series_ids"][0]
+    show["episodes"][0]["file_size_bytes"] = 200
+    r = db.bulk_import_plex_series(pid, [show])
+    assert r["changed_series_ids"] == [sid] and r["episodes_added"] == 0
+
+
+def test_local_library_file_replaced_in_place_reports_changed(db, tmp_path, monkeypatch):
+    import library_importer
+    from test_library_importer import _mk, _stub_tmdb, _touch
+    _stub_tmdb(monkeypatch)
+    pid, root = _mk(db, tmp_path)
+    _touch(root, "The.Matrix.1999.mkv", size=10)
+    mid = asyncio.run(library_importer.import_library(pid))["created_movie_ids"][0]
+    _touch(root, "The.Matrix.1999.mkv", size=20)
+    assert asyncio.run(library_importer.import_library(pid))["changed_movie_ids"] == [mid]
+
+
+def test_remote_library_reports_ids_same_as_local(db, monkeypatch):
+    """SMB/SFTP/cloud remotes are listed by rclone instead of walked; the
+    change reporting after the listing must behave the same."""
+    import library_importer
+    from test_library_importer import _mk_remote, _stub_tmdb
+    _stub_tmdb(monkeypatch)
+    pid = _mk_remote(db)
+    listing = [("Movies/The.Matrix.1999.mkv", 123), ("TV/Breaking Bad (2008)/Season 1/Breaking Bad S01E01.mkv", 456)]
+
+    async def fake_probe(provider, remote_config):
+        return True
+
+    async def fake_list(provider, remote_config):
+        return list(listing)
+    monkeypatch.setattr(library_importer.rclone_client, "probe", fake_probe)
+    monkeypatch.setattr(library_importer.rclone_client, "list_remote", fake_list)
+
+    first = asyncio.run(library_importer.import_library(pid))
+    mid, sid = first["created_movie_ids"][0], first["created_series_ids"][0]
+
+    unchanged = asyncio.run(library_importer.import_library(pid))
+    assert unchanged["changed_movie_ids"] == [] and unchanged["changed_series_ids"] == []
+
+    listing.append(("TV/Breaking Bad (2008)/Season 1/Breaking Bad S01E02.mkv", 789))
+    listing[0] = ("Movies/The.Matrix.1999.mkv", 999)            # replaced in place on the share
+    r = asyncio.run(library_importer.import_library(pid))
+    assert r["changed_movie_ids"] == [mid] and r["changed_series_ids"] == [sid]
+    assert r["episodes_added"] == 1 and not r.get("full_resweep")
+
+    del listing[0]
+    assert asyncio.run(library_importer.import_library(pid))["full_resweep"] is True
