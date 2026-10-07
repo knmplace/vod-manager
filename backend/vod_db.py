@@ -7453,16 +7453,20 @@ def has_pending_series_source_enrichment(provider_id: int) -> bool:
     from several providers, but only a source whose episodes were never
     discovered should consume an automatic enrichment lane.
     """
+    # KNM: 2026-10-06 -- skip sources in a disabled playback language: playback
+    # filters them out, so fetching their episode lists only spent provider calls.
+    lang_clause, lang_params = _enabled_languages_clause("ss.language")
     conn = _connect()
-    row = conn.execute("""
+    row = conn.execute(f"""
         SELECT 1
         FROM series_sources ss
         JOIN series s ON s.id=ss.series_id
         WHERE ss.provider_id=?
           AND ss.episodes_last_enriched_at IS NULL
           AND s.review_excluded=0
+          AND {lang_clause}
         LIMIT 1
-    """, (provider_id,)).fetchone()
+    """, (provider_id, *lang_params)).fetchone()
     conn.close()
     return row is not None
 
@@ -7505,6 +7509,10 @@ def list_pending_series_sources(
             return []
         series_clause = f"AND ss.series_id IN ({','.join('?' * len(ids))})"
         params = (*params, *ids)
+    # KNM: 2026-10-06 -- skip sources in a disabled playback language: playback
+    # filters them out, so fetching their episode lists only spent provider calls.
+    lang_clause, lang_params = _enabled_languages_clause("ss.language")
+    params = (*lang_params, *params)
     limit_clause = " LIMIT ?" if limit is not None else ""
     if limit is not None:
         params = (*params, max(1, int(limit)))
@@ -7514,6 +7522,7 @@ def list_pending_series_sources(
         JOIN series s ON s.id=ss.series_id
         WHERE ss.episodes_last_enriched_at IS NULL
            AND s.review_excluded=0
+           AND {lang_clause}
            {cooldown_clause}
            {provider_clause}
            {series_clause}
@@ -7535,14 +7544,17 @@ def count_pending_series_sources(series_ids: set[int] | None = None) -> int:
             return 0
         series_clause = f"AND ss.series_id IN ({','.join('?' * len(ids))})"
         params.extend(ids)
+    # KNM: 2026-10-06 -- same language gate as list_pending_series_sources.
+    lang_clause, lang_params = _enabled_languages_clause("ss.language")
     row = conn.execute(f"""
         SELECT COUNT(*) AS c
         FROM series_sources ss
         JOIN series s ON s.id=ss.series_id
           WHERE ss.episodes_last_enriched_at IS NULL
            AND s.review_excluded=0
+           AND {lang_clause}
            {series_clause}
-    """, params).fetchone()
+    """, [*lang_params, *params]).fetchone()
     conn.close()
     return int(row["c"])
 

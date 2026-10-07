@@ -31,6 +31,16 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-07 (No episode fetches for languages you've turned off)
+
+- ✅ **Episode lists are fetched only for sources in an enabled playback
+  language.** When a show stayed visible because of an English source, its
+  copies in disabled languages (for example a provider's Spanish "ES -"
+  version) were still queued for an episode-list fetch. Playback filters those
+  sources out, so each fetch was a wasted provider call. They're now skipped
+  and no longer counted in the "Episode sources" progress. Turning a
+  language back on queues them again.
+
 ## 2026-10-07 (Plex, Emby, Jellyfin and folder imports show their changes)
 
 - ✅ **Sync History counts changes from Plex, Emby, Jellyfin and folder
