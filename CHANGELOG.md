@@ -31,6 +31,13 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-07 (Local TMDB name search is fast again)
+
+- ✅ **Matching titles without a TMDB ID no longer stalls.** Each name search
+  in the local TMDB library was taking about 35 seconds once it held ~200K
+  names, so automatic matching managed only about one title every 30 seconds.
+  The search now takes milliseconds.
+
 ## 2026-10-06 (Every TMDB answer is kept locally)
 
 Proposed upstream as a standalone PR,
