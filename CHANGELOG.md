@@ -31,6 +31,18 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-07 (Plex, Emby, Jellyfin and folder imports show their changes)
+
+- ✅ **Sync History counts changes from Plex, Emby, Jellyfin and folder
+  library imports.** These imports never reported which titles they added or
+  changed, so a run that picked up new episodes showed "0 changes". They now
+  report new titles, new episodes, replaced files, and detail or archive
+  changes. Re-imports where nothing changed still show 0.
+- ✅ **Follow-up work after these imports covers only what changed.** TMDB
+  details and smart-category updates are now limited to the changed titles,
+  as they already were for Xtream providers. A folder library import that
+  removed files still updates all categories.
+
 ## 2026-10-07 (Local TMDB name search is fast again)
 
 Added to upstream PR [#49](https://github.com/jstevenscl/vod-manager/pull/49).

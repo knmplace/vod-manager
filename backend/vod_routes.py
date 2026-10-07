@@ -1779,8 +1779,8 @@ async def _run_provider_catalog_import(provider_id: int) -> dict:
     # right away instead of up to a full refresh interval later.
     await asyncio.to_thread(vod_db.mark_provider_catalog_refreshed, provider_id)
     if result.get("catalog_changed", True):
-        movie_ids = set(result.get("changed_movie_ids", [])) if "changed_movie_ids" in result else None
-        series_ids = set(result.get("changed_series_ids", [])) if "changed_series_ids" in result else None
+        movie_ids = vod_importer.merge_changed_ids(set(), result, "changed_movie_ids")
+        series_ids = vod_importer.merge_changed_ids(set(), result, "changed_series_ids")
         await vod_importer.resweep_smart_categories(movie_ids, series_ids)
     if track_lifecycle:
         vod_importer.mark_import_finished(provider_id, run_id=run_id, result=result)

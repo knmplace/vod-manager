@@ -1050,7 +1050,9 @@ def merge_changed_ids(acc: set[int] | None, result: dict, key: str) -> set[int] 
     # KNM: 2026-10-04 -- Plex/Emby/library importers don't report changed ids;
     # None (unscoped) then wins, or post-import enrichment would be scoped to an
     # empty set and never queue their new items (upstream PR #35 review).
-    if acc is None or key not in result:
+    # KNM: 2026-10-07 -- "full_resweep": the import changed cards it can't name
+    # (library removal cleanup), so go unscoped as well.
+    if acc is None or key not in result or result.get("full_resweep"):
         return None
     acc.update(result[key])
     return acc

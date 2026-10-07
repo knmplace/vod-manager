@@ -90,7 +90,9 @@ async def import_plex_library(provider_id: int) -> dict:
     country = config.get_import_country_exclusion()
 
     movie_result = {"movies_created": 0, "movies_matched": 0, "total": 0}
-    series_result = {"series_created": 0, "series_matched": 0, "episodes_imported": 0}
+    series_result = {"series_created": 0, "series_matched": 0, "episodes_imported": 0, "episodes_added": 0}
+    # KNM: 2026-10-07 -- carry created/changed ids through so Sync History counts changes.
+    ids = {"created_movie_ids": set(), "changed_movie_ids": set(), "created_series_ids": set(), "changed_series_ids": set()}
     # See emby_vod_importer.import_emby_library's identical tracking. Unlike
     # Jellyfin/Emby (where a "movies"/"tvshows" library can end up
     # unclassified purely from user misconfiguration), Plex sections are
@@ -149,6 +151,8 @@ async def import_plex_library(provider_id: int) -> dict:
                 r = await asyncio.to_thread(vod_db.bulk_import_plex_movies, provider_id, movie_items)
                 for k in movie_result:
                     movie_result[k] += r.get(k, 0)
+                ids["created_movie_ids"].update(r.get("created_movie_ids", ()))
+                ids["changed_movie_ids"].update(r.get("changed_movie_ids", ()))
 
             else:  # show
                 shows = await client.list_shows(section_key)
@@ -188,12 +192,16 @@ async def import_plex_library(provider_id: int) -> dict:
                 r = await asyncio.to_thread(vod_db.bulk_import_plex_series, provider_id, series_items)
                 for k in series_result:
                     series_result[k] += r.get(k, 0)
+                ids["created_series_ids"].update(r.get("created_series_ids", ()))
+                ids["changed_series_ids"].update(r.get("changed_series_ids", ()))
 
     result = {
         "provider": provider["name"],
         "movies_created": movie_result["movies_created"], "movies_matched": movie_result["movies_matched"],
         "series_created": series_result["series_created"], "series_matched": series_result["series_matched"],
         "episodes_imported": series_result["episodes_imported"],
+        "episodes_added": series_result["episodes_added"],
+        **{k: sorted(v) for k, v in ids.items()},
         "skipped_libraries": skipped_libraries,
     }
     logger.info("[plex_importer] provider=%s result=%s", provider["name"], result)

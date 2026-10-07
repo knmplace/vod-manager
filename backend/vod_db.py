@@ -9226,6 +9226,28 @@ def _plex_detail_update_sql(detail: dict, tmdb_id: str | None, preserve_existing
     return sets, params
 
 
+# KNM: 2026-10-07 -- Plex/Emby/library imports reported no changed ids, so Sync
+# History showed "0 changes" for runs that added episodes. last_enriched_at is
+# stamped on every pass, so it is left out of the comparison.
+_PLEX_CHANGE_FIELDS = tuple(k for k in _PLEX_DETAIL_FIELDS if k != "last_enriched_at") + ("tmdb_id",)
+
+
+def _apply_plex_detail(conn: sqlite3.Connection, table: str, row_id: int, detail: dict, item: dict, now: str) -> bool:
+    """Write a Plex/Emby detail refresh; True when a compared field changed."""
+    snapshot_sql = f"SELECT {', '.join(_PLEX_CHANGE_FIELDS)} FROM {table} WHERE id=?"
+    before = tuple(conn.execute(snapshot_sql, (row_id,)).fetchone() or ())
+    sets, set_params = _plex_detail_update_sql(detail, item.get("tmdb_id"), item.get("preserve_existing_detail"))
+    conn.execute(f"UPDATE {table} SET {sets}, updated_at=? WHERE id=?", (*set_params, now, row_id))
+    return before != tuple(conn.execute(snapshot_sql, (row_id,)).fetchone() or ())
+
+
+def _source_is_new(conn: sqlite3.Connection, table: str, owner_col: str, provider_id: int,
+                   id_col: str, source_id, owner_id: int) -> bool:
+    row = conn.execute(f"SELECT {owner_col} FROM {table} WHERE provider_id=? AND {id_col}=?",
+                       (provider_id, source_id)).fetchone()
+    return row is None or row[0] != owner_id
+
+
 def provider_stream_ids_with_episode_source(provider_id: int) -> set[str]:
     """Every provider_stream_id already registered as an episode for this
     provider -- dispatcharr_dvr_importer calls this before classifying a
@@ -9274,6 +9296,8 @@ def bulk_import_plex_movies(provider_id: int, items: list[dict]) -> dict:
         errors = 0
         archived = 0
         unarchived = 0
+        created_ids: set[int] = set()
+        changed_ids: set[int] = set()
         # See bulk_import_movies's identical comment -- same fix, same reason.
         batch_size = 25
         for i, item in enumerate(items):
@@ -9286,7 +9310,7 @@ def bulk_import_plex_movies(provider_id: int, items: list[dict]) -> dict:
                     # See bulk_import_movies's identical did_create/did_match/did_flag
                     # comment -- folded into the real counters only after this item's
                     # last statement has actually succeeded.
-                    did_create = did_match = did_flag = did_archive = did_unarchive = False
+                    did_create = did_match = did_flag = did_archive = did_unarchive = detail_changed = False
                     # Primary match: this exact provider+stream_id was already imported
                     # before -- reuse its established movie_id directly, UNCONDITIONALLY
                     # (checked before any name-based matching, not just for a blank
@@ -9304,8 +9328,7 @@ def bulk_import_plex_movies(provider_id: int, items: list[dict]) -> dict:
                     if existing_source:
                         movie_id = existing_source["movie_id"]
                         did_match = True
-                        sets, set_params = _plex_detail_update_sql(detail, item.get("tmdb_id"), item.get("preserve_existing_detail"))
-                        conn.execute(f"UPDATE movies SET {sets}, updated_at=? WHERE id=?", (*set_params, now, movie_id))
+                        detail_changed = _apply_plex_detail(conn, "movies", movie_id, detail, item, now)
                         existing = conn.execute(
                             "SELECT review_excluded, review_excluded_manual FROM movies WHERE id=?", (movie_id,)
                         ).fetchone()
@@ -9340,8 +9363,7 @@ def bulk_import_plex_movies(provider_id: int, items: list[dict]) -> dict:
                         if row:
                             movie_id = row["id"]
                             did_match = True
-                            sets, set_params = _plex_detail_update_sql(detail, item.get("tmdb_id"), item.get("preserve_existing_detail"))
-                            conn.execute(f"UPDATE movies SET {sets}, updated_at=? WHERE id=?", (*set_params, now, movie_id))
+                            detail_changed = _apply_plex_detail(conn, "movies", movie_id, detail, item, now)
                             if should_archive and not row["review_excluded"] and not row["review_excluded_manual"]:
                                 conn.execute("UPDATE movies SET review_excluded=1 WHERE id=?", (movie_id,))
                                 conn.execute("DELETE FROM movie_category_placements WHERE movie_id=?", (movie_id,))
@@ -9369,8 +9391,7 @@ def bulk_import_plex_movies(provider_id: int, items: list[dict]) -> dict:
                             if len(candidates) == 1 and candidates[0]["tmdb_id"]:
                                 movie_id = candidates[0]["id"]
                                 did_match = True
-                                sets, set_params = _plex_detail_update_sql(detail, item.get("tmdb_id"), item.get("preserve_existing_detail"))
-                                conn.execute(f"UPDATE movies SET {sets}, updated_at=? WHERE id=?", (*set_params, now, movie_id))
+                                detail_changed = _apply_plex_detail(conn, "movies", movie_id, detail, item, now)
                                 if should_archive and not candidates[0]["review_excluded"] and not candidates[0]["review_excluded_manual"]:
                                     conn.execute("UPDATE movies SET review_excluded=1 WHERE id=?", (movie_id,))
                                     conn.execute("DELETE FROM movie_category_placements WHERE movie_id=?", (movie_id,))
@@ -9399,6 +9420,8 @@ def bulk_import_plex_movies(provider_id: int, items: list[dict]) -> dict:
                             movie_id = cur.lastrowid
                             did_create = True
                             did_archive = should_archive
+                    source_new = _source_is_new(conn, "movie_sources", "movie_id", provider_id,
+                                                "provider_stream_id", item["provider_stream_id"], movie_id)
                     conn.execute(
                         """INSERT INTO movie_sources (movie_id, provider_id, provider_stream_id, container_extension, plex_rating_key, file_size_bytes, provider_category_name, added_at, last_seen_at)
                            VALUES (?,?,?,?,?,?,?,?,?)
@@ -9412,6 +9435,10 @@ def bulk_import_plex_movies(provider_id: int, items: list[dict]) -> dict:
                     flagged += did_flag
                     archived += did_archive
                     unarchived += did_unarchive
+                    if did_create:
+                        created_ids.add(movie_id)
+                    if did_create or did_archive or did_unarchive or detail_changed or source_new:
+                        changed_ids.add(movie_id)
             except Exception as exc:
                 errors += 1
                 logger.warning("[vod_db] bulk_import_plex_movies: skipped item name=%r stream_id=%r: %s",
@@ -9433,7 +9460,8 @@ def bulk_import_plex_movies(provider_id: int, items: list[dict]) -> dict:
     finally:
         _WRITE_LOCK.release()
     return {"movies_created": created, "movies_matched": matched, "total": len(items), "flagged_for_review": flagged,
-            "archived": archived, "unarchived": unarchived, "errors": errors}
+            "archived": archived, "unarchived": unarchived, "errors": errors,
+            "created_movie_ids": sorted(created_ids), "changed_movie_ids": sorted(changed_ids)}
 
 
 def bulk_import_plex_series(provider_id: int, items: list[dict]) -> dict:
@@ -9457,6 +9485,9 @@ def bulk_import_plex_series(provider_id: int, items: list[dict]) -> dict:
         episode_errors = 0
         archived = 0
         unarchived = 0
+        episodes_added = 0
+        created_ids: set[int] = set()
+        changed_ids: set[int] = set()
         batch_size = 20
         for i, item in enumerate(items):
             try:
@@ -9468,7 +9499,7 @@ def bulk_import_plex_series(provider_id: int, items: list[dict]) -> dict:
                     # See bulk_import_movies's identical did_create/did_match comment --
                     # folded into the real counters only once the series-level
                     # statement that follows has actually succeeded.
-                    did_create = did_match = did_archive = did_unarchive = False
+                    did_create = did_match = did_archive = did_unarchive = detail_changed = False
                     # Primary match: this exact provider+series_id was already imported
                     # before -- reuse its established series_id directly, UNCONDITIONALLY
                     # (checked before any name-based matching, not just for a blank
@@ -9492,8 +9523,7 @@ def bulk_import_plex_series(provider_id: int, items: list[dict]) -> dict:
                     ).fetchone()
                     if existing:
                         series_id = existing["id"]
-                        sets, set_params = _plex_detail_update_sql(detail, item.get("tmdb_id"), item.get("preserve_existing_detail"))
-                        conn.execute(f"UPDATE series SET {sets}, updated_at=? WHERE id=?", (*set_params, now, series_id))
+                        detail_changed = _apply_plex_detail(conn, "series", series_id, detail, item, now)
                         did_match = True
                         if should_archive and not existing["review_excluded"] and not existing["review_excluded_manual"]:
                             conn.execute("UPDATE series SET review_excluded=1 WHERE id=?", (series_id,))
@@ -9525,8 +9555,7 @@ def bulk_import_plex_series(provider_id: int, items: list[dict]) -> dict:
                         ).fetchone()
                         if row:
                             series_id = row["id"]
-                            sets, set_params = _plex_detail_update_sql(detail, item.get("tmdb_id"), item.get("preserve_existing_detail"))
-                            conn.execute(f"UPDATE series SET {sets}, updated_at=? WHERE id=?", (*set_params, now, series_id))
+                            detail_changed = _apply_plex_detail(conn, "series", series_id, detail, item, now)
                             did_match = True
                             if should_archive and not row["review_excluded"] and not row["review_excluded_manual"]:
                                 conn.execute("UPDATE series SET review_excluded=1 WHERE id=?", (series_id,))
@@ -9547,8 +9576,7 @@ def bulk_import_plex_series(provider_id: int, items: list[dict]) -> dict:
                             ).fetchall()
                             if len(candidates) == 1:
                                 series_id = candidates[0]["id"]
-                                sets, set_params = _plex_detail_update_sql(detail, item.get("tmdb_id"), item.get("preserve_existing_detail"))
-                                conn.execute(f"UPDATE series SET {sets}, updated_at=? WHERE id=?", (*set_params, now, series_id))
+                                detail_changed = _apply_plex_detail(conn, "series", series_id, detail, item, now)
                                 did_match = True
                                 if should_archive and not candidates[0]["review_excluded"] and not candidates[0]["review_excluded_manual"]:
                                     conn.execute("UPDATE series SET review_excluded=1 WHERE id=?", (series_id,))
@@ -9592,7 +9620,10 @@ def bulk_import_plex_series(provider_id: int, items: list[dict]) -> dict:
                     # Finder provider badges + source counts, multi-provider
                     # episode failover) -- Plex-109 had 553 movie_sources
                     # rows but zero series_sources rows.
+                    series_changed = did_create or did_archive or did_unarchive or detail_changed
                     if item.get("provider_series_id") is not None:
+                        series_changed = _source_is_new(conn, "series_sources", "series_id", provider_id, "provider_series_id",
+                                                        item.get("provider_series_id"), series_id) or series_changed
                         conn.execute(
                             "INSERT INTO series_sources (series_id, provider_id, provider_series_id, provider_category_name, raw_name, added_at, last_seen_at) "
                             "VALUES (?,?,?,?,?,?,?) "
@@ -9614,6 +9645,7 @@ def bulk_import_plex_series(provider_id: int, items: list[dict]) -> dict:
                                 ).fetchone()
                                 if erow:
                                     episode_id = erow["id"]
+                                    episode_added = False
                                     if item.get("preserve_existing_detail"):
                                         # Library source: never overwrite a TMDB-enriched
                                         # episode name/description with our placeholder.
@@ -9632,6 +9664,9 @@ def bulk_import_plex_series(provider_id: int, items: list[dict]) -> dict:
                                         (series_id, ep["season_number"], ep["episode_number"], ep["name"], ep.get("description"), ep.get("duration_secs"), now),
                                     )
                                     episode_id = cur.lastrowid
+                                    episode_added = True
+                                source_new = _source_is_new(conn, "episode_sources", "episode_id", provider_id,
+                                                            "provider_stream_id", ep["provider_stream_id"], episode_id)
                                 conn.execute(
                                     """INSERT INTO episode_sources (episode_id, provider_id, provider_stream_id, container_extension, plex_rating_key, file_size_bytes, provider_category_name, added_at, last_seen_at)
                                        VALUES (?,?,?,?,?,?,?,?,?)
@@ -9646,10 +9681,16 @@ def bulk_import_plex_series(provider_id: int, items: list[dict]) -> dict:
                                     (episode_id, provider_id, ep["provider_stream_id"], ep.get("container_extension", "mp4"), ep.get("plex_rating_key"), ep.get("file_size_bytes"), item.get("provider_category_name"), now, now),
                                 )
                                 episodes_total += 1
+                                episodes_added += episode_added
+                                series_changed = series_changed or episode_added or source_new
                         except Exception as exc:
                             episode_errors += 1
                             logger.warning("[vod_db] bulk_import_plex_series: skipped episode series=%r s%re%r: %s",
                                             name, ep.get("season_number"), ep.get("episode_number"), exc)
+                    if did_create:
+                        created_ids.add(series_id)
+                    if series_changed:
+                        changed_ids.add(series_id)
             except Exception as exc:
                 errors += 1
                 logger.warning("[vod_db] bulk_import_plex_series: skipped item name=%r series_id=%r: %s",
@@ -9671,7 +9712,8 @@ def bulk_import_plex_series(provider_id: int, items: list[dict]) -> dict:
     finally:
         _WRITE_LOCK.release()
     return {"series_created": series_created, "series_matched": series_matched, "episodes_imported": episodes_total,
-            "archived": archived, "unarchived": unarchived, "errors": errors, "episode_errors": episode_errors}
+            "archived": archived, "unarchived": unarchived, "errors": errors, "episode_errors": episode_errors,
+            "episodes_added": episodes_added, "created_series_ids": sorted(created_ids), "changed_series_ids": sorted(changed_ids)}
 
 
 # ── Metadata rewrite rules ───────────────────────────────────────────────────

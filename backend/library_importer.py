@@ -275,6 +275,13 @@ async def _import_library_locked(provider_id: int) -> dict:
         "movies_created": movie_result.get("movies_created", 0), "movies_matched": movie_result.get("movies_matched", 0),
         "series_created": series_result.get("series_created", 0), "series_matched": series_result.get("series_matched", 0),
         "episodes_imported": series_result.get("episodes_imported", 0),
+        "episodes_added": series_result.get("episodes_added", 0),
+        "created_movie_ids": movie_result.get("created_movie_ids", []),
+        "changed_movie_ids": movie_result.get("changed_movie_ids", []),
+        "created_series_ids": series_result.get("created_series_ids", []),
+        "changed_series_ids": series_result.get("changed_series_ids", []),
+        # KNM: 2026-10-07 -- removal cleanup isn't tracked per id; resweep everything.
+        "full_resweep": any(removed.values()),
         "tmdb": counts, "removed": removed, "removal_cleanup_skipped": reconcile_skipped,
         "scan_errors": len(scan_errors),
     }
