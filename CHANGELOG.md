@@ -67,6 +67,11 @@ instead of opening a duplicate request.
   movie/show TMDB IDs that are missing, changed, or due for refresh. The daily
   ID/name export remains a freshly replaced matching index; unrelated popular
   title details are no longer pre-fetched.
+- ✅ **Archived or settled titles no longer linger as approvals.** Auto-match
+  decisions are now cleared whenever a title is archived, assigned a TMDB ID,
+  merged, or deleted; startup also repairs old orphaned decisions. Archive and
+  merge actions refresh every approval/review view immediately, so an archived
+  duplicate cannot remain visible until a page reload.
 - **Verification:** full backend suite: 565 passed; frontend production build
   passed (the existing large-chunk warning remains).
 

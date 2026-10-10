@@ -42,6 +42,15 @@ def _tmdb_id(db, table, item_id):
     return row["tmdb_id"] if row else None
 
 
+def _auto_match_rows(db):
+    conn = db._connect()
+    rows = conn.execute(
+        "SELECT content_type, item_id, status FROM tmdb_auto_match ORDER BY content_type, item_id"
+    ).fetchall()
+    conn.close()
+    return [tuple(row) for row in rows]
+
+
 def test_confident_local_match_assigns_id_without_tmdb_calls(env):
     db, fake = env
     tmdb_store.upsert_payload("tv", _tv(10, "Father Knows Best", "1954-10-03"))
@@ -186,6 +195,57 @@ def test_batch_limit(env):
     result = asyncio.run(tmdb_automatch.run_auto_match(limit=2))
 
     assert result["checked"] == 2
+
+
+def test_archiving_clears_stale_auto_match_decision(env):
+    db, _ = env
+    item = _add(db, "movies", "Archived Candidate", 2020)
+    db.record_auto_match("movie", item, "ambiguous", "review me", [{"tmdb_id": "1"}])
+
+    db.bulk_set_review_excluded("movie", [item], True)
+
+    assert _auto_match_rows(db) == []
+    assert db.list_metadata_review("movie")["movies"] == []
+
+    db.bulk_set_review_excluded("movie", [item], False)
+    assert [row["id"] for row in db.list_auto_match_work("movie", 10)] == [item]
+
+
+def test_import_time_archive_trigger_clears_auto_match_decision(env):
+    db, _ = env
+    item = _add(db, "series", "Excluded Language", 2020)
+    db.record_auto_match("series", item, "ambiguous", "review me", [{"tmdb_id": "2"}])
+    conn = db._connect()
+    conn.execute("UPDATE series SET review_excluded=1 WHERE id=?", (item,))
+    conn.commit()
+    conn.close()
+
+    assert _auto_match_rows(db) == []
+
+
+def test_merge_and_delete_clear_auto_match_decisions(env):
+    db, _ = env
+    keep = _add(db, "movies", "Same", 2020)
+    drop = _add(db, "movies", "Same", None)
+    db.record_auto_match("movie", keep, "unmatched", "none")
+    db.record_auto_match("movie", drop, "ambiguous", "review me", [{"tmdb_id": "3"}])
+
+    db.merge_movie(drop, keep)
+    assert _auto_match_rows(db) == []
+
+    orphan = _add(db, "series", "Delete Me", 2020)
+    db.record_auto_match("series", orphan, "ambiguous", "review me", [{"tmdb_id": "4"}])
+    db.delete_series(orphan)
+    assert _auto_match_rows(db) == []
+
+
+def test_init_repairs_preexisting_orphan_auto_match_rows(env):
+    db, _ = env
+    db.record_auto_match("movie", 999999, "ambiguous", "stale", [{"tmdb_id": "5"}])
+
+    db.init_db()
+
+    assert _auto_match_rows(db) == []
 
 
 # --- local vs TMDB lookup counters ------------------------------------------

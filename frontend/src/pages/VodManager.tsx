@@ -68,6 +68,13 @@ function syncLabel(value: string): string {
   return value.replace(/_/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
 }
 
+function invalidateApprovalQueues(qc: ReturnType<typeof useQueryClient>) {
+  qc.invalidateQueries({ queryKey: ['vod-needs-review'] })
+  qc.invalidateQueries({ queryKey: ['vod-metadata-review'] })
+  qc.invalidateQueries({ queryKey: ['vod-tmdb-lookup-failures'] })
+  qc.invalidateQueries({ queryKey: ['vod-possible-matches'] })
+}
+
 function syncDuration(start: string | null | undefined, finish: string | null | undefined): string {
   if (!start || !finish) return 'pending'
   const seconds = Math.max(0, Math.round(Number(finish) - Number(start)))
@@ -2480,7 +2487,7 @@ function MovieRow({ movie, movieCategories, providers, qc, xcCredentials, select
   // to unmatched and can pick up a correct id on the next enrichment pass.
   const clearTmdbId = useMutation({
     mutationFn: () => api.post(`/vod/movies/${movie.id}/tmdb-id/clear/`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vod-movies'] }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['vod-movies'] }); invalidateApprovalQueues(qc) },
   })
 
   // Manual correction when a reviewer already knows the right tmdb_id --
@@ -2490,7 +2497,7 @@ function MovieRow({ movie, movieCategories, providers, qc, xcCredentials, select
   const [tmdbIdForm, setTmdbIdForm] = useState<string | null>(null)
   const setTmdbId = useMutation({
     mutationFn: () => api.post(`/vod/movies/${movie.id}/tmdb-id/set/`, { tmdb_id: Number(tmdbIdForm) }),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['vod-movies'] }); setTmdbIdForm(null) },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['vod-movies'] }); invalidateApprovalQueues(qc); setTmdbIdForm(null) },
   })
 
   const addSource = useMutation({
@@ -2529,7 +2536,7 @@ function MovieRow({ movie, movieCategories, providers, qc, xcCredentials, select
   })
   const deleteMovie = useMutation({
     mutationFn: () => api.delete(`/vod/movies/${movie.id}/`),
-    onSuccess:  () => qc.invalidateQueries({ queryKey: ['vod-movies'] }),
+    onSuccess:  () => { qc.invalidateQueries({ queryKey: ['vod-movies'] }); invalidateApprovalQueues(qc) },
     onError:    (e: any) => notify(e?.response?.data?.detail ?? 'Delete failed.'),
   })
   const toggleAdult = useMutation({
@@ -2950,14 +2957,14 @@ function SeriesRow({ series, seriesCategories, qc, xcCredentials, selected, onTo
   // See Movie's identical clearTmdbId -- same reasoning (GH issue #6).
   const clearTmdbId = useMutation({
     mutationFn: () => api.post(`/vod/series/${series.id}/tmdb-id/clear/`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vod-series'] }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['vod-series'] }); invalidateApprovalQueues(qc) },
   })
 
   // See Movie's identical setTmdbId -- same reasoning.
   const [tmdbIdForm, setTmdbIdForm] = useState<string | null>(null)
   const setTmdbId = useMutation({
     mutationFn: () => api.post(`/vod/series/${series.id}/tmdb-id/set/`, { tmdb_id: Number(tmdbIdForm) }),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['vod-series'] }); setTmdbIdForm(null) },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['vod-series'] }); invalidateApprovalQueues(qc); setTmdbIdForm(null) },
   })
 
   // See Movie's identical flagMismatch/resolveMismatch -- same reasoning,
@@ -2999,7 +3006,7 @@ function SeriesRow({ series, seriesCategories, qc, xcCredentials, selected, onTo
   }, [open])
   const deleteSeries = useMutation({
     mutationFn: () => api.delete(`/vod/series/${series.id}/`),
-    onSuccess:  () => qc.invalidateQueries({ queryKey: ['vod-series'] }),
+    onSuccess:  () => { qc.invalidateQueries({ queryKey: ['vod-series'] }); invalidateApprovalQueues(qc) },
     onError:    (e: any) => notify(e?.response?.data?.detail ?? 'Delete failed.'),
   })
   const toggleAdult = useMutation({
@@ -4609,7 +4616,7 @@ function PossibleMetadataMatches({ contentType }: { contentType: 'movie' | 'seri
     mutationFn: (pairs: { item_id: number; candidate_id: number }[]) => api.post('/vod/possible-matches/bulk-merge/', { content_type: contentType, pairs }),
     onSuccess: (r) => {
       setSelected(new Map())
-      qc.invalidateQueries({ queryKey: ['vod-possible-matches', contentType] })
+      invalidateApprovalQueues(qc)
       qc.invalidateQueries({ queryKey: [contentType === 'movie' ? 'vod-movies' : 'vod-series'] })
       notify(`Merged ${r.data.merged}; skipped ${r.data.skipped.length}.`)
     },
@@ -6412,8 +6419,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
     mutationFn: (ids: number[]) => api.post('/vod/bulk-archive/', { content_type: metadataContentType, ids, archived: true }),
     onSuccess: () => {
       setMetadataSelected(new Set())
-      qc.invalidateQueries({ queryKey: ['vod-metadata-review'] })
-      qc.invalidateQueries({ queryKey: ['vod-tmdb-lookup-failures'] })
+      invalidateApprovalQueues(qc)
       qc.invalidateQueries({ queryKey: metadataContentType === 'movie' ? ['vod-movies'] : ['vod-series'] })
     },
   })
@@ -6509,6 +6515,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
       duplicatesQuery.refetch()
       qc.invalidateQueries({ queryKey: ['vod-movies'] })
       qc.invalidateQueries({ queryKey: ['vod-series'] })
+      invalidateApprovalQueues(qc)
     },
     onError: (e: any) => setDuplicatesMergeResult(`Merge failed: ${e?.response?.data?.detail ?? e.message}`),
   })
@@ -6565,6 +6572,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
       duplicatesQuery.refetch()
       qc.invalidateQueries({ queryKey: ['vod-movies'] })
       qc.invalidateQueries({ queryKey: ['vod-series'] })
+      invalidateApprovalQueues(qc)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bulkAiDuplicates.job?.running])
@@ -6581,6 +6589,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
       duplicatesQuery.refetch()
       qc.invalidateQueries({ queryKey: ['vod-movies'] })
       qc.invalidateQueries({ queryKey: ['vod-series'] })
+      invalidateApprovalQueues(qc)
     },
     onError: (e: any) => setDuplicatesConfirmMergeResult(`Merge failed: ${e?.response?.data?.detail ?? e.message}`),
   })
@@ -6601,6 +6610,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
       if (duplicatesQuery.data) duplicatesQuery.refetch()
       qc.invalidateQueries({ queryKey: ['vod-movies'] })
       qc.invalidateQueries({ queryKey: ['vod-series'] })
+      invalidateApprovalQueues(qc)
     },
     onError: (e: any) => setDuplicatesMergeExistingResult(`Merge failed: ${e?.response?.data?.detail ?? e.message}`),
   })
@@ -6616,6 +6626,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
       duplicatesQuery.refetch()
       qc.invalidateQueries({ queryKey: ['vod-movies'] })
       qc.invalidateQueries({ queryKey: ['vod-series'] })
+      invalidateApprovalQueues(qc)
     },
     onError: (e: any) => setDuplicatesSecondPassMergeResult(`Merge failed: ${e?.response?.data?.detail ?? e.message}`),
   })
@@ -6709,7 +6720,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
   })
   const toggleMovieArchived = useMutation({
     mutationFn: ({ id, archived }: { id: number; archived: boolean }) => api.post(`/vod/movies/${id}/archive/`, null, { params: { archived } }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vod-movies'] }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['vod-movies'] }); invalidateApprovalQueues(qc) },
   })
   const [movieForm, setMovieForm] = useState({ name: '', year: '' })
   const addMovie = useMutation({
@@ -6755,6 +6766,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
     onSuccess: (r) => {
       setBulkMovieResult(`${movieShowArchived ? 'Un-archived' : 'Archived'} ${r.data.changed}.`)
       qc.invalidateQueries({ queryKey: ['vod-movies'] })
+      invalidateApprovalQueues(qc)
       setSelectedMovieIds(new Set())
     },
     onError: (e: any) => setBulkMovieResult(`Failed: ${e?.response?.data?.detail ?? e.message}`),
@@ -6780,7 +6792,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
   })
   const toggleSeriesArchived = useMutation({
     mutationFn: ({ id, archived }: { id: number; archived: boolean }) => api.post(`/vod/series/${id}/archive/`, null, { params: { archived } }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vod-series'] }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['vod-series'] }); invalidateApprovalQueues(qc) },
   })
   const [seriesForm, setSeriesForm] = useState({ name: '', year: '' })
   const addSeries = useMutation({
@@ -6826,6 +6838,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
     onSuccess: (r) => {
       setBulkSeriesResult(`${seriesShowArchived ? 'Un-archived' : 'Archived'} ${r.data.changed}.`)
       qc.invalidateQueries({ queryKey: ['vod-series'] })
+      invalidateApprovalQueues(qc)
       setSelectedSeriesIds(new Set())
     },
     onError: (e: any) => setBulkSeriesResult(`Failed: ${e?.response?.data?.detail ?? e.message}`),

@@ -757,6 +757,7 @@ def init_db() -> None:
     """)
     _commit_with_retry(conn)
     _migrate(conn)
+    _install_review_queue_cleanup(conn)
     _migrate_category_name_uniqueness(conn)
     _backfill_source_owners(conn)
     backfill_series_sources()
@@ -807,6 +808,50 @@ def init_db() -> None:
     _block_existing_exhausted_movies(conn)
     _commit_with_retry(conn)
     conn.close()
+
+
+def _install_review_queue_cleanup(conn: sqlite3.Connection) -> None:
+    """Keep persisted auto-match decisions scoped to active unresolved rows.
+
+    ``tmdb_auto_match`` deliberately has a polymorphic key rather than a
+    foreign key, so database triggers own its lifecycle for every write path,
+    including import-time archives and merges that do not call the review API.
+    The one-time DELETE also repairs stale rows created before these triggers
+    existed.
+    """
+    conn.executescript("""
+        CREATE TRIGGER IF NOT EXISTS cleanup_movie_auto_match_after_update
+        AFTER UPDATE OF review_excluded, tmdb_id ON movies
+        WHEN NEW.review_excluded=1 OR NEW.tmdb_id IS NOT NULL
+        BEGIN
+            DELETE FROM tmdb_auto_match WHERE content_type='movie' AND item_id=NEW.id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS cleanup_series_auto_match_after_update
+        AFTER UPDATE OF review_excluded, tmdb_id ON series
+        WHEN NEW.review_excluded=1 OR NEW.tmdb_id IS NOT NULL
+        BEGIN
+            DELETE FROM tmdb_auto_match WHERE content_type='series' AND item_id=NEW.id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS cleanup_movie_auto_match_after_delete
+        AFTER DELETE ON movies
+        BEGIN
+            DELETE FROM tmdb_auto_match WHERE content_type='movie' AND item_id=OLD.id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS cleanup_series_auto_match_after_delete
+        AFTER DELETE ON series
+        BEGIN
+            DELETE FROM tmdb_auto_match WHERE content_type='series' AND item_id=OLD.id;
+        END;
+    """)
+    conn.execute("""
+        DELETE FROM tmdb_auto_match
+        WHERE (content_type='movie' AND NOT EXISTS (
+                   SELECT 1 FROM movies m WHERE m.id=tmdb_auto_match.item_id
+                     AND m.review_excluded=0 AND m.tmdb_id IS NULL))
+           OR (content_type='series' AND NOT EXISTS (
+                   SELECT 1 FROM series s WHERE s.id=tmdb_auto_match.item_id
+                     AND s.review_excluded=0 AND s.tmdb_id IS NULL))
+    """)
 
 
 def _migrate_category_name_uniqueness(conn: sqlite3.Connection) -> None:
@@ -10142,6 +10187,10 @@ def _merge_movie_row(conn: sqlite3.Connection, from_id: int, into_id: int) -> No
                 (into_id, from_id, p["category_id"]),
             )
 
+    conn.execute(
+        "DELETE FROM tmdb_auto_match WHERE content_type='movie' AND item_id IN (?,?)",
+        (from_id, into_id),
+    )
     conn.execute("DELETE FROM movies WHERE id=?", (from_id,))
 
 
@@ -10502,6 +10551,10 @@ def _merge_series_row(conn: sqlite3.Connection, from_id: int, into_id: int) -> N
     # re-created the show as "new" (then auto-merged it again, every run).
     # UNIQUE is (provider_id, provider_series_id), so this can't conflict.
     conn.execute("UPDATE series_sources SET series_id=? WHERE series_id=?", (into_id, from_id))
+    conn.execute(
+        "DELETE FROM tmdb_auto_match WHERE content_type='series' AND item_id IN (?,?)",
+        (from_id, into_id),
+    )
     conn.execute("DELETE FROM series WHERE id=?", (from_id,))
 
 
