@@ -492,17 +492,24 @@ class XCProviderClient:
 async def _import_movies_for_provider(
     client: "XCProviderClient", provider: dict, provider_id: int,
     category_names: dict[str, str], exclude_categories: list[str], exclude_uncategorized: bool,
-    lang: dict, country: list[str],
+    lang: dict, country: list[str], *, saved_exclude_categories: list[str] | None = None,
 ) -> tuple[dict, int, set[str]]:
     fetch_started = time.time()
     streams = await client.get_vod_streams()
     fetch_elapsed = time.time() - fetch_started
     movie_name_rules = await asyncio.to_thread(vod_db.get_active_rules_for_field, "movie", "name")
     movie_items = []
+    skipped_excluded = 0
+    saved_excluded = {name.strip() for name in (saved_exclude_categories or []) if name and name.strip()}
     for s in streams:
+        category_name = category_names.get(str(s.get("category_id")))
+        if ((category_name or "").strip() in saved_excluded) or (
+            not (category_name or "").strip() and exclude_uncategorized
+        ):
+            skipped_excluded += 1
+            continue
         name, year = parse_name_year(s.get("name") or "")
         name = vod_db.apply_rules_to_value(name, movie_name_rules)
-        category_name = category_names.get(str(s.get("category_id")))
         movie_items.append({
             "name": name,
             "year": year,
@@ -543,6 +550,8 @@ async def _import_movies_for_provider(
         })
     db_started = time.time()
     movie_result = await asyncio.to_thread(vod_db.bulk_import_movies, provider_id, movie_items)
+    if isinstance(movie_result, dict):
+        movie_result["movies_skipped_excluded"] = skipped_excluded
     await asyncio.to_thread(vod_db.apply_provider_trailers, provider_id, "movie", movie_items)
     db_elapsed = time.time() - db_started
     logger.info(
@@ -560,7 +569,7 @@ async def _import_movies_for_provider(
 async def _import_series_for_provider(
     client: "XCProviderClient", provider: dict, provider_id: int,
     series_category_names: dict[str, str], exclude_categories: list[str], exclude_uncategorized: bool,
-    lang: dict, country: list[str],
+    lang: dict, country: list[str], *, saved_exclude_categories: list[str] | None = None,
 ) -> tuple[dict, int, set[str]]:
     fetch_started = time.time()
     series_list = await client.get_series()
@@ -578,10 +587,17 @@ async def _import_series_for_provider(
         for field in ("genre", "description", "cast_list", "director")
     }
     series_items = []
+    skipped_excluded = 0
+    saved_excluded = {name.strip() for name in (saved_exclude_categories or []) if name and name.strip()}
     for s in series_list:
+        category_name = series_category_names.get(str(s.get("category_id")))
+        if ((category_name or "").strip() in saved_excluded) or (
+            not (category_name or "").strip() and exclude_uncategorized
+        ):
+            skipped_excluded += 1
+            continue
         name, year = parse_name_year(s.get("name") or "")
         name = vod_db.apply_rules_to_value(name, series_name_rules)
-        category_name = series_category_names.get(str(s.get("category_id")))
         series_items.append({
             "name": name,
             "year": year or _coerce_year(s.get("year")),
@@ -612,6 +628,8 @@ async def _import_series_for_provider(
         })
     db_started = time.time()
     series_result = await asyncio.to_thread(vod_db.bulk_import_series, provider_id, series_items)
+    if isinstance(series_result, dict):
+        series_result["series_skipped_excluded"] = skipped_excluded
     await asyncio.to_thread(vod_db.apply_provider_trailers, provider_id, "series", series_items)
     db_elapsed = time.time() - db_started
     logger.info(
@@ -835,6 +853,10 @@ async def _import_provider_catalog_impl(provider_id: int) -> dict:
     client = XCProviderClient(provider)
 
     exclude_categories = provider.get("import_exclude_categories") or []
+    # Only saved exclusions are omitted from import. archive_new_categories
+    # extends the run-time archive list below, but its items must remain stored
+    # (archived) until the user decides what to do with the new category.
+    saved_exclude_categories = list(exclude_categories)
     exclude_uncategorized = bool(provider.get("import_exclude_uncategorized"))
 
     # Stripped for the same reason vod_routes.get_provider_available_categories
@@ -899,9 +921,11 @@ async def _import_provider_catalog_impl(provider_id: int) -> dict:
 
     movie_result, streams_total, seen_movie_stream_ids = await _import_movies_for_provider(
         client, provider, provider_id, category_names, exclude_categories, exclude_uncategorized, lang, country,
+        saved_exclude_categories=saved_exclude_categories,
     )
     series_result, series_total, seen_series_ids = await _import_series_for_provider(
         client, provider, provider_id, series_category_names, exclude_categories, exclude_uncategorized, lang, country,
+        saved_exclude_categories=saved_exclude_categories,
     )
 
     await asyncio.to_thread(vod_db.set_provider_import_totals, provider_id, streams_total, series_total)

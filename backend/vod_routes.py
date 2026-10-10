@@ -1601,6 +1601,25 @@ async def set_provider_import_exclude_categories(provider_id: int, body: Provide
     return {"ok": True}
 
 
+@router.post("/providers/{provider_id}/purge-excluded-content/", dependencies=_GUARDS)
+async def purge_excluded_content(provider_id: int, dry_run: bool = True):
+    """Preview by default; delete legacy sources only on explicit apply."""
+    provider = vod_db.get_provider(provider_id)
+    if not provider:
+        raise HTTPException(404, detail="provider not found")
+    # Non-XC sources may not carry provider_category_name. In particular,
+    # "exclude uncategorized" could otherwise match an entire media server.
+    if (provider.get("provider_type") or "xc") != "xc":
+        raise HTTPException(400, detail="purge-excluded-content supports XC providers only")
+    return await asyncio.to_thread(
+        vod_db.purge_excluded_category_sources,
+        provider_id,
+        provider.get("import_exclude_categories") or [],
+        bool(provider.get("import_exclude_uncategorized")),
+        dry_run=dry_run,
+    )
+
+
 @router.post("/providers/{provider_id}/deactivate/", dependencies=_GUARDS)
 async def deactivate_provider(provider_id: int):
     if not vod_db.get_provider(provider_id):

@@ -3606,6 +3606,80 @@ def _purge_if_sourceless_series(conn: sqlite3.Connection, series_id: int, orphan
         )
 
 
+def _remove_provider_sources(
+    conn: sqlite3.Connection, provider_id: int, movie_rows: list, series_rows: list,
+) -> int:
+    """Remove selected provider sources and purge only cards left sourceless.
+
+    Caller owns the transaction. Returns the number of episode source rows
+    removed as a consequence of removing the selected series sources.
+    """
+    for start in range(0, len(movie_rows), 900):
+        source_ids = [row["id"] for row in movie_rows[start:start + 900]]
+        conn.execute(
+            f"DELETE FROM movie_sources WHERE id IN ({','.join('?' * len(source_ids))})",
+            source_ids,
+        )
+
+    series_by_id: dict[int, set[str]] = {}
+    for row in series_rows:
+        series_by_id.setdefault(row["series_id"], set()).add(row["provider_series_id"])
+    for start in range(0, len(series_rows), 900):
+        provider_series_ids = [row["provider_series_id"] for row in series_rows[start:start + 900]]
+        conn.execute(
+            f"DELETE FROM series_sources WHERE provider_id=? AND provider_series_id IN "
+            f"({','.join('?' * len(provider_series_ids))})",
+            (provider_id, *provider_series_ids),
+        )
+
+    # episode_sources identify their provider but not the parent
+    # provider_series_id. Remove them only if no sibling series source from
+    # this provider remains for the canonical series.
+    series_without_provider_source = [
+        series_id for series_id in series_by_id
+        if not conn.execute(
+            "SELECT 1 FROM series_sources WHERE series_id=? AND provider_id=? LIMIT 1",
+            (series_id, provider_id),
+        ).fetchone()
+    ]
+    episode_source_ids: list[int] = []
+    affected_episode_ids: set[int] = set()
+    for start in range(0, len(series_without_provider_source), 900):
+        ids = series_without_provider_source[start:start + 900]
+        rows = conn.execute(
+            f"SELECT es.id, es.episode_id FROM episode_sources es "
+            f"JOIN episodes e ON e.id=es.episode_id "
+            f"WHERE es.provider_id=? AND e.series_id IN ({','.join('?' * len(ids))})",
+            (provider_id, *ids),
+        ).fetchall()
+        episode_source_ids.extend(row["id"] for row in rows)
+        affected_episode_ids.update(row["episode_id"] for row in rows)
+    for start in range(0, len(episode_source_ids), 900):
+        ids = episode_source_ids[start:start + 900]
+        conn.execute(f"DELETE FROM episode_sources WHERE id IN ({','.join('?' * len(ids))})", ids)
+
+    for movie_id in {row["movie_id"] for row in movie_rows}:
+        _purge_if_sourceless_movie(conn, movie_id)
+    for episode_id in affected_episode_ids:
+        _purge_if_sourceless_episode(conn, episode_id)
+    for series_id in series_by_id:
+        remaining_source = conn.execute(
+            "SELECT provider_id, provider_series_id FROM series_sources "
+            "WHERE series_id=? ORDER BY last_seen_at DESC LIMIT 1",
+            (series_id,),
+        ).fetchone()
+        if remaining_source:
+            conn.execute(
+                "UPDATE series SET import_provider_id=?, import_provider_series_id=? "
+                "WHERE id=? AND import_provider_id=?",
+                (remaining_source["provider_id"], remaining_source["provider_series_id"], series_id, provider_id),
+            )
+        else:
+            _purge_if_sourceless_series(conn, series_id, orphaned_provider_id=provider_id)
+
+    return len(episode_source_ids)
+
+
 def reconcile_provider_catalog_sources(
     provider_id: int,
     *,
@@ -3634,79 +3708,113 @@ def reconcile_provider_catalog_sources(
             ).fetchall()
             stale_series_rows = [row for row in series_rows if row["provider_series_id"] not in seen_series_ids]
 
-            for start in range(0, len(stale_movie_rows), 900):
-                source_ids = [row["id"] for row in stale_movie_rows[start:start + 900]]
-                conn.execute(
-                    f"DELETE FROM movie_sources WHERE id IN ({','.join('?' * len(source_ids))})",
-                    source_ids,
-                )
-
-            stale_series_by_id: dict[int, set[str]] = {}
-            for row in stale_series_rows:
-                stale_series_by_id.setdefault(row["series_id"], set()).add(row["provider_series_id"])
-            for start in range(0, len(stale_series_rows), 900):
-                series_ids = [row["provider_series_id"] for row in stale_series_rows[start:start + 900]]
-                conn.execute(
-                    f"DELETE FROM series_sources WHERE provider_id=? AND provider_series_id IN ({','.join('?' * len(series_ids))})",
-                    (provider_id, *series_ids),
-                )
-
-            # episode_sources identify their provider but not the parent
-            # provider_series_id. Remove them only when the provider no
-            # longer advertises *any* source for that canonical series; a
-            # retained sibling source may still be the origin of those rows.
-            series_without_provider_source = [
-                series_id for series_id in stale_series_by_id
-                if not conn.execute(
-                    "SELECT 1 FROM series_sources WHERE series_id=? AND provider_id=? LIMIT 1",
-                    (series_id, provider_id),
-                ).fetchone()
-            ]
-            episode_source_ids: list[int] = []
-            affected_episode_ids: set[int] = set()
-            for start in range(0, len(series_without_provider_source), 900):
-                ids = series_without_provider_source[start:start + 900]
-                rows = conn.execute(
-                    f"SELECT es.id, es.episode_id FROM episode_sources es "
-                    f"JOIN episodes e ON e.id=es.episode_id "
-                    f"WHERE es.provider_id=? AND e.series_id IN ({','.join('?' * len(ids))})",
-                    (provider_id, *ids),
-                ).fetchall()
-                episode_source_ids.extend(row["id"] for row in rows)
-                affected_episode_ids.update(row["episode_id"] for row in rows)
-            for start in range(0, len(episode_source_ids), 900):
-                ids = episode_source_ids[start:start + 900]
-                conn.execute(f"DELETE FROM episode_sources WHERE id IN ({','.join('?' * len(ids))})", ids)
-
-            for movie_id in {row["movie_id"] for row in stale_movie_rows}:
-                _purge_if_sourceless_movie(conn, movie_id)
-            for episode_id in affected_episode_ids:
-                _purge_if_sourceless_episode(conn, episode_id)
-            for series_id in stale_series_by_id:
-                remaining_source = conn.execute(
-                    "SELECT provider_id, provider_series_id FROM series_sources "
-                    "WHERE series_id=? ORDER BY last_seen_at DESC LIMIT 1",
-                    (series_id,),
-                ).fetchone()
-                if remaining_source:
-                    # A retained source is enough to keep a series that has
-                    # not had episode discovery run yet. If the vanished
-                    # provider was still the legacy detail pointer, repoint
-                    # it at the surviving source for compatibility.
-                    conn.execute(
-                        "UPDATE series SET import_provider_id=?, import_provider_series_id=? "
-                        "WHERE id=? AND import_provider_id=?",
-                        (remaining_source["provider_id"], remaining_source["provider_series_id"], series_id, provider_id),
-                    )
-                else:
-                    _purge_if_sourceless_series(conn, series_id, orphaned_provider_id=provider_id)
-
+            episode_sources_removed = _remove_provider_sources(
+                conn, provider_id, stale_movie_rows, stale_series_rows,
+            )
             _commit_with_retry(conn)
             return {
                 "movie_sources_removed": len(stale_movie_rows),
                 "series_sources_removed": len(stale_series_rows),
-                "episode_sources_removed": len(episode_source_ids),
+                "episode_sources_removed": episode_sources_removed,
             }
+        finally:
+            conn.close()
+
+
+def purge_excluded_category_sources(
+    provider_id: int,
+    exclude_categories: list[str],
+    exclude_uncategorized: bool,
+    *,
+    dry_run: bool = True,
+    sample_limit: int = 20,
+) -> dict:
+    """Preview or remove one XC provider's sources in saved exclusions.
+
+    Cards backed by another source survive, cards left sourceless are deleted,
+    and manually curated cards are never touched. Preview is the default and
+    executes the same transaction before rolling it back, so its counts match
+    an explicit apply.
+    """
+    excluded = {c.strip() for c in exclude_categories if c and c.strip()}
+    empty = {
+        "dry_run": dry_run,
+        "movie_sources_removed": 0,
+        "series_sources_removed": 0,
+        "episode_sources_removed": 0,
+        "movies_deleted": 0,
+        "series_deleted": 0,
+        "sample_movies": [],
+        "sample_series": [],
+    }
+    if not excluded and not exclude_uncategorized:
+        return empty
+
+    def _is_excluded(category) -> bool:
+        name = (category or "").strip()
+        return name in excluded if name else exclude_uncategorized
+
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            movie_rows = [
+                row for row in conn.execute(
+                    "SELECT ms.id, ms.movie_id, ms.provider_category_name FROM movie_sources ms "
+                    "JOIN movies m ON m.id=ms.movie_id "
+                    "WHERE ms.provider_id=? AND m.review_excluded_manual=0",
+                    (provider_id,),
+                ).fetchall()
+                if _is_excluded(row["provider_category_name"])
+            ]
+            series_rows = [
+                row for row in conn.execute(
+                    "SELECT ss.series_id, ss.provider_series_id, ss.provider_category_name FROM series_sources ss "
+                    "JOIN series s ON s.id=ss.series_id "
+                    "WHERE ss.provider_id=? AND s.review_excluded_manual=0",
+                    (provider_id,),
+                ).fetchall()
+                if _is_excluded(row["provider_category_name"])
+            ]
+            movie_ids = sorted({row["movie_id"] for row in movie_rows})
+            series_ids = sorted({row["series_id"] for row in series_rows})
+            movie_names = {
+                item_id: conn.execute("SELECT name FROM movies WHERE id=?", (item_id,)).fetchone()["name"]
+                for item_id in movie_ids
+            }
+            series_names = {
+                item_id: conn.execute("SELECT name FROM series WHERE id=?", (item_id,)).fetchone()["name"]
+                for item_id in series_ids
+            }
+
+            episode_sources_removed = _remove_provider_sources(
+                conn, provider_id, movie_rows, series_rows,
+            )
+            deleted_movies = [
+                item_id for item_id in movie_ids
+                if not conn.execute("SELECT 1 FROM movies WHERE id=?", (item_id,)).fetchone()
+            ]
+            deleted_series = [
+                item_id for item_id in series_ids
+                if not conn.execute("SELECT 1 FROM series WHERE id=?", (item_id,)).fetchone()
+            ]
+            result = {
+                "dry_run": dry_run,
+                "movie_sources_removed": len(movie_rows),
+                "series_sources_removed": len(series_rows),
+                "episode_sources_removed": episode_sources_removed,
+                "movies_deleted": len(deleted_movies),
+                "series_deleted": len(deleted_series),
+                "sample_movies": [movie_names[item_id] for item_id in deleted_movies[:sample_limit]],
+                "sample_series": [series_names[item_id] for item_id in deleted_series[:sample_limit]],
+            }
+            if dry_run:
+                conn.rollback()
+            else:
+                _commit_with_retry(conn)
+            return result
+        except BaseException:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
