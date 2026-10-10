@@ -1,9 +1,8 @@
-"""Content imported BEFORE a category was added to a provider's
-import_exclude_categories is never removed: reconcile_provider_catalog_sources
-compares against the raw (unfiltered) snapshot, so excluded items still count
-as "seen", and purge_excluded_archived_content only touches archived rows.
-purge_excluded_category_sources removes the provider's sources in excluded
-categories and deletes only cards left with no source at all."""
+"""Saved exclusions skip intake; legacy stored sources are previewed first.
+
+purge_excluded_category_sources removes a provider's sources in excluded
+categories only on explicit apply, deleting only cards left with no source.
+"""
 
 import vod_db
 
@@ -28,7 +27,7 @@ def test_deletes_active_movie_whose_only_source_is_in_excluded_category(db):
     provider_id = db.upsert_provider("prov1", "http://example.com", "u", "p")
     _import_movie(db, provider_id, "Nordic Music Video", "s-1", "NORDIC MUSIC")
 
-    result = vod_db.purge_excluded_category_sources(provider_id, ["NORDIC MUSIC"], False)
+    result = vod_db.purge_excluded_category_sources(provider_id, ["NORDIC MUSIC"], False, dry_run=False)
 
     assert result["movie_sources_removed"] == 1
     assert result["movies_deleted"] == 1
@@ -42,7 +41,7 @@ def test_keeps_card_that_still_has_a_source_in_a_kept_category(db):
     _import_movie(db, provider_b, "Shared Movie", "b-1", "Action")
     movie = db.get_movie_by_name_year("Shared Movie", 2001)
 
-    result = vod_db.purge_excluded_category_sources(provider_a, ["NORDIC MOVIES"], False)
+    result = vod_db.purge_excluded_category_sources(provider_a, ["NORDIC MOVIES"], False, dry_run=False)
 
     assert result["movie_sources_removed"] == 1
     assert result["movies_deleted"] == 0
@@ -53,7 +52,7 @@ def test_does_not_touch_sources_in_non_excluded_categories(db):
     provider_id = db.upsert_provider("prov1", "http://example.com", "u", "p")
     _import_movie(db, provider_id, "Action Flick", "s-1", "Action")
 
-    result = vod_db.purge_excluded_category_sources(provider_id, ["NORDIC MUSIC"], False)
+    result = vod_db.purge_excluded_category_sources(provider_id, ["NORDIC MUSIC"], False, dry_run=False)
 
     assert result["movie_sources_removed"] == 0
     assert db.get_movie_by_name_year("Action Flick", 2001) is not None
@@ -63,11 +62,11 @@ def test_uncategorized_sources_removed_only_when_exclude_uncategorized(db):
     provider_id = db.upsert_provider("prov1", "http://example.com", "u", "p")
     _import_movie(db, provider_id, "No Category", "s-1", None)
 
-    kept = vod_db.purge_excluded_category_sources(provider_id, [], False)
+    kept = vod_db.purge_excluded_category_sources(provider_id, [], False, dry_run=False)
     assert kept["movie_sources_removed"] == 0
     assert db.get_movie_by_name_year("No Category", 2001) is not None
 
-    removed = vod_db.purge_excluded_category_sources(provider_id, [], True)
+    removed = vod_db.purge_excluded_category_sources(provider_id, [], True, dry_run=False)
     assert removed["movies_deleted"] == 1
     assert db.get_movie_by_name_year("No Category", 2001) is None
 
@@ -78,7 +77,7 @@ def test_skips_manually_curated_cards(db):
     movie = db.get_movie_by_name_year("Hand Kept", 2001)
     db.bulk_set_review_excluded("movie", [movie["id"]], False)  # stamps review_excluded_manual=1
 
-    result = vod_db.purge_excluded_category_sources(provider_id, ["NORDIC MUSIC"], False)
+    result = vod_db.purge_excluded_category_sources(provider_id, ["NORDIC MUSIC"], False, dry_run=False)
 
     assert result["movie_sources_removed"] == 0
     assert db.get_movie_by_name_year("Hand Kept", 2001) is not None
@@ -89,7 +88,7 @@ def test_only_this_providers_sources_are_considered(db):
     provider_b = db.upsert_provider("prov2", "http://b.invalid", "u", "p")
     _import_movie(db, provider_b, "Other Provider Nordic", "b-1", "NORDIC MUSIC")
 
-    result = vod_db.purge_excluded_category_sources(provider_a, ["NORDIC MUSIC"], False)
+    result = vod_db.purge_excluded_category_sources(provider_a, ["NORDIC MUSIC"], False, dry_run=False)
 
     assert result["movie_sources_removed"] == 0
     assert db.get_movie_by_name_year("Other Provider Nordic", 2001) is not None
@@ -104,7 +103,7 @@ def test_deletes_series_whose_only_source_is_in_excluded_category(db):
         "provider_stream_id": "ep-1", "container_extension": "mp4",
     }])
 
-    result = vod_db.purge_excluded_category_sources(provider_id, ["NORDIC SERIES"], False)
+    result = vod_db.purge_excluded_category_sources(provider_id, ["NORDIC SERIES"], False, dry_run=False)
 
     assert result["series_sources_removed"] == 1
     assert result["episode_sources_removed"] == 1
@@ -130,9 +129,10 @@ def test_dry_run_reports_exact_counts_and_samples_without_writing(db):
     assert db.get_series_by_name_year("Nordic Show", 2001) is not None
 
 
-def test_import_purges_previously_imported_content_in_newly_excluded_category(db, monkeypatch):
+def test_import_skips_exclusion_until_previewed_cleanup_is_applied(db, monkeypatch):
     import asyncio
     import vod_importer
+    import vod_routes
 
     provider_id = db.upsert_provider("prov1", "http://a.invalid", "u", "p", provider_type="xc")
 
@@ -164,9 +164,23 @@ def test_import_purges_previously_imported_content_in_newly_excluded_category(db
     db.set_provider_import_exclude_categories(provider_id, ["NORDIC MUSIC"], False)
     result = asyncio.run(vod_importer.import_provider_catalog(provider_id))
 
-    assert db.get_movie_by_name_year("Nordic Video", 2001) is None
+    assert result["movies_created"] == 0
+    assert result["movies_skipped_excluded"] == 1
+    assert db.get_movie_by_name_year("Nordic Video", 2001) is not None
     assert db.get_movie_by_name_year("Action Flick", 2001) is not None
-    assert result["excluded_category_purge"]["movies_deleted"] == 1
+
+    preview = asyncio.run(vod_routes.purge_excluded_content(provider_id))
+    assert preview["dry_run"] is True
+    assert preview["movies_deleted"] == 1
+    assert db.get_movie_by_name_year("Nordic Video", 2001) is not None
+
+    asyncio.run(vod_routes.purge_excluded_content(provider_id, dry_run=False))
+    assert db.get_movie_by_name_year("Nordic Video", 2001) is None
+
+    unchanged = asyncio.run(vod_importer.import_provider_catalog(provider_id))
+    assert unchanged["movies_created"] == 0
+    assert unchanged["movies_skipped_excluded"] == 1
+    assert asyncio.run(vod_routes.purge_excluded_content(provider_id))["movie_sources_removed"] == 0
 
 
 def test_route_previews_then_applies_using_saved_exclusions(db):
@@ -207,9 +221,7 @@ class _NordicFakeClient:
         return []
 
 
-def test_import_purge_ignores_newly_discovered_categories(db, monkeypatch):
-    # archive_new_categories extends the run's exclusion list with newly seen
-    # categories; the purge must get only the saved list (upstream #39 review).
+def test_import_never_runs_destructive_category_purge(db, monkeypatch):
     import asyncio
     import vod_importer
 
@@ -220,20 +232,18 @@ def test_import_purge_ignores_newly_discovered_categories(db, monkeypatch):
     monkeypatch.setattr(vod_importer, "XCProviderClient", _NordicFakeClient)
     monkeypatch.setattr(vod_importer.vod_db, "get_active_rules_for_field", lambda *_: [])
     purge_lists = []
-    real_purge = vod_db.purge_excluded_category_sources
-
-    def _spy(pid, categories, uncategorized, **kwargs):
-        purge_lists.append(list(categories))
-        return real_purge(pid, categories, uncategorized, **kwargs)
+    def _spy(*args, **kwargs):
+        purge_lists.append(args)
+        raise AssertionError("scheduled import must not purge excluded content")
 
     monkeypatch.setattr(vod_importer.vod_db, "purge_excluded_category_sources", _spy)
 
     asyncio.run(vod_importer.import_provider_catalog(provider_id, schedule_enrichment=False))
 
-    assert purge_lists == [["OLD EXCLUDED"]]
+    assert purge_lists == []
 
 
-def test_import_purge_logs_warning_summary_with_titles(db, monkeypatch, caplog):
+def test_import_does_not_delete_or_warn_for_legacy_excluded_content(db, monkeypatch, caplog):
     import asyncio
     import logging
     import vod_importer
@@ -248,7 +258,8 @@ def test_import_purge_logs_warning_summary_with_titles(db, monkeypatch, caplog):
         asyncio.run(vod_importer.import_provider_catalog(provider_id, schedule_enrichment=False))
 
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert any("excluded categor" in m and "Nordic Video" in m for m in warnings)
+    assert not any("excluded categor" in m for m in warnings)
+    assert db.get_movie_by_name_year("Nordic Video", 2001) is not None
 
 
 def test_route_rejects_non_xc_provider(db):

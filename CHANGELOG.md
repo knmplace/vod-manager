@@ -44,7 +44,16 @@ instead of opening a duplicate request.
   their own change signal or fallback interval is due.
 - ✅ **Language cleanup only restores its own archives.** Re-enabling a language
   cannot unarchive a title that was archived manually or by category cleanup.
-- **Verification:** full backend suite: 558 passed; frontend production build
+- ✅ 🔀 **Saved excluded categories are skipped without a delete/recreate
+  cycle.** Catalog refreshes no longer import and purge the same excluded XC
+  titles every run. Import results now report how many movie and series rows
+  were skipped. Proposed upstream in [#39](https://github.com/jstevenscl/vod-manager/pull/39).
+- ✅ 🔀 **Excluded-category cleanup is preview-first.** Saving XC exclusions
+  shows exact affected source/card counts and sample titles. Existing stored
+  content is deleted only after **Apply cleanup** is clicked; scheduled imports
+  never run that destructive cleanup automatically. Cards with another source
+  and manually curated cards remain protected.
+- **Verification:** full backend suite: 559 passed; frontend production build
   passed (the existing large-chunk warning remains).
 
 ## 2026-10-07 (No episode fetches for languages you've turned off)

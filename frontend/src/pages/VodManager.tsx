@@ -42,6 +42,17 @@ interface Provider {
   has_library_remote_secret: boolean
 }
 
+interface ExcludedCategoryPurgePreview {
+  dry_run: boolean
+  movie_sources_removed: number
+  series_sources_removed: number
+  episode_sources_removed: number
+  movies_deleted: number
+  series_deleted: number
+  sample_movies: string[]
+  sample_series: string[]
+}
+
 interface CatalogSyncEvent {
   id: number
   content_type: 'movie' | 'series'
@@ -5690,6 +5701,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
   const [excludeCategoriesShowFilter, setExcludeCategoriesShowFilter] = useState<'all' | 'selected' | 'unselected'>('all')
   const [excludeCategoriesLastClickedIndex, setExcludeCategoriesLastClickedIndex] = useState<number | null>(null)
   const [excludeCategoriesError, setExcludeCategoriesError] = useState<string | null>(null)
+  const [excludeCategoriesPreview, setExcludeCategoriesPreview] = useState<ExcludedCategoryPurgePreview | null>(null)
   const providerAvailableCategoriesQuery = useQuery<{ categories: string[] }>({
     queryKey: ['vod-provider-available-categories', excludeCategoriesProviderId],
     queryFn:  () => api.get(`/vod/providers/${excludeCategoriesProviderId}/available-categories/`).then((r) => r.data),
@@ -5714,15 +5726,34 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
   const setProviderImportExcludeCategories = useMutation({
     mutationFn: ({ id, category_names, exclude_uncategorized }: { id: number; category_names: string[]; exclude_uncategorized: boolean }) =>
       api.post(`/vod/providers/${id}/import-exclude-categories/`, { category_names, exclude_uncategorized }),
-    onSuccess: async () => {
+    onSuccess: async (_data, variables) => {
       // Awaited, not fire-and-forget -- closing the dialog before this
       // resolves let a reopen race the refetch and show stale (pre-save)
       // categories, which looked exactly like "my selection didn't stick".
       await qc.invalidateQueries({ queryKey: ['vod-providers'] })
       setExcludeCategoriesError(null)
-      setExcludeCategoriesProviderId(null)
+      if (providersQuery.data?.find((provider) => provider.id === variables.id)?.provider_type !== 'xc') {
+        setExcludeCategoriesProviderId(null)
+        return
+      }
+      const preview = await api.post(
+        `/vod/providers/${variables.id}/purge-excluded-content/`, null, { params: { dry_run: true } },
+      )
+      setExcludeCategoriesPreview(preview.data)
     },
     onError: (e: any) => setExcludeCategoriesError(e?.response?.data?.detail ?? e.message ?? 'Save failed.'),
+  })
+  const applyExcludedCategoryPurge = useMutation({
+    mutationFn: (id: number) =>
+      api.post(`/vod/providers/${id}/purge-excluded-content/`, null, { params: { dry_run: false } }),
+    onSuccess: async (response) => {
+      const result = response.data as ExcludedCategoryPurgePreview
+      notify(`Removed ${result.movie_sources_removed} movie and ${result.series_sources_removed} series source(s) from saved exclusions.`)
+      await qc.invalidateQueries({ queryKey: ['vod-providers'] })
+      setExcludeCategoriesPreview(null)
+      setExcludeCategoriesProviderId(null)
+    },
+    onError: (e: any) => setExcludeCategoriesError(e?.response?.data?.detail ?? e.message ?? 'Cleanup failed.'),
   })
   // ── DVR recording profiles (Phase 2) ──
   const [recordingProfilesProviderId, setRecordingProfilesProviderId] = useState<number | null>(null)
@@ -8619,6 +8650,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
                       setExcludeCategoriesShowFilter('all')
                       setExcludeCategoriesLastClickedIndex(null)
                       setExcludeCategoriesError(null)
+                      setExcludeCategoriesPreview(null)
                     }}
                   >
                     Exclude Categories{p.import_exclude_categories.length + (p.import_exclude_uncategorized ? 1 : 0) ? ` (${p.import_exclude_categories.length + (p.import_exclude_uncategorized ? 1 : 0)})` : ''}
@@ -8977,15 +9009,40 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
               ))}
               {!!allNames.length && !visible.length && <p className="text-muted-foreground">No categories match.</p>}
             </div>
+            {excludeCategoriesPreview && (() => {
+              const affectedSources = excludeCategoriesPreview.movie_sources_removed + excludeCategoriesPreview.series_sources_removed
+              const deletedCards = excludeCategoriesPreview.movies_deleted + excludeCategoriesPreview.series_deleted
+              const samples = [...excludeCategoriesPreview.sample_movies, ...excludeCategoriesPreview.sample_series]
+              return (
+                <div className="rounded border border-warning/50 bg-warning/10 p-3 space-y-1.5 text-xs">
+                  <p className="font-medium">Cleanup preview — nothing has been deleted</p>
+                  <p>
+                    {affectedSources} stored source{affectedSources === 1 ? '' : 's'} match the saved exclusions.
+                    Applying cleanup would delete {deletedCards} card{deletedCards === 1 ? '' : 's'} left with no other source.
+                  </p>
+                  {!!samples.length && <p className="text-muted-foreground">Examples: {samples.join(', ')}</p>}
+                  <p className="text-muted-foreground">Future imports skip saved exclusions, so applied items are not recreated.</p>
+                </div>
+              )
+            })()}
             {excludeCategoriesError && <p className="text-xs text-destructive">{excludeCategoriesError}</p>}
             <div className="flex justify-end gap-2 pt-2">
-              <Button size="sm" variant="outline" onClick={() => setExcludeCategoriesProviderId(null)}>Cancel</Button>
+              <Button size="sm" variant="outline" onClick={() => setExcludeCategoriesProviderId(null)}>Close</Button>
+              {excludeCategoriesPreview && (excludeCategoriesPreview.movie_sources_removed + excludeCategoriesPreview.series_sources_removed > 0) && (
+                <Button
+                  size="sm"
+                  disabled={applyExcludedCategoryPurge.isPending}
+                  onClick={() => applyExcludedCategoryPurge.mutate(excludeCategoriesProviderId)}
+                >
+                  {applyExcludedCategoryPurge.isPending ? <Loader2 size={12} className="animate-spin" /> : 'Apply cleanup'}
+                </Button>
+              )}
               <Button
                 size="sm"
                 disabled={setProviderImportExcludeCategories.isPending}
                 onClick={() => setProviderImportExcludeCategories.mutate({ id: excludeCategoriesProviderId, category_names: Array.from(excludeCategoriesDraft), exclude_uncategorized: excludeUncategorizedDraft })}
               >
-                {setProviderImportExcludeCategories.isPending ? <Loader2 size={12} className="animate-spin" /> : 'Save'}
+                {setProviderImportExcludeCategories.isPending ? <Loader2 size={12} className="animate-spin" /> : 'Save & Preview'}
               </Button>
             </div>
           </div>

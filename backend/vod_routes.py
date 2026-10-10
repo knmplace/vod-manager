@@ -1648,9 +1648,7 @@ async def set_provider_import_exclude_categories(provider_id: int, body: Provide
 
 @router.post("/providers/{provider_id}/purge-excluded-content/", dependencies=_GUARDS)
 async def purge_excluded_content(provider_id: int, dry_run: bool = True):
-    """KNM: added 2026-10-03 -- preview (default) or apply removal of content
-    already imported in this provider's now-excluded categories. The next
-    catalog import applies the same purge automatically."""
+    """Preview by default; delete legacy excluded sources only on apply."""
     provider = vod_db.get_provider(provider_id)
     if not provider:
         raise HTTPException(404, detail="provider not found")

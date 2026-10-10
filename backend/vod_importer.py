@@ -661,6 +661,8 @@ async def _import_movies_for_provider(
     )
     db_started = time.time()
     movie_result = await asyncio.to_thread(vod_db.bulk_import_movies, provider_id, movie_items)
+    if isinstance(movie_result, dict):
+        movie_result["movies_skipped_excluded"] = len(streams) - len(movie_items)
     await asyncio.to_thread(vod_db.apply_provider_trailers, provider_id, "movie", movie_items)
     db_elapsed = time.time() - db_started
     logger.info(
@@ -757,6 +759,8 @@ async def _import_series_for_provider(
     )
     db_started = time.time()
     series_result = await asyncio.to_thread(vod_db.bulk_import_series, provider_id, series_items)
+    if isinstance(series_result, dict):
+        series_result["series_skipped_excluded"] = len(series_list) - len(series_items)
     await asyncio.to_thread(vod_db.apply_provider_trailers, provider_id, "series", series_items)
     db_elapsed = time.time() - db_started
     logger.info(
@@ -1215,11 +1219,6 @@ async def _import_provider_catalog_impl(provider_id: int) -> dict:
     client = XCProviderClient(provider)
 
     exclude_categories = provider.get("import_exclude_categories") or []
-    # KNM: 2026-10-04 (upstream #39 review) -- saved list only. exclude_categories
-    # gains newly discovered categories below (archive_new_categories); purging
-    # with that list deleted their just-archived content, which then came back
-    # active on the next import.
-    saved_exclude_categories = list(exclude_categories)
     exclude_uncategorized = bool(provider.get("import_exclude_uncategorized"))
 
     # Stripped for the same reason vod_routes.get_provider_available_categories
@@ -1313,53 +1312,12 @@ async def _import_provider_catalog_impl(provider_id: int) -> dict:
             reconcile_result["episode_sources_removed"],
         )
 
-    # KNM: added 2026-10-03 -- reconcile above keeps sources the provider
-    # still lists, including ones in categories excluded after they were
-    # imported. Remove those now (see vod_db.purge_excluded_category_sources).
-    category_purge = await asyncio.to_thread(
-        vod_db.purge_excluded_category_sources, provider_id, saved_exclude_categories, exclude_uncategorized,
-    )
-    changed_movie_ids.update(category_purge.pop("affected_movie_ids"))
-    changed_series_ids.update(category_purge.pop("affected_series_ids"))
-    if category_purge["movie_sources_removed"] or category_purge["series_sources_removed"]:
-        logger.warning(
-            "[vod_importer] provider=%s removed %d movie/%d series source(s) in excluded categories; "
-            "deleted %d movie(s)/%d series (e.g. %s). Preview with POST /providers/%s/purge-excluded-content/",
-            provider["name"], category_purge["movie_sources_removed"], category_purge["series_sources_removed"],
-            category_purge["movies_deleted"], category_purge["series_deleted"],
-            ", ".join((category_purge["sample_movies"] + category_purge["sample_series"])[:5]) or "none deleted",
-            provider_id,
-        )
-
     catalog_changed = bool(changed_movie_ids or changed_series_ids or any(reconcile_result.values()))
 
-    # Companion cleanup to the skip-at-import filtering above: content that
-    # was imported-then-archived under the old behavior (before this
-    # provider's exclusion rules were enforced at import time) is purged
-    # now that a fresh scan has run, matching the new "never stored" model
-    # (see vod_db.purge_excluded_archived_content).
-    #
-    # 2026-09-11: this used to be conditional on exclude_categories,
-    # exclude_uncategorized, or a non-empty lang["exclude_prefixes"]/
-    # lang["exclude_non_latin"] -- skipped entirely when a provider had no
-    # exclusion rules configured, since an empty exclude_prefixes list could
-    # never match anything. Now that the language gate is enabled_languages
-    # based instead, there's no "empty means inactive" case: config.
-    # get_enabled_languages() always has at least a default (["EN", "ES"]),
-    # so any provider's catalog can always contain a language outside that
-    # set. The purge scan now always runs (its own per-row work is cheap
-    # when nothing currently matches any active rule).
+    # Destructive cleanup is preview-first in the Exclude Categories dialog.
+    # Imports skip excluded rows but never delete legacy stored sources merely
+    # because a scheduled refresh ran.
     purge_summary = {"movies_deleted": 0, "series_deleted": 0}
-    if catalog_changed:
-        lang = _current_lang_settings()
-        purge_result = await asyncio.to_thread(
-            vod_db.purge_excluded_archived_content,
-            {provider_id: (exclude_categories, exclude_uncategorized)}, lang,
-        )
-        purge_summary = dict(purge_result)
-        if purge_result["movies_deleted"] or purge_result["series_deleted"]:
-            logger.info("[vod_importer] provider=%s purged %d movie(s)/%d series matching current exclusion rules",
-                        provider["name"], purge_result["movies_deleted"], purge_result["series_deleted"])
 
     # KNM: added 2026-09-17 -- source-first series matching prevents new
     # shadows; this catches the pre-fix rows after a successful full refresh.
@@ -1370,29 +1328,6 @@ async def _import_provider_catalog_impl(provider_id: int) -> dict:
         logger.info(
             "[vod_importer] provider=%s purged %d source-less series, %d movie(s), %d episode(s)",
             provider["name"], orphan_result["series_deleted"], orphan_result["movies_deleted"], orphan_result["episodes_deleted"],
-        )
-
-    # Both list calls above completed successfully, so these are
-    # authoritative full-catalog snapshots -- safe to remove only this
-    # provider's source rows that are no longer advertised (canonical
-    # movies/series survive whenever another provider still has a source).
-    # Done before post-import enrichment so a stale source can't be picked
-    # as fallback work. If either call above had raised, we'd never reach
-    # here at all -- a provider outage (failed fetch) can't masquerade as
-    # "every title got removed".
-    reconcile_result = await asyncio.to_thread(
-        vod_db.reconcile_provider_catalog_sources,
-        provider_id,
-        seen_movie_stream_ids=seen_movie_stream_ids,
-        seen_series_ids=seen_series_ids,
-    )
-    if any(reconcile_result.values()):
-        logger.info(
-            "[vod_importer] provider=%s reconciled %d stale movie source(s), %d stale series source(s), %d stale episode source(s)",
-            provider["name"],
-            reconcile_result["movie_sources_removed"],
-            reconcile_result["series_sources_removed"],
-            reconcile_result["episode_sources_removed"],
         )
 
     if provider.get("auto_create_categories"):
@@ -1431,37 +1366,6 @@ async def _import_provider_catalog_impl(provider_id: int) -> dict:
             archive_result["movies_unarchived"], archive_result["series_unarchived"],
         )
 
-    # Companion cleanup to _should_auto_archive: deletes rows that are
-    # currently auto-archived (review_excluded=1, review_excluded_manual=0)
-    # but ALSO still match a currently-active provider category/language
-    # exclusion rule -- e.g. a category a provider used to expose got added
-    # to that provider's import-exclude-categories list after the content
-    # was already imported+archived under the old rule set. Not scoped to
-    # this provider_id -- evaluates every archived row against every
-    # currently-configured provider's exclusion rules, same as
-    # archive_disabled_language_content above. Ported from knmplace's fork;
-    # see vod_db.purge_excluded_archived_content's docstring for why this
-    # still applies even though we haven't ported his bigger "skip at
-    # import" behavior change.
-    provider_exclusions = {
-        p["id"]: (p.get("import_exclude_categories") or [], bool(p.get("import_exclude_uncategorized")))
-        for p in vod_db.list_providers()
-        if p.get("import_exclude_categories") or p.get("import_exclude_uncategorized")
-    }
-    if provider_exclusions:
-        purge_lang = {
-            "enabled_languages": config.get_enabled_languages(),
-            "exclude_non_latin": config.get_import_language_exclusion()["exclude_non_latin"],
-        }
-        purge_result = await asyncio.to_thread(
-            vod_db.purge_excluded_archived_content, provider_exclusions, purge_lang,
-        )
-        if purge_result["movies_deleted"] or purge_result["series_deleted"]:
-            logger.info(
-                "[vod_importer] purged %d movie(s)/%d series matching an active import-exclusion rule",
-                purge_result["movies_deleted"], purge_result["series_deleted"],
-            )
-
     return {
         "provider": provider["name"],
         "movie_categories": len(categories),
@@ -1469,7 +1373,6 @@ async def _import_provider_catalog_impl(provider_id: int) -> dict:
         **_merge_import_counts(movie_result, series_result),
         **reconcile_summary,
         **purge_summary,
-        "excluded_category_purge": category_purge,
         **archive_result,
         **{f"orphan_{key}": value for key, value in orphan_result.items() if key.endswith("deleted")},
         "catalog_changed": catalog_changed,

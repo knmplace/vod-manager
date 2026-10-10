@@ -4071,15 +4071,15 @@ def purge_excluded_category_sources(
     exclude_categories: list[str],
     exclude_uncategorized: bool,
     *,
-    dry_run: bool = False,
+    dry_run: bool = True,
     sample_limit: int = 20,
 ) -> dict:
-    """Remove this provider's ACTIVE sources in categories it now excludes.
+    """Preview or remove this provider's sources in saved exclusions.
 
     Cards with a source elsewhere survive; cards left sourceless are
     deleted. Manually curated cards (review_excluded_manual=1) are skipped.
-    dry_run runs the same deletes and rolls back, so preview counts match a
-    real run exactly."""
+    Preview is the default and runs the same deletes before rolling back, so
+    its counts match a later explicit apply."""
     # KNM: added 2026-10-03 -- content imported before its category was
     # excluded was never removed: reconcile compares against the raw
     # (unfiltered) snapshot, and purge_excluded_archived_content only
