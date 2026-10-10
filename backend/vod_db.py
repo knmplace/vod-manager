@@ -5789,6 +5789,27 @@ def get_series_by_tmdb_id(tmdb_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+def list_catalog_tmdb_ids() -> dict[str, set[int]]:
+    """TMDB identities currently referenced by canonical catalog cards."""
+    conn = _connect()
+    try:
+        movies = {
+            int(row[0]) for row in conn.execute(
+                "SELECT DISTINCT tmdb_id FROM movies WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id)<>''"
+            ).fetchall()
+            if str(row[0]).strip().isdigit()
+        }
+        shows = {
+            int(row[0]) for row in conn.execute(
+                "SELECT DISTINCT tmdb_id FROM series WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id)<>''"
+            ).fetchall()
+            if str(row[0]).strip().isdigit()
+        }
+        return {"movie": movies, "tv": shows}
+    finally:
+        conn.close()
+
+
 def list_movies_with_tmdb_id(after_id: int, limit: int) -> list[dict]:
     """Cursor-paginated (by id, not OFFSET) so bulk_apply_tmdb_title_movies
     can keep calling this across a whole library in bounded batches without

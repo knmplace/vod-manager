@@ -5,6 +5,7 @@ import asyncio
 import gzip
 import json
 import sqlite3
+import time
 import zlib
 
 import httpx
@@ -255,7 +256,10 @@ def test_existing_store_upgraded_in_place(tmp_path, monkeypatch):
             INSERT INTO meta VALUES ('exports_imported_at', '1700000000');
         """)
         raw = zlib.compress(json.dumps({"id": 1, "imdb_id": "tt1"}).encode())
-        conn.execute("INSERT INTO titles (media_type, tmdb_id, title, raw, fetched_at) VALUES ('movie', 1, 'A', ?, 1)", (raw,))
+        conn.execute(
+            "INSERT INTO titles (media_type, tmdb_id, title, raw, fetched_at) VALUES ('movie', 1, 'A', ?, ?)",
+            (raw, time.time()),
+        )
     tmdb_store.init_db()
     assert tmdb_store.find_by_imdb("movie", "tt1")["tmdb_id"] == 1
     # old export rows have no name key, so force a re-import on the next tick

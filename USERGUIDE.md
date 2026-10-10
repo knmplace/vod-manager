@@ -1646,6 +1646,18 @@ and Missing Artwork flows above, plus two ways to auto-populate
 categories from a public list — both only ever place items already present
 in your pool; neither pulls in anything new.
 
+The **TMDB Library** keeps reusable detail data only for movies and shows in
+the current catalog. A daily retention pass removes unreferenced title and
+season data, non-empty search responses, and unreferenced missing-title
+markers. Referenced titles are queued for refresh after 150 days, and no
+cached TMDB response is served once it reaches 170 days. This leaves time to
+refresh before TMDB's six-month maximum even if a scheduled request fails.
+Use **Preview retention cleanup** to see exact counts without changing data;
+**Apply retention cleanup** shows a confirmation before deleting anything.
+Background fill requests only current catalog IDs that are missing, changed,
+or due for refresh. TMDB's daily ID/name export is replaced daily and is used
+as a matching index; it does not pre-fill unrelated title details.
+
 - **TMDB Lists** (Curation & Maintenance) — link a public TMDB List (a
   personal watchlist, or a well-known curated list like IMDB's Top 250) to
   create a **new** category pair from it in one step. A list can contain

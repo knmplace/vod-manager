@@ -460,6 +460,16 @@ category), or either one as primary with the other as tiebreaker.
 Full details and screenshots for each in
 [USERGUIDE.md](USERGUIDE.md#11-curation-tools).
 
+### Local TMDB retention
+
+The local TMDB library is catalog-first: it fills or refreshes only TMDB IDs
+attached to movies and shows currently in the database. A daily retention pass
+removes unreferenced title/season details and ephemeral search data. Referenced
+records refresh after 150 days, and cached TMDB responses are never served at
+170 days, leaving headroom inside TMDB's six-month cache limit. The TMDB
+Library page can preview the exact cleanup counts before a confirmed manual
+run; scheduled compliance cleanup runs daily.
+
 ## Credits
 
 [![TMDB](frontend/public/tmdb-logo.svg)](https://www.themoviedb.org)

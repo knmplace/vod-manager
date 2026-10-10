@@ -85,6 +85,7 @@ CREATE INDEX IF NOT EXISTS export_ids_by_popularity ON export_ids(media_type, po
 CREATE TABLE IF NOT EXISTS gone (
     media_type  TEXT NOT NULL,
     tmdb_id     INTEGER NOT NULL,
+    marked_at   REAL NOT NULL,
     PRIMARY KEY (media_type, tmdb_id)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS seasons (
@@ -108,9 +109,11 @@ CREATE TABLE IF NOT EXISTS searches (
     PRIMARY KEY (kind, query, year)
 ) WITHOUT ROWID;
 """
-# KNM: 2026-10-06 every /search and /find answer is kept so the same question
-# never goes to TMDB twice. "Nothing found" is re-asked after a week (TMDB gains
-# titles); a found answer stands, its titles' details are kept current by /changes.
+# TMDB's API terms prohibit caching TMDB-derived information longer than six
+# months. Refresh referenced titles early enough to leave budget headroom and
+# make every read treat the hard limit as expired.
+MAX_CACHE_AGE_SECONDS = 170 * 86400
+REFRESH_CACHE_AGE_SECONDS = 150 * 86400
 EMPTY_SEARCH_MAX_AGE = 7 * 86400
 # After _upgrade, so they also apply to a store created before these columns existed.
 _INDEXES = """
@@ -167,6 +170,8 @@ def _upgrade(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE export_ids ADD COLUMN name_key INTEGER")
         # existing rows have no name_key -- re-import the export on the next fill tick
         conn.execute("UPDATE meta SET value='0' WHERE key='exports_imported_at'")
+    if "marked_at" not in columns("gone"):
+        conn.execute("ALTER TABLE gone ADD COLUMN marked_at REAL NOT NULL DEFAULT 0")
 
 
 def clear() -> None:
@@ -290,7 +295,7 @@ def get_title(media_type: str, tmdb_id: int) -> dict | None:
         row = conn.execute(
             "SELECT * FROM titles WHERE media_type=? AND tmdb_id=?", (media_type, int(tmdb_id))
         ).fetchone()
-    if row is None:
+    if row is None or time.time() - row["fetched_at"] >= MAX_CACHE_AGE_SECONDS:
         return None
     out = dict(row)
     out.pop("raw", None)
@@ -305,7 +310,12 @@ def get_payload(media_type: str, tmdb_id: int) -> dict | None:
             "SELECT raw, fetched_at, changed_at FROM titles WHERE media_type=? AND tmdb_id=?",
             (media_type, int(tmdb_id)),
         ).fetchone()
-    if row is None or row["raw"] is None or (row["changed_at"] and row["changed_at"] > row["fetched_at"]):
+    if (
+        row is None
+        or row["raw"] is None
+        or time.time() - row["fetched_at"] >= MAX_CACHE_AGE_SECONDS
+        or (row["changed_at"] and row["changed_at"] > row["fetched_at"])
+    ):
         return None
     return json.loads(zlib.decompress(row["raw"]))
 
@@ -323,7 +333,7 @@ _NAME_SEARCH_SQL = """SELECT t.media_type, t.tmdb_id, t.title, t.original_title,
    FROM title_names_fts f
    CROSS JOIN title_names n ON n.id = f.rowid
    CROSS JOIN titles t ON t.media_type = n.media_type AND t.tmdb_id = n.tmdb_id
-   WHERE title_names_fts MATCH ? AND n.media_type = ?
+   WHERE title_names_fts MATCH ? AND n.media_type = ? AND t.fetched_at > ?
    LIMIT 500"""
 
 
@@ -334,7 +344,10 @@ def search(media_type: str, query: str, year: int | None = None, limit: int = 10
     if not norm:
         return []
     with _conn() as conn:
-        rows = conn.execute(_NAME_SEARCH_SQL, (_fts_query(norm), media_type)).fetchall()
+        rows = conn.execute(
+            _NAME_SEARCH_SQL,
+            (_fts_query(norm), media_type, time.time() - MAX_CACHE_AGE_SECONDS),
+        ).fetchall()
     best: dict[int, tuple] = {}
     for row in rows:
         exact = row["norm"] == norm
@@ -365,10 +378,17 @@ def search_confident(media_type: str, query: str, year: int | None = None, limit
     with _conn() as conn:
         listed, missing = conn.execute(
             """SELECT COUNT(*),
-                      SUM(NOT EXISTS (SELECT 1 FROM titles t WHERE t.media_type=e.media_type AND t.tmdb_id=e.tmdb_id)
-                          AND NOT EXISTS (SELECT 1 FROM gone g WHERE g.media_type=e.media_type AND g.tmdb_id=e.tmdb_id))
+                      SUM(NOT EXISTS (SELECT 1 FROM titles t WHERE t.media_type=e.media_type
+                                                                AND t.tmdb_id=e.tmdb_id AND t.fetched_at>?)
+                          AND NOT EXISTS (SELECT 1 FROM gone g WHERE g.media_type=e.media_type
+                                                              AND g.tmdb_id=e.tmdb_id AND g.marked_at>?))
                FROM export_ids e WHERE e.media_type=? AND e.name_key=?""",
-            (media_type, name_key(normalize(query))),
+            (
+                time.time() - MAX_CACHE_AGE_SECONDS,
+                time.time() - MAX_CACHE_AGE_SECONDS,
+                media_type,
+                name_key(normalize(query)),
+            ),
         ).fetchone()
     return hits if listed and not missing else None
 
@@ -386,7 +406,8 @@ def get_search(kind: str, query: str, year: int | None = None) -> dict | None:
             "SELECT response, empty, fetched_at FROM searches WHERE kind=? AND query=? AND year=?",
             (kind, _search_key(query), int(year or 0)),
         ).fetchone()
-    if row is None or (row["empty"] and time.time() - row["fetched_at"] > EMPTY_SEARCH_MAX_AGE):
+    age = time.time() - row["fetched_at"] if row is not None else 0
+    if row is None or age >= MAX_CACHE_AGE_SECONDS or (row["empty"] and age > EMPTY_SEARCH_MAX_AGE):
         return None
     return json.loads(zlib.decompress(row["response"]))
 
@@ -404,8 +425,8 @@ def find_by_imdb(media_type: str, imdb_id: str) -> dict | None:
     with _conn() as conn:
         row = conn.execute(
             """SELECT media_type, tmdb_id, title, original_title, year, popularity FROM titles
-               WHERE imdb_id=? AND media_type=? LIMIT 1""",
-            (imdb_id, media_type),
+               WHERE imdb_id=? AND media_type=? AND fetched_at>? LIMIT 1""",
+            (imdb_id, media_type, time.time() - MAX_CACHE_AGE_SECONDS),
         ).fetchone()
     return dict(row) if row else None
 
@@ -418,7 +439,8 @@ def get_season(tmdb_id: int, season_number: int, max_age: float | None = None) -
             "SELECT episodes, fetched_at FROM seasons WHERE tmdb_id=? AND season_number=?",
             (int(tmdb_id), int(season_number)),
         ).fetchone()
-    if row is None or (max_age is not None and time.time() - row["fetched_at"] > max_age):
+    effective_max_age = min(max_age, MAX_CACHE_AGE_SECONDS) if max_age is not None else MAX_CACHE_AGE_SECONDS
+    if row is None or time.time() - row["fetched_at"] >= effective_max_age:
         return None
     return json.loads(zlib.decompress(row["episodes"]))
 
@@ -446,7 +468,11 @@ def mark_changed(media_type: str, tmdb_ids: list[int]) -> int:
 
 def mark_gone(media_type: str, tmdb_id: int) -> None:
     with _conn() as conn:
-        conn.execute("INSERT OR IGNORE INTO gone (media_type, tmdb_id) VALUES (?,?)", (media_type, int(tmdb_id)))
+        conn.execute(
+            "INSERT INTO gone (media_type, tmdb_id, marked_at) VALUES (?,?,?) "
+            "ON CONFLICT(media_type, tmdb_id) DO UPDATE SET marked_at=excluded.marked_at",
+            (media_type, int(tmdb_id), time.time()),
+        )
         conn.execute("DELETE FROM titles WHERE media_type=? AND tmdb_id=?", (media_type, int(tmdb_id)))
         conn.execute("DELETE FROM title_names WHERE media_type=? AND tmdb_id=?", (media_type, int(tmdb_id)))
         if media_type == "tv":
@@ -566,6 +592,109 @@ def export_name_count(media_type: str, name: str) -> int:
     with _conn() as conn:
         return conn.execute("SELECT COUNT(*) FROM export_ids WHERE media_type=? AND name_key=?",
                             (media_type, key)).fetchone()[0]
+
+
+def _load_retention_refs(conn: sqlite3.Connection, referenced: dict[str, set[int]]) -> None:
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS retention_refs (media_type TEXT, tmdb_id INTEGER, PRIMARY KEY(media_type, tmdb_id)) WITHOUT ROWID")
+    conn.execute("DELETE FROM retention_refs")
+    conn.executemany(
+        "INSERT OR IGNORE INTO retention_refs (media_type, tmdb_id) VALUES (?,?)",
+        ((media_type, int(tmdb_id)) for media_type, ids in referenced.items() for tmdb_id in ids),
+    )
+
+
+def retention_cleanup(referenced: dict[str, set[int]], *, dry_run: bool = True) -> dict:
+    """Preview or enforce catalog-first TMDB retention.
+
+    Unreferenced title details are removed on the daily retention pass. Any
+    TMDB-derived title, season, or gone marker at the hard cache age is removed
+    even when referenced; referenced titles are then refetched by the
+    catalog-first fill queue. Non-empty search responses are ephemeral and are
+    cleared on every retention pass because they can contain unrelated titles.
+    """
+    now = time.time()
+    cutoff = now - MAX_CACHE_AGE_SECONDS
+    with _conn() as conn:
+        _load_retention_refs(conn, referenced)
+        counts = {
+            "dry_run": dry_run,
+            "referenced": conn.execute("SELECT COUNT(*) FROM retention_refs").fetchone()[0],
+            "unreferenced_titles": conn.execute(
+                "SELECT COUNT(*) FROM titles t WHERE NOT EXISTS "
+                "(SELECT 1 FROM retention_refs r WHERE r.media_type=t.media_type AND r.tmdb_id=t.tmdb_id)"
+            ).fetchone()[0],
+            "expired_referenced_titles": conn.execute(
+                "SELECT COUNT(*) FROM titles t JOIN retention_refs r "
+                "ON r.media_type=t.media_type AND r.tmdb_id=t.tmdb_id WHERE t.fetched_at<=?",
+                (cutoff,),
+            ).fetchone()[0],
+            "seasons_removed": conn.execute(
+                "SELECT COUNT(*) FROM seasons s WHERE s.fetched_at<=? OR NOT EXISTS "
+                "(SELECT 1 FROM retention_refs r WHERE r.media_type='tv' AND r.tmdb_id=s.tmdb_id)",
+                (cutoff,),
+            ).fetchone()[0],
+            "searches_removed": conn.execute(
+                "SELECT COUNT(*) FROM searches WHERE empty=0 OR fetched_at<=?", (cutoff,),
+            ).fetchone()[0],
+            "gone_removed": conn.execute(
+                "SELECT COUNT(*) FROM gone g WHERE g.marked_at<=? OR NOT EXISTS "
+                "(SELECT 1 FROM retention_refs r WHERE r.media_type=g.media_type AND r.tmdb_id=g.tmdb_id)",
+                (cutoff,),
+            ).fetchone()[0],
+        }
+        counts["titles_removed"] = counts["unreferenced_titles"] + counts["expired_referenced_titles"]
+        if dry_run:
+            conn.rollback()
+            return counts
+
+        conn.execute(
+            "DELETE FROM title_names WHERE EXISTS (SELECT 1 FROM titles t "
+            "WHERE t.media_type=title_names.media_type AND t.tmdb_id=title_names.tmdb_id "
+            "AND (t.fetched_at<=? OR NOT EXISTS (SELECT 1 FROM retention_refs r "
+            "WHERE r.media_type=t.media_type AND r.tmdb_id=t.tmdb_id)))",
+            (cutoff,),
+        )
+        conn.execute(
+            "DELETE FROM titles WHERE fetched_at<=? OR NOT EXISTS "
+            "(SELECT 1 FROM retention_refs r WHERE r.media_type=titles.media_type AND r.tmdb_id=titles.tmdb_id)",
+            (cutoff,),
+        )
+        conn.execute(
+            "DELETE FROM seasons WHERE fetched_at<=? OR NOT EXISTS "
+            "(SELECT 1 FROM retention_refs r WHERE r.media_type='tv' AND r.tmdb_id=seasons.tmdb_id)",
+            (cutoff,),
+        )
+        conn.execute("DELETE FROM searches WHERE empty=0 OR fetched_at<=?", (cutoff,))
+        conn.execute(
+            "DELETE FROM gone WHERE marked_at<=? OR NOT EXISTS "
+            "(SELECT 1 FROM retention_refs r WHERE r.media_type=gone.media_type AND r.tmdb_id=gone.tmdb_id)",
+            (cutoff,),
+        )
+        return counts
+
+
+def list_catalog_refresh_ids(
+    media_type: str, referenced_ids: set[int], limit: int, *, refresh_age: float = REFRESH_CACHE_AGE_SECONDS,
+) -> list[int]:
+    """Referenced IDs missing, changed, or old enough for pre-expiry refresh."""
+    if not referenced_ids or limit <= 0:
+        return []
+    refresh_cutoff = time.time() - refresh_age
+    gone_cutoff = time.time() - MAX_CACHE_AGE_SECONDS
+    with _conn() as conn:
+        _load_retention_refs(conn, {media_type: referenced_ids})
+        rows = conn.execute(
+            """SELECT r.tmdb_id FROM retention_refs r
+               LEFT JOIN titles t ON t.media_type=r.media_type AND t.tmdb_id=r.tmdb_id
+               LEFT JOIN gone g ON g.media_type=r.media_type AND g.tmdb_id=r.tmdb_id
+               WHERE r.media_type=?
+                 AND (t.tmdb_id IS NULL OR t.fetched_at<=? OR COALESCE(t.changed_at, 0)>t.fetched_at)
+                 AND (g.tmdb_id IS NULL OR g.marked_at<=?)
+               ORDER BY (t.tmdb_id IS NULL) DESC, COALESCE(t.fetched_at, 0), r.tmdb_id
+               LIMIT ?""",
+            (media_type, refresh_cutoff, gone_cutoff, limit),
+        ).fetchall()
+    return [row[0] for row in rows]
 
 
 def stats() -> list[dict]:

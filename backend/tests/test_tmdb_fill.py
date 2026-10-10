@@ -40,22 +40,31 @@ def _fake_fetch(store, fetched):
     return fake
 
 
-def test_burst_refreshes_stale_first_then_popular_unfilled(store, monkeypatch):
+def test_burst_refreshes_only_catalog_references(store, monkeypatch):
     store.upsert_payload("movie", _movie(50, "Old"))
     store.mark_changed("movie", [50])
-    _seed_export(store, "movie", [1, 2, 3])
-    _seed_export(store, "tv", [7])
+    _seed_export(store, "movie", [999])
+    monkeypatch.setattr(
+        tmdb_fill.vod_db,
+        "list_catalog_tmdb_ids",
+        lambda: {"movie": {1, 2, 50}, "tv": {7}},
+    )
     fetched = []
     monkeypatch.setattr(tmdb_sync, "fetch_title_payload", _fake_fetch(store, fetched))
     result = asyncio.run(tmdb_fill.run_burst(size=6))
-    assert fetched[:3] == [("movie", 50), ("movie", 1), ("movie", 2)]
+    assert fetched[:3] == [("movie", 1), ("movie", 2), ("movie", 50)]
     assert ("tv", 7) in fetched
     assert result["fetched"] == 4
+    assert all(tmdb_id != 999 for _, tmdb_id in fetched)
 
 
 def test_burst_respects_daily_budget(store, monkeypatch):
     config.save_tmdb_store_settings({"daily_budget": 2})
-    _seed_export(store, "movie", [1, 2, 3, 4])
+    monkeypatch.setattr(
+        tmdb_fill.vod_db,
+        "list_catalog_tmdb_ids",
+        lambda: {"movie": {1, 2, 3, 4}, "tv": set()},
+    )
     store.add_requests(1)
     fetched = []
     monkeypatch.setattr(tmdb_sync, "fetch_title_payload", _fake_fetch(store, fetched))
@@ -142,3 +151,22 @@ def test_due_jobs_skip_everything_without_api_key(store, monkeypatch):
     monkeypatch.setattr(tmdb_fill, "run_burst", nope)
     assert asyncio.run(tmdb_fill.run_due_jobs()) is False
     assert called == []
+
+
+def test_retention_uses_current_catalog_ids(store, monkeypatch):
+    store.upsert_payload("movie", _movie(1, "Keep"))
+    store.upsert_payload("movie", _movie(2, "Remove"))
+    monkeypatch.setattr(
+        tmdb_fill.vod_db,
+        "list_catalog_tmdb_ids",
+        lambda: {"movie": {1}, "tv": set()},
+    )
+
+    preview = asyncio.run(tmdb_fill.retention())
+    assert preview["dry_run"] is True and preview["unreferenced_titles"] == 1
+    assert store.get_title("movie", 2) is not None
+
+    applied = asyncio.run(tmdb_fill.retention(dry_run=False))
+    assert applied["titles_removed"] == 1
+    assert store.get_title("movie", 1) is not None
+    assert store.get_title("movie", 2) is None

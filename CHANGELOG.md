@@ -53,7 +53,21 @@ instead of opening a duplicate request.
   content is deleted only after **Apply cleanup** is clicked; scheduled imports
   never run that destructive cleanup automatically. Cards with another source
   and manually curated cards remain protected.
-- **Verification:** full backend suite: 559 passed; frontend production build
+- ✅ **The local TMDB library now follows the current catalog.** Its daily
+  retention pass removes title details and season data that are no longer tied
+  to a movie or show in this database, plus ephemeral non-empty search answers
+  and unreferenced missing-title markers. Referenced titles are refreshed after
+  150 days and no cached TMDB response is served at 170 days, safely inside
+  TMDB's six-month maximum.
+- ✅ **TMDB retention is previewable before a manual cleanup.** The TMDB Library
+  page reports exactly how many referenced, unreferenced, expired, season,
+  search, and missing-marker rows would be affected. **Apply retention cleanup**
+  requires confirmation; the same policy runs automatically once per day.
+- ✅ **Background TMDB fill is catalog-first.** Fill bursts request only current
+  movie/show TMDB IDs that are missing, changed, or due for refresh. The daily
+  ID/name export remains a freshly replaced matching index; unrelated popular
+  title details are no longer pre-fetched.
+- **Verification:** full backend suite: 565 passed; frontend production build
   passed (the existing large-chunk warning remains).
 
 ## 2026-10-07 (No episode fetches for languages you've turned off)
@@ -90,19 +104,20 @@ Added to upstream PR [#49](https://github.com/jstevenscl/vod-manager/pull/49).
   names, so automatic matching managed only about one title every 30 seconds.
   The search now takes milliseconds.
 
-## 2026-10-06 (Every TMDB answer is kept locally)
+## 2026-10-06 (TMDB answers cached locally)
 
 Proposed upstream as a standalone PR,
 [#49](https://github.com/jstevenscl/vod-manager/pull/49), built on #48.
 
-- ✅ 🔀 **The same question is never sent to TMDB twice.** Name searches and IMDb
+- ✅ 🔀 **Repeated questions are answered from the short-lived local cache.** Name searches and IMDb
   lookups made by automatic matching, library import, Metadata Review and the
   TMDB Library page are now saved in the local TMDB library. Asking again is
-  answered locally and counts as a local lookup, not a TMDB request.
+  answered locally and counts as a local lookup, not a TMDB request, until the
+  daily catalog-first retention pass clears non-empty search responses.
 - ✅ 🔀 **"Nothing found" is remembered for 7 days**, then TMDB is asked again.
-  Found answers don't expire.
 - ✅ 🔀 **Search results are saved in full.** Full details for the top 5 results
-  of each search are stored, so they can be matched locally later.
+  of each search are stored until the daily retention pass, so immediate repeat
+  work can reuse them without retaining unrelated results long-term.
 - ✅ 🔀 **TMDB list sync saves the titles it returns.** List contents are still
   checked live.
 
@@ -140,9 +155,9 @@ upstream `main` and independent of #35.
   resolve candidates, library matching and episode lists. Name searches use
   the local copy only when it finds an exact title match; anything else still
   goes to TMDB.
-- ✅ 🔀 **Background fill.** The most popular titles are pre-fetched in small
-  bursts (defaults: 2,000 × 4 bursts a day, 20,000 requests/day cap,
-  4 at a time, top 100,000 per type). TMDB's change feed keeps stored titles
+- ✅ 🔀 **Background fill.** Current catalog titles that are missing, changed,
+  or aging are fetched in small bursts (defaults: 2,000 × 4 bursts a day,
+  20,000 requests/day cap, 4 at a time). TMDB's change feed keeps stored titles
   current.
 - ✅ 🔀 **TMDB Library page** under Curation & Maintenance shows:
   - store status

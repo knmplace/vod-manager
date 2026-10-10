@@ -4,11 +4,12 @@ Keeps the local TMDB store (tmdb_store) filled and fresh in the background.
 Active only once a TMDB API key is saved (and the store isn't disabled in its
 settings). Each cycle, as due:
   - import TMDB's daily ID export (keyless file download, once a day) -- the
-    work list, ranked by TMDB popularity;
+    identity/name index used for complete local-match answers;
   - refresh: mark stored titles TMDB reports as changed (/movie/changes,
     /tv/changes) so they're refetched;
-  - a small burst: refetch changed titles first, then fetch the most popular
-    not-yet-stored titles, a few times a day, under a daily request budget.
+  - retention: remove unreferenced details and anything at the hard cache age;
+  - a small burst: fetch only missing, changed, or aging titles referenced by
+    the current catalog, a few times a day, under a daily request budget.
 
 Also the store's lookup entry point: local name/ID search first, live TMDB
 search (results stored) only on a local miss.
@@ -25,6 +26,7 @@ import httpx
 import tmdb_automatch
 import tmdb_store
 import tmdb_sync
+import vod_db
 from config import DATA_DIR, get_tmdb_api_key, get_tmdb_store_settings
 
 logger = logging.getLogger(__name__)
@@ -113,7 +115,7 @@ async def refresh_changes() -> dict:
 
 
 async def run_burst(size: int | None = None) -> dict:
-    """Refetch changed titles first, then the most popular unfilled ones."""
+    """Fill/refresh only TMDB IDs referenced by the current VOD catalog."""
     settings = get_tmdb_store_settings()
     size = settings["burst_size"] if size is None else size
     budget_left = max(0, settings["daily_budget"] - await asyncio.to_thread(tmdb_store.requests_today))
@@ -122,12 +124,12 @@ async def run_burst(size: int | None = None) -> dict:
         return {"fetched": 0, "failed": 0, "gone": 0, "skipped": "daily budget reached"}
     per_type = math.ceil(size / len(tmdb_store.MEDIA_TYPES))
     work: list[tuple[str, int]] = []
+    referenced = await asyncio.to_thread(vod_db.list_catalog_tmdb_ids)
     for media_type in tmdb_store.MEDIA_TYPES:
-        stale = await asyncio.to_thread(tmdb_store.list_stale_ids, media_type, per_type)
-        fresh = await asyncio.to_thread(
-            tmdb_store.list_fill_candidates, media_type, per_type - len(stale), settings["prefill_top"]
-        ) if len(stale) < per_type else []
-        work += [(media_type, i) for i in stale + fresh]
+        due = await asyncio.to_thread(
+            tmdb_store.list_catalog_refresh_ids, media_type, referenced.get(media_type, set()), per_type,
+        )
+        work += [(media_type, i) for i in due]
     work = work[:size]
     counts = {"fetched": 0, "failed": 0, "gone": 0}
     _set(phase="filling", done=0, total=len(work))
@@ -148,6 +150,17 @@ async def run_burst(size: int | None = None) -> dict:
     await asyncio.gather(*[one(t, i) for t, i in work])
     logger.info("[tmdb_fill] burst: %s", counts)
     return counts
+
+
+async def retention(dry_run: bool = True) -> dict:
+    """Preview or enforce catalog-first retention against the live catalog."""
+    referenced = await asyncio.to_thread(vod_db.list_catalog_tmdb_ids)
+    result = await asyncio.to_thread(tmdb_store.retention_cleanup, referenced, dry_run=dry_run)
+    if not dry_run and any(result.get(key, 0) for key in (
+        "titles_removed", "seasons_removed", "searches_removed", "gone_removed",
+    )):
+        logger.info("[tmdb_fill] retention cleanup: %s", result)
+    return result
 
 
 async def _run(phase: str, coro) -> dict:
@@ -180,6 +193,10 @@ async def run_due_jobs() -> bool:
     meta = lambda key: float(tmdb_store.get_meta(key, "0") or 0)  # noqa: E731
     if now - await asyncio.to_thread(meta, "exports_imported_at") >= _DAY:
         await _run("export", import_exports())
+    if now - await asyncio.to_thread(meta, "retention_run_at") >= _DAY:
+        retention_result = await _run("retention", retention(dry_run=False))
+        if "error" not in retention_result:
+            await asyncio.to_thread(tmdb_store.set_meta, "retention_run_at", now)
     if now - await asyncio.to_thread(meta, "changes_run_at") >= _DAY:
         await _run("changes", refresh_changes())
         await asyncio.to_thread(tmdb_store.set_meta, "changes_run_at", now)

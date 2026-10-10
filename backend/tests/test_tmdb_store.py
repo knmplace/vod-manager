@@ -3,6 +3,7 @@
 import asyncio
 import gzip
 import json
+import time
 
 import pytest
 
@@ -180,5 +181,8 @@ def test_name_search_starts_from_the_text_index(store):
     # search (tens of seconds once the library held ~200K names).
     store.upsert_payload("movie", _movie(1, "Angry Boys"))
     with store._conn() as conn:
-        plan = conn.execute("EXPLAIN QUERY PLAN " + store._NAME_SEARCH_SQL, ('"angry"', "movie")).fetchall()
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN " + store._NAME_SEARCH_SQL,
+            ('"angry"', "movie", time.time() - store.MAX_CACHE_AGE_SECONDS),
+        ).fetchall()
     assert plan[0][3].startswith("SCAN f")

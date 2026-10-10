@@ -1,6 +1,7 @@
 """API for the local TMDB store page: status/stats, lookup, settings, manual runs, clear."""
 
 import asyncio
+import time
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -40,6 +41,11 @@ async def get_status():
         "lookups_today": await asyncio.to_thread(tmdb_store.lookups_today),
         "next_burst_at": float(next_burst) if next_burst else None,
         "db_size_bytes": await asyncio.to_thread(tmdb_store.db_size_bytes),
+        "retention_policy": {
+            "maximum_days": tmdb_store.MAX_CACHE_AGE_SECONDS // 86400,
+            "refresh_after_days": tmdb_store.REFRESH_CACHE_AGE_SECONDS // 86400,
+            "last_run_at": float(await asyncio.to_thread(tmdb_store.get_meta, "retention_run_at", "0") or 0) or None,
+        },
         "job": tmdb_fill.status,
     }
 
@@ -85,3 +91,14 @@ async def clear():
         raise HTTPException(409, detail="A TMDB store job is still running -- try again when it finishes")
     await asyncio.to_thread(tmdb_store.clear)
     return {"cleared": True}
+
+
+@router.post("/retention", dependencies=_GUARDS)
+async def retention(dry_run: bool = True):
+    """Preview by default; explicitly apply catalog-first retention."""
+    if tmdb_fill.status["running"]:
+        raise HTTPException(409, detail="A TMDB store job is already running")
+    result = await tmdb_fill.retention(dry_run=dry_run)
+    if not dry_run:
+        await asyncio.to_thread(tmdb_store.set_meta, "retention_run_at", time.time())
+    return result

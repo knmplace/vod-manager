@@ -40,7 +40,18 @@ interface StoreStatus {
   lookups_today: { local: number; tmdb: number }
   next_burst_at: number | null
   db_size_bytes: number
+  retention_policy: { maximum_days: number; refresh_after_days: number; last_run_at: number | null }
   job: { running: boolean; phase: string | null; done: number; total: number; last_result: Record<string, unknown> | null; last_error: string | null }
+}
+interface RetentionPreview {
+  dry_run: boolean
+  referenced: number
+  unreferenced_titles: number
+  expired_referenced_titles: number
+  titles_removed: number
+  seasons_removed: number
+  searches_removed: number
+  gone_removed: number
 }
 interface LookupResult {
   tmdb_id: number
@@ -64,9 +75,8 @@ function pct(part: number, whole: number) {
 }
 
 const SETTING_FIELDS: { key: Exclude<keyof StoreSettings, 'enabled'>; label: string; hint: string }[] = [
-  { key: 'burst_size', label: 'Titles per burst', hint: 'Detail requests per fill burst (split across movies and shows).' },
+  { key: 'burst_size', label: 'Titles per burst', hint: 'Catalog title details refreshed per burst (split across movies and shows).' },
   { key: 'bursts_per_day', label: 'Bursts per day', hint: 'How many fill bursts run each day.' },
-  { key: 'prefill_top', label: 'Pre-fill top N', hint: 'Only pre-fill the N most popular titles of each type.' },
   { key: 'daily_budget', label: 'Daily request budget', hint: 'Fill bursts stop once this many TMDB requests were made today.' },
   { key: 'concurrency', label: 'Parallel requests', hint: 'Concurrent requests during a burst — keep low to stay light on bandwidth.' },
   { key: 'auto_match_batch', label: 'Titles to match per burst', hint: 'Catalog titles without a TMDB ID matched by name and year after each burst. 0 turns it off.' },
@@ -116,6 +126,23 @@ export default function TmdbStore() {
     mutationFn: (job: 'burst' | 'changes' | 'export' | 'match') => api.post(`/tmdb-store/run/${job}`).then((r) => r.data),
     onSettled: () => qc.invalidateQueries({ queryKey: ['tmdb-store-status'] }),
   })
+  const [retentionPreview, setRetentionPreview] = useState<RetentionPreview | null>(null)
+  const previewRetention = useMutation({
+    mutationFn: () => api.post('/tmdb-store/retention', null, { params: { dry_run: true } }).then((r) => r.data as RetentionPreview),
+    onSuccess: setRetentionPreview,
+    onError: (err: { response?: { data?: { detail?: string } } }) =>
+      toast.error(err.response?.data?.detail ?? 'Could not preview TMDB retention'),
+  })
+  const applyRetention = useMutation({
+    mutationFn: () => api.post('/tmdb-store/retention', null, { params: { dry_run: false } }).then((r) => r.data as RetentionPreview),
+    onSuccess: (result) => {
+      toast.success(`Removed ${fmtNum(result.titles_removed)} title record(s) under the retention policy`)
+      setRetentionPreview(null)
+      qc.invalidateQueries({ queryKey: ['tmdb-store-status'] })
+    },
+    onError: (err: { response?: { data?: { detail?: string } } }) =>
+      toast.error(err.response?.data?.detail ?? 'Could not apply TMDB retention'),
+  })
 
   const [query, setQuery] = useState('')
   const [mediaType, setMediaType] = useState<MediaType>('movie')
@@ -153,7 +180,7 @@ export default function TmdbStore() {
             </div>
             <p className="text-xs text-muted-foreground flex-1 min-w-[16rem]">
               {enabled
-                ? 'On: TMDB details are saved locally and reused, and a light background fill adds popular titles.'
+                ? 'On: TMDB details are saved locally and reused for titles in your current catalog.'
                 : 'Off: nothing is stored; every lookup goes straight to TMDB. Use this if disk space is tight.'}
             </p>
             {!enabled && status.db_size_bytes > 0 && (
@@ -177,9 +204,9 @@ export default function TmdbStore() {
       )}
       <SectionCard title="TMDB Library" icon={<Database size={14} />}>
         <p className="text-xs text-muted-foreground">
-          A local copy of TMDB movie and TV details. Every title this app looks up is kept here, and a light background
-          fill adds the most popular titles a few times a day, so most lookups are answered locally instead of calling
-          TMDB. Starts automatically once a TMDB API key is saved under Configuration → API Keys.
+          A local copy of TMDB movie and TV details used by your current catalog. Referenced titles are refreshed before
+          the cache limit; unreferenced details are cleared daily. Starts automatically once a TMDB API key is saved
+          under Configuration → API Keys.
         </p>
         {statusQuery.isLoading || !status ? (
           <Loader2 size={14} className="animate-spin" />
@@ -270,7 +297,32 @@ export default function TmdbStore() {
               <Button size="sm" variant="outline" disabled={!canRun} onClick={() => runJob.mutate('match')}>
                 <Wand2 size={12} className="mr-1" /> Match titles without a TMDB ID
               </Button>
+              <Button size="sm" variant="outline" disabled={status.job.running || previewRetention.isPending} onClick={() => previewRetention.mutate()}>
+                <Trash2 size={12} className="mr-1" /> Preview retention cleanup
+              </Button>
             </div>
+            <p className="text-xs text-muted-foreground">
+              TMDB data is cached for at most {status.retention_policy.maximum_days} days and referenced titles are queued
+              for refresh after {status.retention_policy.refresh_after_days} days. Cleanup runs daily. Last run: {fmtTime(status.retention_policy.last_run_at)}.
+            </p>
+            {retentionPreview && (
+              <div className="rounded border border-warning/50 bg-warning/10 p-3 space-y-1.5 text-xs">
+                <p className="font-medium">Retention preview — nothing has been deleted</p>
+                <p>
+                  {fmtNum(retentionPreview.referenced)} catalog TMDB IDs are retained. Cleanup would remove{' '}
+                  {fmtNum(retentionPreview.unreferenced_titles)} unreferenced and {fmtNum(retentionPreview.expired_referenced_titles)} expired title record(s),{' '}
+                  {fmtNum(retentionPreview.seasons_removed)} season cache row(s), {fmtNum(retentionPreview.searches_removed)} old search answer(s), and{' '}
+                  {fmtNum(retentionPreview.gone_removed)} old missing-title marker(s).
+                </p>
+                <Button
+                  size="sm"
+                  disabled={applyRetention.isPending}
+                  onClick={() => askConfirm('Apply this TMDB retention cleanup now?', () => applyRetention.mutate())}
+                >
+                  {applyRetention.isPending ? <Loader2 size={12} className="animate-spin" /> : 'Apply retention cleanup'}
+                </Button>
+              </div>
+            )}
           </>
         )}
       </SectionCard>
@@ -332,7 +384,7 @@ export default function TmdbStore() {
       </SectionCard>
 
       {form && (
-        <SectionCard title="Background fill settings" icon={<SettingsIcon size={14} />}>
+        <SectionCard title="Catalog refresh settings" icon={<SettingsIcon size={14} />}>
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
             {SETTING_FIELDS.map((f) => (
               <label key={f.key} className="text-xs space-y-1">
