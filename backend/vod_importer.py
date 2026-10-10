@@ -1735,6 +1735,18 @@ async def enrich_series(series_id: int, *, force: bool = False, skip_auto_merge:
     if not sources:
         return {"fetched": False, "reason": "no source provider recorded for this series"}
 
+    # A newly attached provider source is narrower work than refreshing every
+    # already-complete source. Fetch the missing lane first; the next pass can
+    # refresh existing lanes if the canonical last-modified signal is still due.
+    has_unfetched_source = any(vod_db.series_source_needs_enrichment(source) for source in sources)
+    refresh_existing = force or (
+        not has_unfetched_source
+        and await asyncio.to_thread(vod_db.series_existing_sources_due, series)
+    )
+    series_due = refresh_existing or await asyncio.to_thread(vod_db.series_needs_enrichment, series_id)
+    if not series_due:
+        return {"fetched": False, "reason": "already up to date"}
+
     # Detail metadata (genre/description/tmdb_id/etc) is only ever written
     # from the FIRST source below that's actually XC and actually fetched --
     # every provider is describing the same series, so there's no benefit to
@@ -1744,12 +1756,16 @@ async def enrich_series(series_id: int, *, force: bool = False, skip_auto_merge:
     # first successfully-fetched XC source.
     detail_written = False
     any_fetched = False
+    all_unchanged = True
     last_reason = "already up to date"
 
     for source in sources:
-        outcome = await _enrich_one_series_source(series_id, series, source, force=force, episodes_only=True)
+        outcome = await _enrich_one_series_source(
+            series_id, series, source, force=force, series_due=refresh_existing, episodes_only=True,
+        )
         if outcome["fetched"]:
             any_fetched = True
+            all_unchanged = all_unchanged and outcome.get("unchanged", True)
             if outcome["detail_written"]:
                 detail_written = True
         else:
@@ -1757,6 +1773,9 @@ async def enrich_series(series_id: int, *, force: bool = False, skip_auto_merge:
 
     if not any_fetched:
         return {"fetched": False, "reason": last_reason}
+
+    if refresh_existing:
+        await asyncio.to_thread(vod_db.set_series_enrich_stable, series_id, all_unchanged)
 
     if detail_written:
         # Mirrors enrich_movie's auto_merge_movie_by_tmdb call sites (see
@@ -1775,7 +1794,7 @@ async def enrich_series(series_id: int, *, force: bool = False, skip_auto_merge:
 
 async def _enrich_one_series_source(
     series_id: int, series: dict, source: dict, *, force: bool = False,
-    write_queue: "asyncio.Queue | None" = None, episodes_only: bool = True,
+    series_due: bool = False, write_queue: "asyncio.Queue | None" = None, episodes_only: bool = True,
 ) -> dict:
     """Fetches and persists exactly ONE series_sources row's episodes/detail.
     Extracted from enrich_series's original single-source-at-a-time loop body
@@ -1786,7 +1805,7 @@ async def _enrich_one_series_source(
     enrich_series itself still does for its on-demand/UI callers.
 
     Returns {"fetched": bool, "reason": str | None, "detail_written": bool}."""
-    if not force and not await asyncio.to_thread(vod_db.series_source_needs_enrichment, source):
+    if not force and not await asyncio.to_thread(vod_db.series_source_needs_enrichment, source, series_due):
         return {"fetched": False, "reason": "already up to date", "detail_written": False}
 
     provider = await asyncio.to_thread(vod_db.get_provider, source["provider_id"])
@@ -1950,6 +1969,9 @@ async def _enrich_one_series_source(
                 "bitrate": _coerce_int((ep.get("info") or {}).get("bitrate")),
             })
 
+    existing_keys = await asyncio.to_thread(vod_db.list_episode_keys, series_id, provider["id"])
+    unchanged = {(e["season_number"], e["episode_number"]) for e in episode_batch} == existing_keys
+
     if write_queue is not None:
         done = asyncio.Event()
         await write_queue.put({
@@ -1963,7 +1985,17 @@ async def _enrich_one_series_source(
     await asyncio.to_thread(
         vod_db.set_series_source_enrichment, series_id, source["provider_id"], source["provider_series_id"],
     )
-    return {"fetched": True, "reason": None, "detail_written": detail_written}
+    # Even when the panel omits its optional info block, record which catalog
+    # last_modified value this episode fetch satisfied.
+    await asyncio.to_thread(
+        vod_db.set_series_enrichment,
+        series_id,
+        episodes_synced_last_modified=series.get("provider_last_modified"),
+    )
+    return {
+        "fetched": True, "reason": None, "detail_written": detail_written,
+        "unchanged": unchanged,
+    }
 
 
 async def enrich_series_source_only(
@@ -2003,7 +2035,9 @@ async def enrich_series_source_only(
         return {"fetched": False, "reason": "no source recorded for this series from this provider"}
 
     outcome = await _enrich_one_series_source(
-        series_id, series, source, force=force, write_queue=write_queue,
+        series_id, series, source, force=force,
+        series_due=(force or await asyncio.to_thread(vod_db.series_existing_sources_due, series)),
+        write_queue=write_queue,
         episodes_only=episodes_only,
     )
 

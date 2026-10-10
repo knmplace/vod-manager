@@ -234,10 +234,17 @@ Jellyfin kept for legacy Emby-client compatibility. Not every Jellyfin
 install has those aliases available, though; if adding a Jellyfin provider
 fails on the library-detection step, VOD & DVR Manager now automatically
 retries against Jellyfin's native (unprefixed) paths and remembers that
-choice for the rest of the request. It also sends the API key as both a
-query parameter and the `X-Emby-Token` header, since some Jellyfin
-deployments (typically ones behind a reverse proxy or with a hardened auth
-config) only accept one or the other. If a Jellyfin provider still can't
+choice for the rest of the request. It also sends the API key as a query
+parameter, the `X-Emby-Token` header, and Jellyfin's native
+`Authorization: MediaBrowser Token="…"` header, since different servers
+accept different ones — Jellyfin 12.1, for example, rejects the first two
+and only accepts the native header. The library listing needs an
+administrator-level API key; if the server answers 401/403 the log now says
+the key was rejected or lacks admin rights.
+Providers of type **Jellyfin** use Jellyfin's own unprefixed API paths
+(`/Videos/…`, `/Items/…`) for streams, posters and playback reporting —
+the `/emby/*` aliases are gone on Jellyfin 12.1 — while **Emby** providers keep
+the `/emby` prefix. If a Jellyfin provider still can't
 import after this, it's worth checking whether anything sits in front of
 your Jellyfin server (a reverse proxy, an auth gateway) that might be
 altering the request before it reaches Jellyfin itself.
@@ -395,7 +402,11 @@ first time gets auto-archived the moment it's discovered, same as
 Dispatcharr's own "auto-archive new VOD categories" behavior. Off by
 default, and turning it on never retroactively archives categories the
 provider was already reporting before you enabled it — only ones that show
-up for the first time on a later import.
+up for the first time on a later import (a provider's very first import
+archives nothing, since every category would count as new). Content in an
+auto-archived category **stays archived on every later import** until you
+turn the setting off, which un-archives it on the next import; you can also
+un-archive individual items by hand.
 
 Turning either of these on only affects **future** imports by default. If
 you already have a large catalog and want the new rules applied
@@ -1269,6 +1280,20 @@ rather than needing flagship-level reasoning per call. Switching provider
 resets the model choice to that provider's own default rather than carrying
 over a model id that belongs to a different provider.
 
+**Google Gemini models:** the default is `gemini-flash-latest` (and
+`gemini-pro-latest` for the most capable tier) — aliases Google keeps pointed
+at a current model. Google retires specific versions quickly: Gemini 2.5
+Flash/Pro now answer "no longer available to new users" on newer accounts, so
+they stay in the list only for accounts that still have them. If you pick a
+model your account can't use you'll see Google's own message.
+
+**When an AI request fails**, the message under the item (Needs Review,
+Missing Artwork) now includes the provider's own explanation — a retired
+model, exceeded quota, a rejected key — instead of a generic "check your API
+key". **AI Evaluate** on a category likewise reports the error when every
+batch failed, instead of showing zero matches; if only some batches fail you
+still get the matches from the rest.
+
 ---
 
 ## 11. Curation tools
@@ -1292,9 +1317,11 @@ actually comes from depends on what's already known:
   includes it (most do). What's left for enrichment is discovering
   episodes, which still needs one call per series to that series' own
   provider — but only when the provider reports something's actually
-  changed, or episodes have never been fetched at all, not on a blind
-  schedule. A series with nothing new since its last check is skipped even
-  past the Enrichment TTL.
+  changed (`last_modified`), a provider that never had its episodes fetched
+  appears, or — for providers that don't report changes at all — the
+  Enrichment TTL comes due, backed off the longer nothing new shows up (see
+  Bulk Enrich All below). A series the provider reports no change for is
+  skipped, even past the TTL.
 - **Movies** — once a movie has a known TMDB id (captured at catalog-refresh
   time if the provider includes it, or from a prior enrichment pass),
   enrichment fetches its detail straight from TMDB instead of the provider
@@ -1309,7 +1336,19 @@ all.
 
 - **Bulk Enrich All** — enriches everything that hasn't been enriched yet,
   or has aged past the **Enrichment TTL** (Configuration → Refresh
-  Schedule), skipping anything still fresh.
+  Schedule), skipping anything still fresh. A movie whose last refetch found
+  nothing new is rechecked on a growing interval — the wait doubles with each
+  unchanged check, up to 16× the TTL (16 days at the default 24 hours) — and
+  any change in what the provider/TMDB returns resets it to the plain TTL.
+  Providers rarely change a movie's details, so this avoids re-requesting the
+  whole catalog every day; **Force Re-Enrich All** below still refreshes
+  everything on demand.
+  **Series** without a provider change signal follow the same growing interval:
+  an ended show whose episode list keeps coming back the same (complete or not)
+  is rechecked less and less often, and a newly listed episode resets it.
+  The background pass itself starts about one TTL after the previous pass
+  *started* (not finished), with at least a 15-minute rest between passes, so
+  items enriched early in a pass are still fresh when the next pass reaches them.
 - **Force Re-Enrich All** — re-fetches every movie/series regardless of
   freshness, ignoring the TTL entirely. Use this once after an update adds
   a new field it captures (e.g. rating, release date, bitrate), so existing
@@ -1596,8 +1635,14 @@ re-run any time (each becomes a no-op once nothing's left to fix):
 ## 12. TMDB integration
 
 A free [TMDB API key](https://www.themoviedb.org/settings/api) (v3 auth)
-under Configuration → API Keys unlocks real TMDB search for the Needs
-Review and Missing Artwork flows above, plus two ways to auto-populate
+under Configuration → API Keys is used for **all** TMDB lookups — bulk
+metadata enrichment, ID matching, trailers and library-source matching, not
+just the features below. TMDB's terms require attribution (shown on the
+Configuration page and in the README) and limit how long TMDB data may be
+cached (6 months); the key is yours, so following
+[TMDB's API terms](https://www.themoviedb.org/api-terms-of-use) is up to you.
+It unlocks real TMDB search for the Needs Review
+and Missing Artwork flows above, plus two ways to auto-populate
 categories from a public list — both only ever place items already present
 in your pool; neither pulls in anything new.
 

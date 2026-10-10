@@ -181,7 +181,10 @@ any on-disk segments.
 An API key from **any** of Anthropic, OpenAI, or Google Gemini (Configuration
 → API Keys — configure as many as you have access to, then pick which one
 is active) unlocks three assists, none of which ever apply anything
-automatically — every one is a suggestion you still review and confirm:
+automatically — every one is a suggestion you still review and confirm. If a
+request fails, the message shows the provider's own reason (retired model,
+quota, rejected key). Gemini defaults to the `gemini-flash-latest` alias, since
+Google retires specific model versions quickly:
 
 - **Suggest a category with AI** (Categories) — describe a category in
   plain English and the AI proposes a structured filter rule using the
@@ -351,7 +354,11 @@ Configuration → Refresh Schedule controls how often background work runs:
   every type.
 - **Enrichment TTL** — how long detail-level metadata (posters, cast, genre)
   is cached before a movie/series is eligible to be refetched. Defaults to
-  24 hours.
+  24 hours. A movie whose refetch keeps coming back unchanged is rechecked less
+  and less often (the wait doubles each time, up to 16x the TTL); any change
+  resets it. Series are re-fetched when their provider reports a change, and
+  providers that don't report changes follow the same backoff; background
+  passes start about one TTL apart, with at least a 15-minute rest.
 - **List Sync** — how often categories with a linked public list source
   (TMDB List or MDBList) auto-resync. Off (manual "Sync now" only) by
   default — enabling it adds new recurring API traffic to whichever
@@ -439,7 +446,8 @@ built by hand with the same name — it only ever fills in what's missing.
 auto-archives any category a provider reports for the first time, catching
 it before it lands in your library instead of after — off by default, and
 never retroactively archives a category the provider was already reporting
-before you turned it on.
+before you turned it on. Archived content stays archived on later imports
+until you turn the setting off.
 
 **Stream priority** (Curation & Maintenance → *Stream Priority*) controls
 which of a pool item's multiple real sources gets used first when more than
@@ -451,3 +459,12 @@ category), or either one as primary with the other as tiebreaker.
 
 Full details and screenshots for each in
 [USERGUIDE.md](USERGUIDE.md#11-curation-tools).
+
+## Credits
+
+[![TMDB](frontend/public/tmdb-logo.svg)](https://www.themoviedb.org)
+
+This product uses TMDB and the TMDB APIs but is not endorsed, certified, or otherwise approved by TMDB.
+You supply your own TMDB API key and are responsible for following
+[TMDB's API terms of use](https://www.themoviedb.org/api-terms-of-use) -- notably that information obtained from
+TMDB may not be cached for longer than 6 months.

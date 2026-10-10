@@ -31,6 +31,22 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-10 (Updated to upstream v0.2.24)
+
+- ✅ 🔼 **The fork now includes upstream releases v0.2.21 through v0.2.24.**
+  This brings in the vanished-item transaction fix, Jellyfin 12.1 authentication
+  and native playback paths, TMDB attribution, repaired ongoing-series episode
+  refreshes, enrichment scheduling/backoff, and the Gemini compatibility and
+  error-reporting fixes.
+- ✅ **New provider lanes are fetched before broad series rechecks.** If an
+  existing show gains another provider, only that provider's missing episode
+  list is requested first. Existing provider lanes are refreshed later when
+  their own change signal or fallback interval is due.
+- ✅ **Language cleanup only restores its own archives.** Re-enabling a language
+  cannot unarchive a title that was archived manually or by category cleanup.
+- **Verification:** full backend suite: 558 passed; frontend production build
+  passed (the existing large-chunk warning remains).
+
 ## 2026-10-07 (No episode fetches for languages you've turned off)
 
 - ✅ **Episode lists are fetched only for sources in an enabled playback

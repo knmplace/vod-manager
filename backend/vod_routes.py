@@ -1034,7 +1034,8 @@ async def get_apply_import_exclusions_status(job_id: str):
         raise HTTPException(404, detail="job not found")
     return {
         "status": job["status"], "total": job["total"], "completed": job["completed"],
-        "current_provider": job["current_provider"], "results": job["results"], "error": job["error"],
+        "current_provider": job["current_provider"], "phase": job.get("phase"),
+        "results": job["results"], "error": job["error"],
     }
 
 
@@ -1104,7 +1105,9 @@ async def ai_evaluate_category(category_id: int, body: AiEvaluateCategoryRequest
         raise HTTPException(400, detail=str(exc))
 
     try:
-        matched_ids = await ai_assist.evaluate_candidates_for_category(body.description, category["content_type"], candidates)
+        matched_ids = await ai_assist.evaluate_candidates_for_category(
+            body.description, category["content_type"], candidates, raise_if_all_failed=True,
+        )
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc))
     except Exception as exc:

@@ -60,6 +60,14 @@ _SESSION_HEADERS = {
 }
 
 
+def api_prefix(provider: dict) -> str:
+    """Path prefix for this provider's server. Jellyfin's own API is unprefixed:
+    `/emby/*` on a Jellyfin server is only a legacy-compatibility alias that
+    12.1 no longer serves (GH#50: every stream and poster 404'd). Emby's API
+    lives under `/emby`."""
+    return "" if provider.get("provider_type") == "jellyfin" else "/emby"
+
+
 class EmbyVodClient:
     """Use as `async with EmbyVodClient(provider) as client:` for anything
     making more than one call (import flow) — reuses one pooled connection
@@ -82,7 +90,9 @@ class EmbyVodClient:
         # result for the rest of this client's lifetime, so a whole
         # multi-call import pass against a no-alias Jellyfin server pays the
         # extra round-trip only on its first request, not every single one.
-        self._emby_prefix_unsupported = False
+        # GH#50: a Jellyfin provider never needs the /emby alias, so go straight
+        # to native paths instead of paying (or failing) the 404 round-trip.
+        self._emby_prefix_unsupported = provider.get("provider_type") == "jellyfin"
 
     async def __aenter__(self) -> "EmbyVodClient":
         self._client = httpx.AsyncClient(timeout=_REQUEST_TIMEOUT)
@@ -106,8 +116,18 @@ class EmbyVodClient:
         Playing session-identification ones _SESSION_HEADERS originally
         covered, since VirtualFolders (an admin-level library-management
         endpoint, unlike ordinary content browsing) is exactly the kind of
-        call more likely to enforce stricter auth."""
-        return {**_SESSION_HEADERS, "X-Emby-Token": self.api_key}
+        call more likely to enforce stricter auth.
+
+        GH#38: Jellyfin 12.1 rejects BOTH the `api_key` query param and the
+        `X-Emby-Token` header (401 on an otherwise valid admin key) and only
+        accepts its native `Authorization: MediaBrowser Token="..."` header,
+        so that is sent as well. The older credentials stay for Emby and
+        pre-12 Jellyfin servers that still rely on them."""
+        return {
+            **_SESSION_HEADERS,
+            "X-Emby-Token": self.api_key,
+            "Authorization": f'MediaBrowser Token="{self.api_key}"',
+        }
 
     async def _get(self, path: str, params: dict | None = None, timeout: float = _REQUEST_TIMEOUT) -> dict:
         query = {"api_key": self.api_key}
@@ -160,6 +180,12 @@ class EmbyVodClient:
                         path, native_path, r2.status_code,
                     )
                     r = r2
+            if r.status_code in (401, 403):
+                logger.error(
+                    "[emby_vod_client] %s returned HTTP %s -- the API key was rejected or lacks "
+                    "administrator rights (library listing needs an admin key)",
+                    effective_path, r.status_code,
+                )
             r.raise_for_status()
             return r.json() if r.content else {}
         except Exception:
@@ -350,4 +376,4 @@ def extract_common_fields(item: dict) -> dict:
 
 def build_poster_url(provider: dict, item_id: str) -> str:
     base_url = provider["base_url"].rstrip("/")
-    return f"{base_url}/emby/Items/{item_id}/Images/Primary?api_key={provider['password']}"
+    return f"{base_url}{api_prefix(provider)}/Items/{item_id}/Images/Primary?api_key={provider['password']}"

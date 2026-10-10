@@ -13,7 +13,10 @@ from fastapi.staticfiles import StaticFiles
 
 import ai_assist
 from backup import router as backup_router
-from config import APP_VERSION, LOG_BACKUP_COUNT, LOG_FILE, save_last_enrichment_run, get_refresh_settings
+from config import (
+    APP_VERSION, LOG_BACKUP_COUNT, LOG_FILE, get_last_enrichment_run,
+    get_refresh_settings, save_last_enrichment_run,
+)
 from diagnostics import router as diagnostics_router
 import dispatcharr_dvr_importer
 import emby_vod_importer
@@ -291,6 +294,14 @@ async def _episode_trickle_scheduler() -> None:
         await asyncio.sleep(max(300, int(interval)))
 
 
+_ENRICHMENT_MIN_REST_SECONDS = 15 * 60
+
+
+def _enrichment_sleep_seconds(ttl: float, elapsed: float) -> float:
+    """Keep pass starts about one TTL apart, with a minimum rest."""
+    return max(ttl - elapsed, min(ttl, _ENRICHMENT_MIN_REST_SECONDS))
+
+
 async def _vod_enrichment_scheduler() -> None:
     """Recover pending ingestion after startup without re-polling providers.
 
@@ -302,14 +313,21 @@ async def _vod_enrichment_scheduler() -> None:
     This is a pending-work check rather than a blanket provider re-fetch, so
     it is safe to run shortly after every startup. Completed metadata and
     episode sources are skipped by their ingestion gates."""
-    await asyncio.sleep(45)
+    last_run = get_last_enrichment_run()
+    ttl = vod_db.get_enrichment_ttl_seconds()
+    if last_run:
+        await asyncio.sleep(max(0, ttl - (time.time() - last_run)))
+    else:
+        await asyncio.sleep(45)
     while True:
+        run_started_at = time.time()
         try:
-            vod_importer.schedule_post_import_enrichment()
-            save_last_enrichment_run(time.time())
+            await vod_importer.bulk_enrich_all()
         except Exception as exc:
             logger.warning("[vod_enrichment_scheduler] run failed: %s", exc)
-        await asyncio.sleep(vod_db.get_enrichment_ttl_seconds())
+        save_last_enrichment_run(run_started_at)
+        elapsed = time.time() - run_started_at
+        await asyncio.sleep(_enrichment_sleep_seconds(vod_db.get_enrichment_ttl_seconds(), elapsed))
 
 
 _CATEGORY_SCHEDULE_POLL_SECONDS = 3600  # hourly is plenty -- apply_category_schedules

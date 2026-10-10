@@ -1097,6 +1097,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("series", "review_excluded", "INTEGER NOT NULL DEFAULT 0"),
         ("movies", "review_excluded_manual", "INTEGER NOT NULL DEFAULT 0"),
         ("series", "review_excluded_manual", "INTEGER NOT NULL DEFAULT 0"),
+        # Marks archives created by the disabled-language sweep so that sweep
+        # never unarchives a row archived for a category or another reason.
+        # Existing automatic archives are deliberately not backfilled: their
+        # original owner (language versus category) cannot be inferred safely.
+        ("movies", "review_excluded_language", "INTEGER NOT NULL DEFAULT 0"),
+        ("series", "review_excluded_language", "INTEGER NOT NULL DEFAULT 0"),
         ("providers", "import_exclude_categories", "TEXT"),
         ("categories", "is_active", "INTEGER NOT NULL DEFAULT 1"),
         ("categories", "schedule_start_mmdd", "TEXT"),
@@ -1196,6 +1202,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # episodes_synced_last_modified below for the other half of that
         # comparison.
         ("series", "provider_last_modified", "TEXT"),
+        # Consecutive TTL-fallback episode refreshes that found no change.
+        # Providers with a last_modified signal still refresh immediately
+        # when that signal changes; providers without one back off gradually.
+        ("series", "enrich_stable_count", "INTEGER NOT NULL DEFAULT 0"),
         # Snapshot of provider_last_modified as of the last time episodes
         # were actually (re)fetched via get_series_info. NULL until the first
         # successful episode fetch. series_needs_enrichment compares this
@@ -6561,10 +6571,14 @@ def set_provider_import_totals(provider_id: int, movie_total: int | None, series
         conn.close()
 
 
-def _is_stale(last_enriched_at) -> bool:
+ENRICHMENT_BACKOFF_MAX_STEPS = 4
+
+
+def _is_stale(last_enriched_at, stable_count: int = 0) -> bool:
     if not last_enriched_at:
         return True
-    return (time.time() - float(last_enriched_at)) > get_enrichment_ttl_seconds()
+    steps = min(max(int(stable_count or 0), 0), ENRICHMENT_BACKOFF_MAX_STEPS)
+    return (time.time() - float(last_enriched_at)) > get_enrichment_ttl_seconds() * (2 ** steps)
 
 
 def movie_needs_enrichment(movie_id: int) -> bool:
@@ -6986,6 +7000,16 @@ def bulk_place_movies_in_category(movie_ids: list[int], category_id: int) -> int
         if flagged:
             logger.info("[vod_db] skipping %d movie(s) still needing year review for category=%s", len(flagged), category_id)
         to_place = [mid for mid in movie_ids if mid not in already and mid not in flagged]
+        # A smart-category result can contain a card merged away after rule
+        # evaluation. Skip vanished ids instead of leaving a failed FK insert's
+        # transaction open and blocking every other writer.
+        existing: set[int] = set()
+        for chunk in _chunked(to_place):
+            placeholders = ",".join("?" for _ in chunk)
+            existing.update(r["id"] for r in conn.execute(
+                f"SELECT id FROM movies WHERE id IN ({placeholders})", chunk,
+            ).fetchall())
+        to_place = [mid for mid in to_place if mid in existing]
         if not to_place:
             conn.close()
             return 0
@@ -7006,13 +7030,18 @@ def bulk_place_movies_in_category(movie_ids: list[int], category_id: int) -> int
             rows.append((mid, category_id, _EXPORT_STREAM_ID_BASE + next_seq, name_suffix))
             next_seq += 1
 
-        conn.executemany(
-            "INSERT INTO movie_category_placements (movie_id, category_id, export_stream_id, name_suffix) VALUES (?,?,?,?)",
-            rows,
-        )
-        _commit_with_retry(conn)
-        conn.close()
-        return len(rows)
+        try:
+            conn.executemany(
+                "INSERT INTO movie_category_placements (movie_id, category_id, export_stream_id, name_suffix) VALUES (?,?,?,?)",
+                rows,
+            )
+            _commit_with_retry(conn)
+            return len(rows)
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
 
 def _enabled_languages_clause(column: str) -> tuple[str, list[str]]:
@@ -7349,10 +7378,8 @@ def get_series_by_name_year(name: str, year: int | None) -> dict | None:
     return dict(row) if row else None
 
 
-def series_needs_enrichment(series_id: int) -> bool:
-    series = get_series(series_id)
-    if not series:
-        return False
+def series_existing_sources_due(series: dict) -> bool:
+    """Whether already-fetched sources need an episode-list refresh."""
     # Detail metadata is now captured for free on every bulk import (see
     # bulk_import_series) for any provider that sends it, so the only thing
     # left for enrich_series to actually do is discover episodes via
@@ -7363,10 +7390,63 @@ def series_needs_enrichment(series_id: int) -> bool:
     provider_lm = series.get("provider_last_modified")
     if provider_lm:
         return series.get("episodes_synced_last_modified") != provider_lm
-    # Provider doesn't send last_modified at all -- fall back to the
-    # original TTL-based staleness check, same behavior as before this
-    # existed.
-    return _is_stale(series.get("last_enriched_at"))
+    return _is_stale(series.get("last_enriched_at"), series.get("enrich_stable_count"))
+
+
+def series_needs_enrichment(series_id: int) -> bool:
+    series = get_series(series_id)
+    if not series:
+        return False
+    if series_existing_sources_due(series):
+        return True
+    return _series_has_unfetched_source(series_id)
+
+
+def _series_has_unfetched_source(series_id: int) -> bool:
+    """A newly attached source is due unless it failed within the last TTL."""
+    retry_before = time.time() - get_enrichment_ttl_seconds()
+    lang_clause, lang_params = _enabled_languages_clause("language")
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM series_sources WHERE series_id=? AND episodes_last_enriched_at IS NULL "
+            f"AND (last_failed_at IS NULL OR CAST(last_failed_at AS REAL) < ?) AND {lang_clause} LIMIT 1",
+            (series_id, retry_before, *lang_params),
+        ).fetchone()
+    finally:
+        conn.close()
+    return row is not None
+
+
+def set_series_enrich_stable(series_id: int, unchanged: bool) -> None:
+    """Back off TTL-only episode refreshes while their episode keys stay stable."""
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            conn.execute(
+                "UPDATE series SET enrich_stable_count = CASE WHEN ? THEN enrich_stable_count + 1 ELSE 0 END WHERE id=?",
+                (1 if unchanged else 0, series_id),
+            )
+            _commit_with_retry(conn)
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
+def list_episode_keys(series_id: int, provider_id: int) -> set[tuple[int, int]]:
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT e.season_number, e.episode_number FROM episodes e "
+            "JOIN episode_sources es ON es.episode_id=e.id "
+            "WHERE e.series_id=? AND es.provider_id=?",
+            (series_id, provider_id),
+        ).fetchall()
+    finally:
+        conn.close()
+    return {(r["season_number"], r["episode_number"]) for r in rows}
 
 
 def set_series_enrichment(series_id: int, **fields) -> None:
@@ -7424,7 +7504,7 @@ def list_series_sources(series_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def series_source_needs_enrichment(source: dict) -> bool:
+def series_source_needs_enrichment(source: dict, series_due: bool = False) -> bool:
     """Per-source episode-discovery gate.
 
     The import refresh is the presence reconciliation.  Once a source's
@@ -7443,7 +7523,10 @@ def series_source_needs_enrichment(source: dict) -> bool:
     # needs this expensive provider call.  A future per-source provider
     # modification marker can deliberately clear this stamp when the panel
     # reports a changed series.
-    return not source.get("episodes_last_enriched_at")
+    language = (source.get("language") or "EN").upper()
+    if language not in set(get_enabled_languages()):
+        return False
+    return series_due or not source.get("episodes_last_enriched_at")
 
 
 def has_pending_series_source_enrichment(provider_id: int) -> bool:
@@ -8081,6 +8164,13 @@ def bulk_place_series_in_category(series_ids: list[int], category_id: int) -> in
         if flagged:
             logger.info("[vod_db] skipping %d series still needing year review for category=%s", len(flagged), category_id)
         to_place = [sid for sid in series_ids if sid not in already and sid not in flagged]
+        existing: set[int] = set()
+        for chunk in _chunked(to_place):
+            placeholders = ",".join("?" for _ in chunk)
+            existing.update(r["id"] for r in conn.execute(
+                f"SELECT id FROM series WHERE id IN ({placeholders})", chunk,
+            ).fetchall())
+        to_place = [sid for sid in to_place if sid in existing]
         if not to_place:
             conn.close()
             return 0
@@ -8106,13 +8196,18 @@ def bulk_place_series_in_category(series_ids: list[int], category_id: int) -> in
             rows.append((sid, category_id, next_id, name_suffix))
             next_id += 1
 
-        conn.executemany(
-            "INSERT INTO series_category_placements (series_id, category_id, export_series_id, name_suffix) VALUES (?,?,?,?)",
-            rows,
-        )
-        _commit_with_retry(conn)
-        conn.close()
-        return len(rows)
+        try:
+            conn.executemany(
+                "INSERT INTO series_category_placements (series_id, category_id, export_series_id, name_suffix) VALUES (?,?,?,?)",
+                rows,
+            )
+            _commit_with_retry(conn)
+            return len(rows)
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
 
 def get_series_export_rows() -> list[dict]:
@@ -12119,16 +12214,23 @@ def archive_disabled_language_content(movie_ids: set[int] | None = None, series_
                 movie_where += f" AND id IN ({','.join('?' * len(movie_ids))})"
                 movie_params = list(movie_ids)
         for row in conn.execute(
-            f"SELECT id, review_excluded FROM movies WHERE {movie_where}", movie_params
+            f"SELECT id, review_excluded, review_excluded_language FROM movies WHERE {movie_where}", movie_params
         ).fetchall():
             langs = _source_languages(conn, "movie_sources", "movie_id", row["id"])
             eligible = bool(langs & enabled)
             if not eligible and not row["review_excluded"]:
-                conn.execute("UPDATE movies SET review_excluded=1 WHERE id=?", (row["id"],))
+                conn.execute(
+                    "UPDATE movies SET review_excluded=1, review_excluded_language=1 WHERE id=?",
+                    (row["id"],),
+                )
                 movies_archived += 1
-            elif eligible and row["review_excluded"]:
-                conn.execute("UPDATE movies SET review_excluded=0 WHERE id=?", (row["id"],))
-                movies_unarchived += 1
+            elif eligible and row["review_excluded_language"]:
+                if row["review_excluded"]:
+                    movies_unarchived += 1
+                conn.execute(
+                    "UPDATE movies SET review_excluded=0, review_excluded_language=0 WHERE id=?",
+                    (row["id"],),
+                )
 
         series_archived = 0
         series_unarchived = 0
@@ -12141,16 +12243,23 @@ def archive_disabled_language_content(movie_ids: set[int] | None = None, series_
                 series_where += f" AND id IN ({','.join('?' * len(series_ids))})"
                 series_params = list(series_ids)
         for row in conn.execute(
-            f"SELECT id, review_excluded FROM series WHERE {series_where}", series_params
+            f"SELECT id, review_excluded, review_excluded_language FROM series WHERE {series_where}", series_params
         ).fetchall():
             langs = _source_languages(conn, "series_sources", "series_id", row["id"])
             eligible = bool(langs & enabled)
             if not eligible and not row["review_excluded"]:
-                conn.execute("UPDATE series SET review_excluded=1 WHERE id=?", (row["id"],))
+                conn.execute(
+                    "UPDATE series SET review_excluded=1, review_excluded_language=1 WHERE id=?",
+                    (row["id"],),
+                )
                 series_archived += 1
-            elif eligible and row["review_excluded"]:
-                conn.execute("UPDATE series SET review_excluded=0 WHERE id=?", (row["id"],))
-                series_unarchived += 1
+            elif eligible and row["review_excluded_language"]:
+                if row["review_excluded"]:
+                    series_unarchived += 1
+                conn.execute(
+                    "UPDATE series SET review_excluded=0, review_excluded_language=0 WHERE id=?",
+                    (row["id"],),
+                )
 
         _commit_with_retry(conn)
         conn.close()
