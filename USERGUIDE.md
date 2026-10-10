@@ -432,13 +432,16 @@ design pass for what "newly discovered" means for a library-based source.
 A second, *separate* language control (Curation & Maintenance → **Enabled
 Playback Languages**), easy to confuse with Import Language Exclusion above
 but built for a different job: that one is a one-way, import-time archive
-rule; this one is a **live playback/export filter**, instantly reversible,
-that never archives or touches any row in your pool. A checkbox list of
+rule; this one is a **live playback/export filter** with a reversible,
+language-owned archive sweep. A checkbox list of
 every source language detected across your catalog (English, French,
 Arabic, and so on), each with its own live title count. Unchecking a
 language immediately hides any movie or episode whose *only* source is that
-language from playback and the exported Dispatcharr catalog — nothing is
-deleted, and re-checking it brings that content back instantly. A
+language from playback and the exported Dispatcharr catalog and archives its
+card from active library/review views — nothing is deleted. Before saving,
+the confirmation previews both the playback impact and exact archive/restore
+counts. Re-checking a language restores only cards this language sweep
+archived. A
 movie/series with at least one source in a still-enabled language stays
 fully visible either way, even if it also has sources in languages you've
 unchecked.

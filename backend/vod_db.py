@@ -12244,7 +12244,13 @@ def purge_excluded_archived_content(provider_exclusions: dict[int, tuple[list[st
         return {"movies_deleted": movies_deleted, "series_deleted": series_deleted}
 
 
-def archive_disabled_language_content(movie_ids: set[int] | None = None, series_ids: set[int] | None = None) -> dict:
+def archive_disabled_language_content(
+    movie_ids: set[int] | None = None,
+    series_ids: set[int] | None = None,
+    *,
+    enabled_languages: set[str] | None = None,
+    dry_run: bool = False,
+) -> dict:
     """KNM: added 2026-09-13, user report -- one-time (repeatable) catch-up
     for deployments that were already running before the same-day auto-merge
     language gate fix (see the merge gate's own comment in
@@ -12274,7 +12280,7 @@ def archive_disabled_language_content(movie_ids: set[int] | None = None, series_
     both ways instead of only ever setting it."""
     # KNM: 2026-10-03 upstream v0.2.20 merge -- adopt upstream's _WRITE_LOCK (RLock) around this write path.
     with _WRITE_LOCK:
-        enabled = set(get_enabled_languages())
+        enabled = set(enabled_languages) if enabled_languages is not None else set(get_enabled_languages())
         conn = _connect()
 
         movies_archived = 0
@@ -12293,18 +12299,20 @@ def archive_disabled_language_content(movie_ids: set[int] | None = None, series_
             langs = _source_languages(conn, "movie_sources", "movie_id", row["id"])
             eligible = bool(langs & enabled)
             if not eligible and not row["review_excluded"]:
-                conn.execute(
-                    "UPDATE movies SET review_excluded=1, review_excluded_language=1 WHERE id=?",
-                    (row["id"],),
-                )
+                if not dry_run:
+                    conn.execute(
+                        "UPDATE movies SET review_excluded=1, review_excluded_language=1 WHERE id=?",
+                        (row["id"],),
+                    )
                 movies_archived += 1
             elif eligible and row["review_excluded_language"]:
                 if row["review_excluded"]:
                     movies_unarchived += 1
-                conn.execute(
-                    "UPDATE movies SET review_excluded=0, review_excluded_language=0 WHERE id=?",
-                    (row["id"],),
-                )
+                if not dry_run:
+                    conn.execute(
+                        "UPDATE movies SET review_excluded=0, review_excluded_language=0 WHERE id=?",
+                        (row["id"],),
+                    )
 
         series_archived = 0
         series_unarchived = 0
@@ -12322,22 +12330,26 @@ def archive_disabled_language_content(movie_ids: set[int] | None = None, series_
             langs = _source_languages(conn, "series_sources", "series_id", row["id"])
             eligible = bool(langs & enabled)
             if not eligible and not row["review_excluded"]:
-                conn.execute(
-                    "UPDATE series SET review_excluded=1, review_excluded_language=1 WHERE id=?",
-                    (row["id"],),
-                )
+                if not dry_run:
+                    conn.execute(
+                        "UPDATE series SET review_excluded=1, review_excluded_language=1 WHERE id=?",
+                        (row["id"],),
+                    )
                 series_archived += 1
             elif eligible and row["review_excluded_language"]:
                 if row["review_excluded"]:
                     series_unarchived += 1
-                conn.execute(
-                    "UPDATE series SET review_excluded=0, review_excluded_language=0 WHERE id=?",
-                    (row["id"],),
-                )
+                if not dry_run:
+                    conn.execute(
+                        "UPDATE series SET review_excluded=0, review_excluded_language=0 WHERE id=?",
+                        (row["id"],),
+                    )
 
-        _commit_with_retry(conn)
+        if not dry_run:
+            _commit_with_retry(conn)
         conn.close()
         return {
+            "dry_run": dry_run,
             "movies_archived": movies_archived,
             "movies_unarchived": movies_unarchived,
             "series_archived": series_archived,

@@ -384,9 +384,9 @@ catalog-quality tools — **Missing Artwork** (bulk poster fixing, with a
 language-aware filter and sibling-safe bulk archiving), **Language Filter**
 (the same language filtering over your whole library, not just
 poster-missing items), **Enabled Playback Languages** (a live,
-instantly-reversible playback/export filter by source language — separate
-from the import-time Language Exclusion above; nothing archived or deleted,
-just hidden from playback while unchecked), **Duplicate Finder** (matches on
+preview-first playback/export filter by source language — separate from the
+import-time Language Exclusion above; cards with no enabled-language source
+are language-archived, never deleted, and safely restored if re-enabled), **Duplicate Finder** (matches on
 punctuation variants, adjacent-year mislabeling, and TMDB id, with one-click
 bulk merges for both fully-corroborated TMDB-confirmed matches and a second,
 separate tier where only one candidate carries a self-consistent TMDB id; an

@@ -981,7 +981,11 @@ async def get_enabled_languages_settings():
 @router.post("/enabled-languages/", dependencies=_GUARDS)
 async def save_enabled_languages_settings(body: EnabledLanguagesRequest):
     save_enabled_languages(body.codes)
-    return {"ok": True}
+    archive = await asyncio.to_thread(
+        vod_db.archive_disabled_language_content,
+        enabled_languages=set(body.codes),
+    )
+    return {"ok": True, "archive": archive}
 
 
 @router.post("/enabled-languages/impact/", dependencies=_GUARDS)
@@ -990,7 +994,13 @@ async def preview_enabled_languages_impact_endpoint(body: EnabledLanguagesImpact
     sources under the proposed set, vs. what's currently enabled -- lets the
     Curation tab warn with an accurate number before the user removes a
     language. See vod_db.preview_enabled_languages_impact."""
-    return await asyncio.to_thread(vod_db.preview_enabled_languages_impact, body.codes)
+    impact = await asyncio.to_thread(vod_db.preview_enabled_languages_impact, body.codes)
+    impact["archive_preview"] = await asyncio.to_thread(
+        vod_db.archive_disabled_language_content,
+        enabled_languages=set(body.codes),
+        dry_run=True,
+    )
+    return impact
 
 
 @router.get("/import-country-exclusion/", dependencies=_GUARDS)

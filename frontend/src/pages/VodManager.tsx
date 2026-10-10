@@ -5165,7 +5165,19 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
   })
   const saveEnabledLanguages = useMutation({
     mutationFn: (codes: string[]) => api.post('/vod/enabled-languages/', { codes }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vod-enabled-languages'] }),
+    onSuccess: (r) => {
+      const archive = r.data.archive
+      qc.invalidateQueries({ queryKey: ['vod-enabled-languages'] })
+      qc.invalidateQueries({ queryKey: ['vod-movies'] })
+      qc.invalidateQueries({ queryKey: ['vod-series'] })
+      invalidateApprovalQueues(qc)
+      if (archive?.movies_archived || archive?.series_archived || archive?.movies_unarchived || archive?.series_unarchived) {
+        notify(
+          `Language update: ${archive.movies_archived + archive.series_archived} archived, `
+          + `${archive.movies_unarchived + archive.series_unarchived} restored.`,
+        )
+      }
+    },
   })
 
   // Language backfill + retroactive movie/series language split (beads-974
@@ -5264,18 +5276,16 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
     const nextCodes = [...enabledLanguageDraft]
     const currentCodes = enabledLanguagesQuery.data?.codes ?? []
     const removed = currentCodes.filter((c) => !nextCodes.includes(c))
-    if (!removed.length) {
-      saveEnabledLanguages.mutate(nextCodes)
-      return
-    }
     api.post('/vod/enabled-languages/impact/', { codes: nextCodes }).then((r) => {
-      const { movies_losing_access, episodes_losing_access } = r.data
-      if (!movies_losing_access && !episodes_losing_access) {
+      const { movies_losing_access, episodes_losing_access, archive_preview } = r.data
+      const archived = (archive_preview?.movies_archived ?? 0) + (archive_preview?.series_archived ?? 0)
+      const restored = (archive_preview?.movies_unarchived ?? 0) + (archive_preview?.series_unarchived ?? 0)
+      if (!movies_losing_access && !episodes_losing_access && !archived && !restored) {
         saveEnabledLanguages.mutate(nextCodes)
         return
       }
       askConfirm(
-        `Removing ${removed.join(', ')} will immediately take ${movies_losing_access} movie(s) and ${episodes_losing_access} episode(s) out of playback/export — they'll have no remaining source in an enabled language. Nothing is deleted; re-enabling the language brings them back instantly. Continue?`,
+        `${removed.length ? `Removing ${removed.join(', ')} will immediately take ${movies_losing_access} movie(s) and ${episodes_losing_access} episode(s) out of playback/export.` : 'This language change updates the active playback filter.'} The language sweep will archive ${archived} card(s) with no enabled-language source${restored ? ` and restore ${restored} previously language-archived card(s)` : ''}. Nothing is deleted; re-enabling a language restores only cards this sweep archived. Continue?`,
         () => saveEnabledLanguages.mutate(nextCodes),
       )
     })

@@ -142,6 +142,26 @@ def test_reenabling_language_only_restores_archive_owned_by_language_sweep(db):
     assert updated["review_excluded_language"] == 0
 
 
+def test_setting_preview_is_read_only_and_apply_can_use_proposed_languages(db):
+    provider_id = db.upsert_provider("prov1", "http://example.com", "user", "pass")
+    movie = _import_movie(db, provider_id, "ES - Preview", "es-preview", raw_name="ES - Preview")
+
+    preview = vod_db.archive_disabled_language_content(enabled_languages={"EN"}, dry_run=True)
+
+    assert preview["dry_run"] is True
+    assert preview["movies_archived"] == 1
+    assert db.get_movie(movie["id"])["review_excluded"] == 0
+
+    applied = vod_db.archive_disabled_language_content(enabled_languages={"EN"})
+    assert applied["dry_run"] is False
+    assert applied["movies_archived"] == 1
+    assert db.get_movie(movie["id"])["review_excluded"] == 1
+
+    restore_preview = vod_db.archive_disabled_language_content(enabled_languages={"EN", "ES"}, dry_run=True)
+    assert restore_preview["movies_unarchived"] == 1
+    assert db.get_movie(movie["id"])["review_excluded"] == 1
+
+
 def test_archives_series_whose_only_language_is_not_enabled(db):
     config.save_enabled_languages(["EN"])
     provider_id = db.upsert_provider("prov1", "http://example.com", "user", "pass")

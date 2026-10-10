@@ -72,6 +72,11 @@ instead of opening a duplicate request.
   merged, or deleted; startup also repairs old orphaned decisions. Archive and
   merge actions refresh every approval/review view immediately, so an archived
   duplicate cannot remain visible until a page reload.
+- ✅ **Enabled Playback Languages now cleans up immediately.** Its dry-run
+  confirmation reports both playback impact and the exact cards that would be
+  language-archived or restored. Saving applies only that language-owned
+  archive state, so unwanted-language cards leave active library/review views
+  immediately while a later re-enable restores them safely.
 - **Verification:** full backend suite: 565 passed; frontend production build
   passed (the existing large-chunk warning remains).
 
