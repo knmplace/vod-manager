@@ -33,6 +33,15 @@ instead of opening a duplicate request.
 
 ## 2026-10-10 (Updated to upstream v0.2.24)
 
+- 🔀 **Upstream PR [#35](https://github.com/jstevenscl/vod-manager/pull/35) was
+  rebuilt as a small Sync History lifecycle proposal.** It now records concise,
+  durable start/finish summaries for each catalog import and closes interrupted
+  runs after a restart. The proposal deliberately does not change country
+  exclusions, Metadata Review performance queries, enrichment/language rules,
+  Duplicate Finder, or reconciliation behavior; those need separate reviewable
+  follow-ups. This changelog entry tracks the proposal only—it is not part of
+  the deployed fork image yet.
+
 - ✅ 🔼 **The fork now includes upstream releases v0.2.21 through v0.2.24.**
   This brings in the vanished-item transaction fix, Jellyfin 12.1 authentication
   and native playback paths, TMDB attribution, repaired ongoing-series episode
@@ -236,13 +245,15 @@ All four entries below are proposed upstream as a follow-up commit on
   to the provider's saved category exclusions, where you can untick them to
   import. A provider's very first import no longer excludes every category.
 
-## 2026-10-04 (Upstream PRs consolidated into #35)
+## 2026-10-04 (Historical upstream PR consolidation)
 
-- 🔀 **[#35](https://github.com/jstevenscl/vod-manager/pull/35) now carries the import reporting, staged TMDB/episode
-  workflow, episode preloading, artwork-fingerprint and load-on-open work.**
-  It was rebuilt as one commit on upstream v0.2.20 and answers every review
-  finding from #31 and #35. [#31](https://github.com/jstevenscl/vod-manager/pull/31), [#43](https://github.com/jstevenscl/vod-manager/pull/43), [#44](https://github.com/jstevenscl/vod-manager/pull/44) and [#45](https://github.com/jstevenscl/vod-manager/pull/45) were
-  closed as superseded. #39–#42 remain open as separate PRs.
+- **Superseded plan.** An earlier broad rebuild placed import reporting,
+  staged TMDB/episode workflow, episode preloading, artwork fingerprints, and
+  load-on-open work under [#35](https://github.com/jstevenscl/vod-manager/pull/35).
+  That scope was subsequently replaced by the focused Sync History lifecycle
+  proposal documented above. The other work must be proposed again in separate
+  current-upstream PRs; this historical entry is retained only to explain why
+  #31, #43, #44, and #45 were closed at the time.
 
 ## 2026-10-04 (Excluded-category purge review fixes)
 
