@@ -44,6 +44,9 @@ interface Provider {
 
 interface ExcludedCategoryPurgePreview {
   dry_run: boolean
+  provider_id: number
+  saved_category_names: string[]
+  saved_exclude_uncategorized: boolean
   movie_sources_removed: number
   series_sources_removed: number
   episode_sources_removed: number
@@ -51,6 +54,8 @@ interface ExcludedCategoryPurgePreview {
   series_deleted: number
   sample_movies: string[]
   sample_series: string[]
+  proposed_category_names: string[]
+  proposed_exclude_uncategorized: boolean
 }
 
 interface CatalogSyncEvent {
@@ -5106,7 +5111,11 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
   const saveImportLanguageExclusion = useMutation({
     mutationFn: (body: { exclude_prefixes: string[]; exclude_non_latin: boolean }) =>
       api.post('/vod/import-language-exclusion/', body),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vod-import-language-exclusion'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['vod-import-language-exclusion'] })
+      setImportPolicyPreview(null)
+      setImportPolicyApplied(false)
+    },
   })
   // Draft selection, committed only on Save -- codes are whatever a
   // provider happens to tag content with (not a fixed list), so the picker
@@ -5260,6 +5269,9 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
     if (enabledLanguageShowFilter === 'unselected' && enabledLanguageDraft.has(c.code)) return false
     return true
   })
+  const importPlaybackLanguageConflicts = [...languageDraft]
+    .filter((code) => enabledLanguageDraft.has(code))
+    .sort((a, b) => a.localeCompare(b))
   function toggleEnabledLanguageSelected(code: string, index: number, shiftKey: boolean) {
     const willBeChecked = !enabledLanguageDraft.has(code)
     const next = new Set(enabledLanguageDraft)
@@ -5290,8 +5302,12 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
         : added.length
           ? `Adding ${added.join(', ')} makes matching stored sources eligible for playback/export again.`
           : 'This saves the current enabled playback-language selection.'
+      const conflicts = nextCodes.filter((code) => languageDraft.has(code)).sort((a, b) => a.localeCompare(b))
+      const precedence = conflicts.length
+        ? ` Policy overlap: ${conflicts.join(', ')} ${conflicts.length === 1 ? 'is' : 'are'} still excluded from future imports; this playback setting only makes already-stored matching sources eligible.`
+        : ''
       askConfirm(
-        `${playbackImpact} The language-owned review-card sweep would archive ${archived} card(s) and restore ${restored} card(s). A zero archive count means no currently active review card qualifies for this sweep; cards already archived manually or by another rule are left untouched. Nothing is deleted. Continue?`,
+        `${playbackImpact}${precedence} The language-owned review-card sweep would archive ${archived} card(s) and restore ${restored} card(s). A zero archive count means no currently active review card qualifies for this sweep; cards already archived manually or by another rule are left untouched. Nothing is deleted. Continue?`,
         () => saveEnabledLanguages.mutate(nextCodes),
       )
     })
@@ -5307,8 +5323,12 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
       removed.length ? `allow ${removed.join(', ')} on future imports` : '',
       nonLatinChanged ? `${nextNonLatin ? 'exclude' : 'allow'} non-Latin-script titles on future imports` : '',
     ].filter(Boolean).join('; ')
+    const conflicts = nextPrefixes.filter((code) => enabledLanguageDraft.has(code)).sort((a, b) => a.localeCompare(b))
+    const precedence = conflicts.length
+      ? ` Conflict: ${conflicts.join(', ')} ${conflicts.length === 1 ? 'is' : 'are'} also enabled for playback. Import exclusion wins for future scans; already-stored matching sources remain playback-eligible until the separate retroactive policy is applied.`
+      : ''
     askConfirm(
-      `${changes || 'Save the current import-language exclusion settings'}? This does not delete or change existing catalog cards. Use “Apply rules to existing catalog now” separately if you want a reviewed re-import to apply these rules to existing content.`,
+      `${changes || 'Save the current import-language exclusion settings'}? This does not delete or change existing catalog cards.${precedence}`,
       () => saveImportLanguageExclusion.mutate({ exclude_prefixes: nextPrefixes, exclude_non_latin: nextNonLatin }),
     )
   }
@@ -5343,7 +5363,11 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
   const saveImportCountryExclusion = useMutation({
     mutationFn: (body: { exclude_country_codes: string[] }) =>
       api.post('/vod/import-country-exclusion/', body),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vod-import-country-exclusion'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['vod-import-country-exclusion'] })
+      setImportPolicyPreview(null)
+      setImportPolicyApplied(false)
+    },
   })
   const [countrySearch, setCountrySearch] = useState('')
   const [countryShowFilter, setCountryShowFilter] = useState<'all' | 'selected' | 'unselected'>('all')
@@ -5387,34 +5411,46 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
     setCountryDraft(next)
     setCountryLastClickedIndex(index)
   }
-  const [applyExclusionsJobId, setApplyExclusionsJobId] = useState<string | null>(null)
-  const applyImportExclusionsNow = useMutation({
-    mutationFn: () => api.post('/vod/import-exclusions/apply-now/'),
-    onSuccess: (r) => setApplyExclusionsJobId(r.data.job_id),
-  })
-  type ApplyExclusionsProviderResult = {
-    provider: string; error?: string
-    movies_created?: number; movies_matched?: number; movies_archived?: number; movies_unarchived?: number
-    series_created?: number; series_matched?: number; series_archived?: number; series_unarchived?: number
+  type ImportPolicyCardSummary = {
+    cards_evaluated: number; cards_without_sources: number; cards_all_sources_excluded: number
+    cards_archived: number; cards_restored: number; manual_cards_unchanged: number
+    archive_samples: { id: number; name: string; sources: number; reasons: string[] }[]
+    restore_samples: { id: number; name: string; sources: number }[]
   }
-  const applyExclusionsJobQuery = useQuery<{
-    status: string; total: number; completed: number; current_provider: string | null
-    phase?: string
-    results: ApplyExclusionsProviderResult[]; error: string | null
-  }>({
-    queryKey: ['vod-apply-exclusions-job', applyExclusionsJobId],
-    queryFn:  () => api.get(`/vod/import-exclusions/apply-now/${applyExclusionsJobId}/`).then((r) => r.data),
-    enabled:  !!applyExclusionsJobId,
-    refetchInterval: (query) => (query.state.data?.status === 'running' ? 1200 : false),
+  type ImportPolicyReport = {
+    dry_run: boolean
+    preview_token?: string
+    sources: {
+      total: number; excluded: number; allowed: number
+      reason_matches: Record<string, number>
+      provider_types: Record<string, { total: number; excluded: number; allowed: number }>
+    }
+    movies: ImportPolicyCardSummary
+    series: ImportPolicyCardSummary
+  }
+  const [importPolicyPreview, setImportPolicyPreview] = useState<ImportPolicyReport | null>(null)
+  const [importPolicyApplied, setImportPolicyApplied] = useState(false)
+  const previewImportPolicy = useMutation({
+    mutationFn: () => api.get('/vod/import-exclusions/preview/').then((r) => r.data as ImportPolicyReport),
+    onSuccess: (report) => {
+      setImportPolicyPreview(report)
+      setImportPolicyApplied(false)
+    },
   })
-  useEffect(() => {
-    if (applyExclusionsJobQuery.data?.status === 'done') {
-      qc.invalidateQueries({ queryKey: ['vod-providers'] })
+  const applyImportPolicy = useMutation({
+    mutationFn: (previewToken: string) => api.post('/vod/import-exclusions/apply/', { preview_token: previewToken }).then((r) => r.data as ImportPolicyReport),
+    onSuccess: (report) => {
+      setImportPolicyPreview(report)
+      setImportPolicyApplied(true)
       qc.invalidateQueries({ queryKey: ['vod-movies'] })
       qc.invalidateQueries({ queryKey: ['vod-series'] })
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [applyExclusionsJobQuery.data?.status])
+      qc.invalidateQueries({ queryKey: ['vod-categories'] })
+      qc.invalidateQueries({ queryKey: ['vod-missing-artwork'] })
+      qc.invalidateQueries({ queryKey: ['vod-missing-artwork-counts'] })
+      invalidateApprovalQueues(qc)
+      notify(`Import policy applied: ${report.movies.cards_archived + report.series.cards_archived} archived, ${report.movies.cards_restored + report.series.cards_restored} restored.`)
+    },
+  })
   const [aiKeyInputs, setAiKeyInputs] = useState<{ anthropic: string; openai: string; gemini: string }>({
     anthropic: '', openai: '', gemini: '',
   })
@@ -5755,6 +5791,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
   const [excludeCategoriesLastClickedIndex, setExcludeCategoriesLastClickedIndex] = useState<number | null>(null)
   const [excludeCategoriesError, setExcludeCategoriesError] = useState<string | null>(null)
   const [excludeCategoriesPreview, setExcludeCategoriesPreview] = useState<ExcludedCategoryPurgePreview | null>(null)
+  const [excludeCategoriesPreviewSaved, setExcludeCategoriesPreviewSaved] = useState(false)
   const providerAvailableCategoriesQuery = useQuery<{ categories: string[] }>({
     queryKey: ['vod-provider-available-categories', excludeCategoriesProviderId],
     queryFn:  () => api.get(`/vod/providers/${excludeCategoriesProviderId}/available-categories/`).then((r) => r.data),
@@ -5779,22 +5816,29 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
   const setProviderImportExcludeCategories = useMutation({
     mutationFn: ({ id, category_names, exclude_uncategorized }: { id: number; category_names: string[]; exclude_uncategorized: boolean }) =>
       api.post(`/vod/providers/${id}/import-exclude-categories/`, { category_names, exclude_uncategorized }),
-    onSuccess: async (_data, variables) => {
+    onSuccess: async () => {
       // Awaited, not fire-and-forget -- closing the dialog before this
       // resolves let a reopen race the refetch and show stale (pre-save)
       // categories, which looked exactly like "my selection didn't stick".
       await qc.invalidateQueries({ queryKey: ['vod-providers'] })
       setExcludeCategoriesError(null)
-      if (providersQuery.data?.find((provider) => provider.id === variables.id)?.provider_type !== 'xc') {
-        setExcludeCategoriesProviderId(null)
-        return
-      }
-      const preview = await api.post(
-        `/vod/providers/${variables.id}/purge-excluded-content/`, null, { params: { dry_run: true } },
-      )
-      setExcludeCategoriesPreview(preview.data)
+      setExcludeCategoriesPreviewSaved(true)
     },
     onError: (e: any) => setExcludeCategoriesError(e?.response?.data?.detail ?? e.message ?? 'Save failed.'),
+  })
+  const previewProviderCategoryExclusions = useMutation({
+    mutationFn: ({ id, category_names, exclude_uncategorized }: { id: number; category_names: string[]; exclude_uncategorized: boolean }) =>
+      api.post(
+        `/vod/providers/${id}/purge-excluded-content/`,
+        { category_names, exclude_uncategorized },
+        { params: { dry_run: true } },
+      ),
+    onSuccess: (response) => {
+      setExcludeCategoriesPreview(response.data)
+      setExcludeCategoriesPreviewSaved(false)
+      setExcludeCategoriesError(null)
+    },
+    onError: (e: any) => setExcludeCategoriesError(e?.response?.data?.detail ?? e.message ?? 'Preview failed.'),
   })
   const applyExcludedCategoryPurge = useMutation({
     mutationFn: (id: number) =>
@@ -8705,11 +8749,12 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
                       setExcludeCategoriesProviderId(p.id)
                       setExcludeCategoriesDraft(new Set(p.import_exclude_categories))
                       setExcludeUncategorizedDraft(!!p.import_exclude_uncategorized)
+                      setExcludeCategoriesPreview(null)
+                      setExcludeCategoriesPreviewSaved(false)
                       setExcludeCategoriesSearch('')
                       setExcludeCategoriesShowFilter('all')
                       setExcludeCategoriesLastClickedIndex(null)
                       setExcludeCategoriesError(null)
-                      setExcludeCategoriesPreview(null)
                     }}
                   >
                     Exclude Categories{p.import_exclude_categories.length + (p.import_exclude_uncategorized ? 1 : 0) ? ` (${p.import_exclude_categories.length + (p.import_exclude_uncategorized ? 1 : 0)})` : ''}
@@ -8948,6 +8993,16 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
       )}
 
       {excludeCategoriesProviderId != null && (() => {
+        const selectedProvider = providersQuery.data?.find((p) => p.id === excludeCategoriesProviderId)
+        const proposedNames = Array.from(excludeCategoriesDraft).sort()
+        const previewIsCurrent = !!excludeCategoriesPreview
+          && excludeCategoriesPreview.provider_id === excludeCategoriesProviderId
+          && excludeCategoriesPreview.proposed_exclude_uncategorized === excludeUncategorizedDraft
+          && JSON.stringify(excludeCategoriesPreview.proposed_category_names) === JSON.stringify(proposedNames)
+        const addedNames = previewIsCurrent
+          ? excludeCategoriesPreview.proposed_category_names.filter((n) => !excludeCategoriesPreview.saved_category_names.includes(n)) : []
+        const allowedNames = previewIsCurrent
+          ? excludeCategoriesPreview.saved_category_names.filter((n) => !excludeCategoriesPreview.proposed_category_names.includes(n)) : []
         const allNames = providerAvailableCategoriesQuery.data?.categories ?? []
         const allNamesSet = new Set(allNames)
         // Saved exclusions can outlive the provider's own category list (renamed,
@@ -8971,8 +9026,8 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
               Exclude categories — {providersQuery.data?.find((p) => p.id === excludeCategoriesProviderId)?.name}
             </h2>
             <p className="text-sm text-muted-foreground">
-              Movies/series in a checked category get auto-archived on import, using this provider's own category
-              names. Archived, not deleted — still browsable if you change your mind.
+              Preview category changes before saving. Saving affects future imports; cleanup of existing XC content
+              requires a separate confirmation.
             </p>
             <label className="flex items-center gap-1.5 text-xs select-none border border-border rounded p-2">
               <input
@@ -9068,40 +9123,53 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
               ))}
               {!!allNames.length && !visible.length && <p className="text-muted-foreground">No categories match.</p>}
             </div>
-            {excludeCategoriesPreview && (() => {
+            {previewIsCurrent && excludeCategoriesPreview && (() => {
               const affectedSources = excludeCategoriesPreview.movie_sources_removed + excludeCategoriesPreview.series_sources_removed
               const deletedCards = excludeCategoriesPreview.movies_deleted + excludeCategoriesPreview.series_deleted
               const samples = [...excludeCategoriesPreview.sample_movies, ...excludeCategoriesPreview.sample_series]
               return (
                 <div className="rounded border border-warning/50 bg-warning/10 p-3 space-y-1.5 text-xs">
-                  <p className="font-medium">Cleanup preview — nothing has been deleted</p>
-                  <p>
-                    {affectedSources} stored source{affectedSources === 1 ? '' : 's'} match the saved exclusions.
-                    Applying cleanup would delete {deletedCards} card{deletedCards === 1 ? '' : 's'} left with no other source.
-                  </p>
+                  <p className="font-medium">Category change preview — nothing has been deleted</p>
+                  <p>{excludeCategoriesPreviewSaved ? 'Exclusions saved.' : 'Proposed exclusions have not been saved.'}</p>
+                  <p>Newly excluded: {addedNames.length ? addedNames.join(', ') : 'none'}{excludeUncategorizedDraft && !excludeCategoriesPreview.saved_exclude_uncategorized ? ', Uncategorized' : ''}</p>
+                  <p>Allowed again: {allowedNames.length ? allowedNames.join(', ') : 'none'}{!excludeUncategorizedDraft && excludeCategoriesPreview.saved_exclude_uncategorized ? ', Uncategorized' : ''}</p>
+                  {selectedProvider?.provider_type === 'xc' ? <p>
+                    {affectedSources} stored source{affectedSources === 1 ? '' : 's'} match the proposed exclusions.
+                    Cleanup would remove {excludeCategoriesPreview.episode_sources_removed} episode source(s) and
+                    delete {deletedCards} card{deletedCards === 1 ? '' : 's'} left with no other source.
+                  </p> : <p>Existing content is not cleaned up for this provider type.</p>}
                   {!!samples.length && <p className="text-muted-foreground">Examples: {samples.join(', ')}</p>}
-                  <p className="text-muted-foreground">Future imports skip saved exclusions, so applied items are not recreated.</p>
+                  <p className="text-muted-foreground">Saving does not delete stored content. XC cleanup is a separate action.</p>
                 </div>
               )
             })()}
             {excludeCategoriesError && <p className="text-xs text-destructive">{excludeCategoriesError}</p>}
             <div className="flex justify-end gap-2 pt-2">
               <Button size="sm" variant="outline" onClick={() => setExcludeCategoriesProviderId(null)}>Close</Button>
-              {excludeCategoriesPreview && (excludeCategoriesPreview.movie_sources_removed + excludeCategoriesPreview.series_sources_removed > 0) && (
+              {previewIsCurrent && excludeCategoriesPreviewSaved && selectedProvider?.provider_type === 'xc' && excludeCategoriesPreview && (excludeCategoriesPreview.movie_sources_removed + excludeCategoriesPreview.series_sources_removed > 0) && (
                 <Button
                   size="sm"
                   disabled={applyExcludedCategoryPurge.isPending}
-                  onClick={() => applyExcludedCategoryPurge.mutate(excludeCategoriesProviderId)}
+                  onClick={() => askConfirm('Remove the previewed sources from saved excluded categories? Cards with no remaining source will be deleted.', () => applyExcludedCategoryPurge.mutate(excludeCategoriesProviderId))}
                 >
                   {applyExcludedCategoryPurge.isPending ? <Loader2 size={12} className="animate-spin" /> : 'Apply cleanup'}
                 </Button>
               )}
               <Button
                 size="sm"
-                disabled={setProviderImportExcludeCategories.isPending}
-                onClick={() => setProviderImportExcludeCategories.mutate({ id: excludeCategoriesProviderId, category_names: Array.from(excludeCategoriesDraft), exclude_uncategorized: excludeUncategorizedDraft })}
+                disabled={!selectedProvider || previewProviderCategoryExclusions.isPending || setProviderImportExcludeCategories.isPending || (previewIsCurrent && excludeCategoriesPreviewSaved)}
+                onClick={() => {
+                  if (previewIsCurrent && excludeCategoriesPreview) {
+                    setProviderImportExcludeCategories.mutate({ id: excludeCategoriesProviderId, category_names: excludeCategoriesPreview.proposed_category_names, exclude_uncategorized: excludeCategoriesPreview.proposed_exclude_uncategorized })
+                  } else if (selectedProvider?.provider_type === 'xc') {
+                    previewProviderCategoryExclusions.mutate({ id: excludeCategoriesProviderId, category_names: proposedNames, exclude_uncategorized: excludeUncategorizedDraft })
+                  } else {
+                    setExcludeCategoriesPreview({ dry_run: true, provider_id: excludeCategoriesProviderId, saved_category_names: selectedProvider?.import_exclude_categories ?? [], saved_exclude_uncategorized: !!selectedProvider?.import_exclude_uncategorized, proposed_category_names: proposedNames, proposed_exclude_uncategorized: excludeUncategorizedDraft, movie_sources_removed: 0, series_sources_removed: 0, episode_sources_removed: 0, movies_deleted: 0, series_deleted: 0, sample_movies: [], sample_series: [] })
+                    setExcludeCategoriesPreviewSaved(false)
+                  }
+                }}
               >
-                {setProviderImportExcludeCategories.isPending ? <Loader2 size={12} className="animate-spin" /> : 'Save & Preview'}
+                {previewProviderCategoryExclusions.isPending || setProviderImportExcludeCategories.isPending ? <Loader2 size={12} className="animate-spin" /> : previewIsCurrent ? excludeCategoriesPreviewSaved ? 'Saved' : 'Confirm & save exclusions' : 'Preview changes'}
               </Button>
             </div>
           </div>
@@ -9117,12 +9185,20 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.28fr)_minmax(0,1fr)] items-stretch">
         <SectionCard title="Import Language Exclusion" icon={<Trash2 size={14} />}>
           <p className="text-xs text-muted-foreground">
-            Auto-archives matching movies/series the moment they're imported (or re-imported) — global across every
-            provider, since the languages you don't want almost never depend on which provider it came from. Per-provider
-            category exclusion is the "Exclude Categories" button on each provider above. Same rule either way: it
-            archives (still browsable/playable/categorizable if you change your mind), never deletes, and never
-            overrides an item you've manually un-archived.
+            Skips matching movies/series on future provider scans — global across XC, Plex, Emby/Jellyfin, and library
+            imports. Saving this policy does not delete sources or change existing catalog cards. Per-provider category
+            exclusion remains separate under each provider's "Exclude Categories" button.
           </p>
+          <p className="text-xs text-muted-foreground">
+            Import and playback policies are independent. If a code is selected here and enabled for playback, import
+            exclusion wins for future scans; matching sources already stored remain playback-eligible until the separate
+            retroactive policy is previewed and applied.
+          </p>
+          {importPlaybackLanguageConflicts.length > 0 && (
+            <p className="text-xs text-amber-700 dark:text-amber-300 border border-amber-500/40 rounded p-2">
+              Policy overlap: {importPlaybackLanguageConflicts.join(', ')} {importPlaybackLanguageConflicts.length === 1 ? 'is' : 'are'} excluded from future imports but enabled for playback of stored sources.
+            </p>
+          )}
           {allLanguageCodes.length > 0 ? (
             <>
               <div className="flex items-center gap-1.5">
@@ -9170,7 +9246,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
                     />
                     <span className="font-mono">{c.code}</span>
                     {LANGUAGE_CODE_NAMES[c.code] && <span className="text-muted-foreground">— {LANGUAGE_CODE_NAMES[c.code]}</span>}
-                    <span className="text-muted-foreground ml-auto">{c.count > 0 ? `${c.count} title${c.count === 1 ? '' : 's'}` : 'not currently in pool'}</span>
+                    <span className="text-muted-foreground ml-auto">{c.count > 0 ? `${c.count} known title record${c.count === 1 ? '' : 's'}` : 'no known title records'}</span>
                   </label>
                 ))}
                 {visibleLanguageCodes.length === 0 && <p className="text-muted-foreground">No languages match.</p>}
@@ -9192,7 +9268,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
             )}
           >
             {saveImportLanguageExclusion.isPending ? <Loader2 size={12} className="animate-spin mr-1" /> : null}
-            Save selected languages
+            Save import exclusions
           </Button>
           <label className="flex items-center gap-1.5 text-xs">
             <input
@@ -9205,50 +9281,63 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
           <div className="flex items-center gap-1.5 pt-1">
             <Button
               size="sm" variant="outline"
-              disabled={applyImportExclusionsNow.isPending || applyExclusionsJobQuery.data?.status === 'running'}
-              onClick={() => askConfirm('Re-import every active provider now to apply the current exclusion rules across your existing catalog? For a large catalog this can take a while.', () => applyImportExclusionsNow.mutate())}
+              disabled={previewImportPolicy.isPending || applyImportPolicy.isPending}
+              onClick={() => previewImportPolicy.mutate()}
             >
-              {applyImportExclusionsNow.isPending || applyExclusionsJobQuery.data?.status === 'running' ? <Loader2 size={12} className="animate-spin mr-1" /> : <RefreshCw size={12} className="mr-1" />}
-              Apply rules to existing catalog now
+              {previewImportPolicy.isPending ? <Loader2 size={12} className="animate-spin mr-1" /> : <RefreshCw size={12} className="mr-1" />}
+              Preview existing catalog impact
             </Button>
-            {applyExclusionsJobQuery.data?.status === 'running' && (
-              <span className="text-xs text-muted-foreground">
-                {applyExclusionsJobQuery.data.phase === 'finalizing'
-                  ? `All ${applyExclusionsJobQuery.data.total} provider(s) synced — finalizing…`
-                  : <>
-                      Provider {Math.min(applyExclusionsJobQuery.data.completed + 1, applyExclusionsJobQuery.data.total)} of {applyExclusionsJobQuery.data.total}
-                      {applyExclusionsJobQuery.data.current_provider ? ` — syncing ${applyExclusionsJobQuery.data.current_provider}…` : '…'}
-                    </>}
-              </span>
-            )}
-            {applyExclusionsJobQuery.data?.status === 'error' && (
-              <span className="text-xs text-destructive">Failed: {applyExclusionsJobQuery.data.error}</span>
-            )}
           </div>
-          {applyExclusionsJobQuery.data?.status === 'done' && !!applyExclusionsJobQuery.data.results.length && (
+          {previewImportPolicy.isError && <p className="text-xs text-destructive">Preview failed.</p>}
+          {applyImportPolicy.isError && <p className="text-xs text-destructive">Apply failed.</p>}
+          {importPolicyPreview && (
             <div className="text-xs border border-border rounded p-2 space-y-1">
+              <p className="font-medium">{importPolicyApplied ? 'Applied' : 'Preview — no changes made'}</p>
               <p className="text-muted-foreground">
-                Done — {applyExclusionsJobQuery.data.results.length} provider(s), {
-                  applyExclusionsJobQuery.data.results.reduce((n, r) => n + (r.movies_archived ?? 0) + (r.series_archived ?? 0), 0)
-                } newly archived and {
-                  applyExclusionsJobQuery.data.results.reduce((n, r) => n + (r.movies_unarchived ?? 0) + (r.series_unarchived ?? 0), 0)
-                } restored (no longer matched) by the current rules.
+                {importPolicyPreview.sources.excluded} of {importPolicyPreview.sources.total} stored movie/show sources match at least one import rule; {importPolicyPreview.sources.allowed} remain allowed.
               </p>
-              {applyExclusionsJobQuery.data.results.map((r) => (
-                <p key={r.provider} className="text-muted-foreground">
-                  {r.provider}: {r.error
-                    ? <span className="text-destructive">{r.error}</span>
-                    : <>{(r.movies_archived ?? 0) + (r.series_archived ?? 0)} archived · {(r.movies_unarchived ?? 0) + (r.series_unarchived ?? 0)} restored · {(r.movies_matched ?? 0) + (r.series_matched ?? 0)} matched · {(r.movies_created ?? 0) + (r.series_created ?? 0)} new</>}
+              <p className="text-muted-foreground">
+                Cards: {importPolicyPreview.movies.cards_archived} movies + {importPolicyPreview.series.cards_archived} shows {importPolicyApplied ? 'archived' : 'would be archived'}; {importPolicyPreview.movies.cards_restored} movies + {importPolicyPreview.series.cards_restored} shows {importPolicyApplied ? 'restored' : 'would be restored'}.
+              </p>
+              <p className="text-muted-foreground">
+                Manual archives unchanged: {importPolicyPreview.movies.manual_cards_unchanged + importPolicyPreview.series.manual_cards_unchanged}. Cards with an allowed source stay active. No cards, sources, or files are deleted.
+              </p>
+              {Object.entries(importPolicyPreview.sources.provider_types).map(([providerType, counts]) => (
+                <p key={providerType} className="text-muted-foreground">
+                  {providerType}: {counts.excluded} excluded / {counts.allowed} allowed stored sources
                 </p>
               ))}
+              {[...importPolicyPreview.movies.archive_samples, ...importPolicyPreview.series.archive_samples].length > 0 && (
+                <div className="pt-1">
+                  <p className="font-medium">Archive samples</p>
+                  {[...importPolicyPreview.movies.archive_samples, ...importPolicyPreview.series.archive_samples].slice(0, 10).map((sample) => (
+                    <p key={`${sample.id}-${sample.name}`} className="text-muted-foreground truncate" title={sample.reasons.join(', ')}>
+                      {sample.name} — {sample.sources} source{sample.sources === 1 ? '' : 's'} — {sample.reasons.join(', ')}
+                    </p>
+                  ))}
+                </div>
+              )}
+              {!importPolicyApplied && (
+                <Button
+                  size="sm"
+                  disabled={applyImportPolicy.isPending}
+                  onClick={() => askConfirm(
+                    `Archive ${importPolicyPreview.movies.cards_archived + importPolicyPreview.series.cards_archived} card(s) and restore ${importPolicyPreview.movies.cards_restored + importPolicyPreview.series.cards_restored} card(s) using the previewed import policy? Stored sources and files are preserved; manual archives are untouched.`,
+                    () => importPolicyPreview.preview_token && applyImportPolicy.mutate(importPolicyPreview.preview_token),
+                  )}
+                >
+                  {applyImportPolicy.isPending ? <Loader2 size={12} className="animate-spin mr-1" /> : null}
+                  Apply previewed policy
+                </Button>
+              )}
             </div>
           )}
         </SectionCard>
         <SectionCard title="Enabled Playback Languages" icon={<Play size={14} />}>
           <p className="text-xs text-muted-foreground">
             This is a different filter from "Import Language Exclusion". That one decides what gets imported in
-            the first place, so it only affects titles going forward (or when you click "Apply rules to existing
-            catalog now"). This one is a live backstop on top of everything already in the catalog: it gates which
+            the first place, so it only affects titles going forward unless you preview and explicitly apply the
+            saved import policy to existing cards. This one is a live backstop on top of everything already in the catalog: it gates which
             language a movie/episode/export/failover is allowed to stream from right now, regardless of import
             history. Checking a language back on instantly makes any matching source eligible again — no re-import
             needed. Unchecking one instantly removes eligibility for sources in that language, which can take a title
@@ -9259,6 +9348,11 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
             cards with no checked source are archived automatically. Sources remain listed so a language can be
             reviewed or enabled later, while cards that also have an enabled-language source stay active.
           </p>
+          {importPlaybackLanguageConflicts.length > 0 && (
+            <p className="text-xs text-amber-700 dark:text-amber-300 border border-amber-500/40 rounded p-2">
+              Policy overlap: {importPlaybackLanguageConflicts.join(', ')} can play from stored sources, but future matching items are skipped by Import Language Exclusion.
+            </p>
+          )}
           <div className="flex items-center gap-1.5">
             <input
               className={inputCls('flex-1')}
@@ -9319,11 +9413,9 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
         </SectionCard>
         <SectionCard title="Import Country Exclusion" icon={<Trash2 size={14} />}>
           <p className="text-xs text-muted-foreground">
-            Sibling to Import Language Exclusion, same rule either way (archives on import, never deletes, never
-            overrides a manual un-archive) — but keyed on a title's trailing "(XX)" country-of-origin tag instead of a
-            leading language prefix. Useful for an internationally-franchised show that imports several genuinely
-            different country editions under the same base title — check the ones you don't want and only those
-            editions get auto-archived, the rest of the catalog is untouched.
+            Sibling to Import Language Exclusion, but keyed on a source title's trailing "(XX)" country tag instead
+            of its language code. Matching items are skipped on future imports. Existing stored cards change only
+            through the shared preview-and-apply control, which preserves sources and manual archive decisions.
           </p>
           {allCountryCodes.length > 0 ? (
             <>

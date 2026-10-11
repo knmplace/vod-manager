@@ -202,6 +202,29 @@ def test_route_previews_then_applies_using_saved_exclusions(db):
     assert db.get_movie_by_name_year("Nordic Music Video", 2001) is None
 
 
+def test_proposed_preview_does_not_save_or_allow_cleanup_before_save(db):
+    import asyncio
+    import pytest
+    from fastapi import HTTPException
+    import vod_routes
+
+    provider_id = db.upsert_provider("prov1", "http://example.com", "u", "p", provider_type="xc")
+    _import_movie(db, provider_id, "Nordic Music Video", "s-1", "NORDIC MUSIC")
+    proposal = vod_routes.ProviderImportExcludeCategoriesRequest(category_names=["NORDIC MUSIC"], exclude_uncategorized=False)
+
+    preview = asyncio.run(vod_routes.purge_excluded_content(provider_id, body=proposal))
+
+    assert preview["provider_id"] == provider_id
+    assert preview["saved_category_names"] == []
+    assert preview["proposed_category_names"] == ["NORDIC MUSIC"]
+    assert preview["movies_deleted"] == 1
+    assert db.get_provider(provider_id)["import_exclude_categories"] == []
+    assert db.get_movie_by_name_year("Nordic Music Video", 2001) is not None
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(vod_routes.purge_excluded_content(provider_id, dry_run=False, body=proposal))
+    assert exc.value.status_code == 400
+
+
 class _NordicFakeClient:
     def __init__(self, _provider):
         pass

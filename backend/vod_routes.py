@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -128,6 +130,10 @@ class ImportLanguageExclusionRequest(BaseModel):
 
 class ImportCountryExclusionRequest(BaseModel):
     exclude_country_codes: list[str] = []
+
+
+class ImportExclusionsApplyRequest(BaseModel):
+    preview_token: str
 
 
 class EnabledLanguagesRequest(BaseModel):
@@ -1024,6 +1030,59 @@ async def list_import_country_exclusion_codes():
     return vod_db.list_all_pool_country_suffixes()
 
 
+def _current_import_exclusion_policy() -> tuple[list[str], bool, list[str]]:
+    language = get_import_language_exclusion()
+    return (
+        language["exclude_prefixes"],
+        language["exclude_non_latin"],
+        get_import_country_exclusion(),
+    )
+
+
+def _import_exclusion_preview_token(policy: tuple[list[str], bool, list[str]]) -> str:
+    prefixes, non_latin, countries = policy
+    payload = {
+        "exclude_prefixes": sorted({str(code).strip().upper() for code in prefixes if str(code).strip()}),
+        "exclude_non_latin": bool(non_latin),
+        "exclude_country_codes": sorted({str(code).strip().upper() for code in countries if str(code).strip()}),
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+@router.get("/import-exclusions/preview/", dependencies=_GUARDS)
+async def preview_import_exclusions():
+    """Read-only impact report for the currently saved import policy."""
+    policy = _current_import_exclusion_policy()
+    prefixes, non_latin, countries = policy
+    result = await asyncio.to_thread(
+        vod_db.apply_import_exclusion_policy,
+        prefixes,
+        non_latin,
+        countries,
+        dry_run=True,
+    )
+    result["preview_token"] = _import_exclusion_preview_token(policy)
+    return result
+
+
+@router.post("/import-exclusions/apply/", dependencies=_GUARDS)
+async def apply_import_exclusions(body: ImportExclusionsApplyRequest):
+    """Apply the previewed policy without deleting cards or source rows."""
+    policy = _current_import_exclusion_policy()
+    if body.preview_token != _import_exclusion_preview_token(policy):
+        raise HTTPException(409, detail="Import policy changed after preview; preview again before applying")
+    prefixes, non_latin, countries = policy
+    result = await asyncio.to_thread(
+        vod_db.apply_import_exclusion_policy,
+        prefixes,
+        non_latin,
+        countries,
+        dry_run=False,
+    )
+    await vod_importer.resweep_smart_categories()
+    return result
+
+
 @router.post("/import-exclusions/apply-now/", dependencies=_GUARDS)
 async def apply_import_exclusions_now():
     """Retroactively applies the current global language rules and every
@@ -1662,8 +1721,12 @@ async def set_provider_import_exclude_categories(provider_id: int, body: Provide
 
 
 @router.post("/providers/{provider_id}/purge-excluded-content/", dependencies=_GUARDS)
-async def purge_excluded_content(provider_id: int, dry_run: bool = True):
-    """Preview by default; delete legacy excluded sources only on apply."""
+async def purge_excluded_content(
+    provider_id: int,
+    dry_run: bool = True,
+    body: Optional[ProviderImportExcludeCategoriesRequest] = None,
+):
+    """Preview proposed exclusions; delete only under already-saved rules."""
     provider = vod_db.get_provider(provider_id)
     if not provider:
         raise HTTPException(404, detail="provider not found")
@@ -1671,14 +1734,23 @@ async def purge_excluded_content(provider_id: int, dry_run: bool = True):
     # carry no category name, so "exclude uncategorized" could match all of them.
     if (provider.get("provider_type") or "xc") != "xc":
         raise HTTPException(400, detail="purge-excluded-content supports XC providers only")
+    if not dry_run and body is not None:
+        raise HTTPException(400, detail="Cleanup apply uses saved exclusions; save the previewed settings first")
+    category_names = body.category_names if body is not None else (provider.get("import_exclude_categories") or [])
+    exclude_uncategorized = body.exclude_uncategorized if body is not None else bool(provider.get("import_exclude_uncategorized"))
     result = await asyncio.to_thread(
         vod_db.purge_excluded_category_sources, provider_id,
-        provider.get("import_exclude_categories") or [],
-        bool(provider.get("import_exclude_uncategorized")),
+        category_names,
+        exclude_uncategorized,
         dry_run=dry_run,
     )
     result.pop("affected_movie_ids", None)
     result.pop("affected_series_ids", None)
+    result["provider_id"] = provider_id
+    result["saved_category_names"] = sorted(set(provider.get("import_exclude_categories") or []))
+    result["saved_exclude_uncategorized"] = bool(provider.get("import_exclude_uncategorized"))
+    result["proposed_category_names"] = sorted(set(category_names))
+    result["proposed_exclude_uncategorized"] = bool(exclude_uncategorized)
     return result
 
 
@@ -1763,7 +1835,7 @@ async def _run_provider_catalog_import(provider_id: int) -> dict:
     track_lifecycle = provider.get("provider_type") != "xc"
     run_id = None
     if track_lifecycle:
-        run_id = vod_importer.mark_import_running(provider_id, provider["name"])
+        run_id = await asyncio.to_thread(vod_importer.mark_import_running, provider_id, provider["name"])
     try:
         if provider.get("provider_type") == "plex":
             result = await plex_importer.import_plex_library(provider_id)
@@ -1779,7 +1851,10 @@ async def _run_provider_catalog_import(provider_id: int) -> dict:
             result = await vod_importer.import_provider_catalog(provider_id, schedule_enrichment=False)
     except Exception as exc:
         if track_lifecycle:
-            vod_importer.mark_import_finished(provider_id, vod_importer.import_error_detail(exc), run_id=run_id)
+            await asyncio.to_thread(
+                vod_importer.mark_import_finished, provider_id,
+                vod_importer.import_error_detail(exc), run_id=run_id,
+            )
         # exc_info: some failures here raise with an empty str() (e.g. a bare
         # TimeoutError), which used to log as "failed: " with nothing else
         # to go on -- the full traceback is the only way to actually
@@ -1799,7 +1874,7 @@ async def _run_provider_catalog_import(provider_id: int) -> dict:
         series_ids = vod_importer.merge_changed_ids(set(), result, "changed_series_ids")
         await vod_importer.resweep_smart_categories(movie_ids, series_ids)
     if track_lifecycle:
-        vod_importer.mark_import_finished(provider_id, run_id=run_id, result=result)
+        await asyncio.to_thread(vod_importer.mark_import_finished, provider_id, run_id=run_id, result=result)
     return result
 
 
@@ -1831,7 +1906,7 @@ async def _manual_import_worker() -> None:
             # An unchanged catalog has no automatic reconciliation work to
             # schedule. Still hand the user a definitive ready state rather
             # than leaving the header on the earlier import phase forever.
-            vod_importer.mark_catalog_workflow_ready()
+            await asyncio.to_thread(vod_importer.mark_catalog_workflow_ready)
     finally:
         _MANUAL_IMPORT_TASK = None
 

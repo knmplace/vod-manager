@@ -9,8 +9,8 @@ def test_country_suffixes_are_classified_for_language_filter():
     assert vod_db._source_language("A show (2024) (US)") == "EN"
 
 
-def test_country_suffixes_are_excluded_at_import_when_not_enabled():
-    lang = {"enabled_languages": ["EN", "ES"], "exclude_non_latin": False}
+def test_country_suffix_language_codes_respect_explicit_import_exclusions():
+    lang = {"exclude_prefixes": ["PL", "DE"], "exclude_non_latin": False}
     assert vod_importer._should_auto_archive(
         "#BringBackAlice (PL)", lang=lang, raw_name="#BringBackAlice (PL)"
     )

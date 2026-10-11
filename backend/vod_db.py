@@ -1148,6 +1148,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # original owner (language versus category) cannot be inferred safely.
         ("movies", "review_excluded_language", "INTEGER NOT NULL DEFAULT 0"),
         ("series", "review_excluded_language", "INTEGER NOT NULL DEFAULT 0"),
+        # Independent owner for the explicit retroactive import-language /
+        # country / non-Latin policy. Multiple automatic owners may overlap;
+        # a card is restored only after every owner releases it.
+        ("movies", "review_excluded_import_policy", "INTEGER NOT NULL DEFAULT 0"),
+        ("series", "review_excluded_import_policy", "INTEGER NOT NULL DEFAULT 0"),
         ("providers", "import_exclude_categories", "TEXT"),
         ("categories", "is_active", "INTEGER NOT NULL DEFAULT 1"),
         ("categories", "schedule_start_mmdd", "TEXT"),
@@ -1445,16 +1450,21 @@ def create_catalog_sync_run(provider_id: int | None, provider_name: str, run_typ
     """Create the durable user-facing report before a provider import starts."""
     now = _now()
     conn = _connect()
-    cur = conn.execute(
-        """INSERT INTO catalog_sync_runs
-           (provider_id, provider_name, run_type, queued_at, status, created_at)
-           VALUES (?,?,?,?,?,?)""",
-        (provider_id, provider_name, run_type, now, "running", now),
-    )
-    _commit_with_retry(conn)
-    run_id = int(cur.lastrowid)
-    conn.close()
-    return run_id
+    try:
+        cur = conn.execute(
+            """INSERT INTO catalog_sync_runs
+               (provider_id, provider_name, run_type, queued_at, status, created_at)
+               VALUES (CASE WHEN EXISTS (SELECT 1 FROM providers WHERE id=?) THEN ? ELSE NULL END,
+                       ?,?,?,?,?)""",
+            (provider_id, provider_id, provider_name, run_type, now, "running", now),
+        )
+        _commit_with_retry(conn)
+        return int(cur.lastrowid)
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def update_catalog_sync_run(run_id: int, **fields) -> None:
@@ -1468,10 +1478,15 @@ def update_catalog_sync_run(run_id: int, **fields) -> None:
     if not values:
         return
     conn = _connect()
-    assignments = ", ".join(f"{key}=?" for key in values)
-    conn.execute(f"UPDATE catalog_sync_runs SET {assignments} WHERE id=?", (*values.values(), run_id))
-    _commit_with_retry(conn)
-    conn.close()
+    try:
+        assignments = ", ".join(f"{key}=?" for key in values)
+        conn.execute(f"UPDATE catalog_sync_runs SET {assignments} WHERE id=?", (*values.values(), run_id))
+        _commit_with_retry(conn)
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def close_orphaned_catalog_sync_runs() -> int:
@@ -1483,17 +1498,22 @@ def close_orphaned_catalog_sync_runs() -> int:
     """
     with _WRITE_LOCK:
         conn = _connect()
-        ready = conn.execute(
-            """UPDATE catalog_sync_runs SET status='ready', ready_at=COALESCE(ready_at, import_finished_at)
-               WHERE status IN ('running','queued') AND import_finished_at IS NOT NULL"""
-        ).rowcount
-        failed = conn.execute(
-            """UPDATE catalog_sync_runs SET status='failed', error='interrupted by restart', ready_at=?
-               WHERE status IN ('running','queued')""",
-            (_now(),),
-        ).rowcount
-        _commit_with_retry(conn)
-        conn.close()
+        try:
+            ready = conn.execute(
+                """UPDATE catalog_sync_runs SET status='ready', ready_at=COALESCE(ready_at, import_finished_at)
+                   WHERE status IN ('running','queued') AND import_finished_at IS NOT NULL"""
+            ).rowcount
+            failed = conn.execute(
+                """UPDATE catalog_sync_runs SET status='failed', error='interrupted by restart', ready_at=?
+                   WHERE status IN ('running','queued')""",
+                (_now(),),
+            ).rowcount
+            _commit_with_retry(conn)
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
     return ready + failed
 
 def _catalog_sync_row_detail(conn: sqlite3.Connection, content_type: str, row: sqlite3.Row, summary: dict | None) -> dict:
@@ -9603,13 +9623,15 @@ def bulk_import_plex_movies(provider_id: int, items: list[dict]) -> dict:
                     source_new = _source_is_new(conn, "movie_sources", "movie_id", provider_id,
                                                 "provider_stream_id", item["provider_stream_id"], movie_id,
                                                 item.get("file_size_bytes"))
+                    raw_name = item.get("raw_name") or item.get("name") or ""
                     conn.execute(
-                        """INSERT INTO movie_sources (movie_id, provider_id, provider_stream_id, container_extension, plex_rating_key, file_size_bytes, provider_category_name, added_at, last_seen_at)
-                           VALUES (?,?,?,?,?,?,?,?,?)
+                        """INSERT INTO movie_sources (movie_id, provider_id, provider_stream_id, container_extension, plex_rating_key, file_size_bytes, provider_category_name, raw_name, language, added_at, last_seen_at)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?)
                            ON CONFLICT(provider_id, provider_stream_id) DO UPDATE SET
                                movie_id=excluded.movie_id, last_seen_at=excluded.last_seen_at, plex_rating_key=excluded.plex_rating_key,
-                               file_size_bytes=excluded.file_size_bytes, provider_category_name=excluded.provider_category_name""",
-                        (movie_id, provider_id, item["provider_stream_id"], item.get("container_extension", "mp4"), item.get("plex_rating_key"), item.get("file_size_bytes"), item.get("provider_category_name"), now, now),
+                               file_size_bytes=excluded.file_size_bytes, provider_category_name=excluded.provider_category_name,
+                               raw_name=excluded.raw_name, language=excluded.language""",
+                        (movie_id, provider_id, item["provider_stream_id"], item.get("container_extension", "mp4"), item.get("plex_rating_key"), item.get("file_size_bytes"), item.get("provider_category_name"), raw_name, _source_language(raw_name), now, now),
                     )
                     created += did_create
                     matched += did_match
@@ -9805,13 +9827,14 @@ def bulk_import_plex_series(provider_id: int, items: list[dict]) -> dict:
                     if item.get("provider_series_id") is not None:
                         series_changed = _source_is_new(conn, "series_sources", "series_id", provider_id, "provider_series_id",
                                                         item.get("provider_series_id"), series_id) or series_changed
+                        raw_name = item.get("raw_name") or item.get("name") or ""
                         conn.execute(
-                            "INSERT INTO series_sources (series_id, provider_id, provider_series_id, provider_category_name, raw_name, added_at, last_seen_at) "
-                            "VALUES (?,?,?,?,?,?,?) "
+                            "INSERT INTO series_sources (series_id, provider_id, provider_series_id, provider_category_name, raw_name, language, added_at, last_seen_at) "
+                            "VALUES (?,?,?,?,?,?,?,?) "
                             "ON CONFLICT(provider_id, provider_series_id) DO UPDATE SET "
                             "series_id=excluded.series_id, provider_category_name=excluded.provider_category_name, "
-                            "last_seen_at=excluded.last_seen_at",
-                            (series_id, provider_id, item.get("provider_series_id"), item.get("provider_category_name"), item.get("name"), now, now),
+                            "raw_name=excluded.raw_name, language=excluded.language, last_seen_at=excluded.last_seen_at",
+                            (series_id, provider_id, item.get("provider_series_id"), item.get("provider_category_name"), raw_name, _source_language(raw_name), now, now),
                         )
 
                     for ep in item.get("episodes", []):
@@ -12294,24 +12317,27 @@ def archive_disabled_language_content(
                 movie_where += f" AND id IN ({','.join('?' * len(movie_ids))})"
                 movie_params = list(movie_ids)
         for row in conn.execute(
-            f"SELECT id, review_excluded, review_excluded_language FROM movies WHERE {movie_where}", movie_params
+            f"SELECT id, review_excluded, review_excluded_language, review_excluded_import_policy "
+            f"FROM movies WHERE {movie_where}", movie_params
         ).fetchall():
             langs = _source_languages(conn, "movie_sources", "movie_id", row["id"])
             eligible = bool(langs & enabled)
-            if not eligible and not row["review_excluded"]:
+            if not eligible and not row["review_excluded_language"]:
                 if not dry_run:
                     conn.execute(
                         "UPDATE movies SET review_excluded=1, review_excluded_language=1 WHERE id=?",
                         (row["id"],),
                     )
-                movies_archived += 1
+                if not row["review_excluded"]:
+                    movies_archived += 1
             elif eligible and row["review_excluded_language"]:
-                if row["review_excluded"]:
+                will_restore = bool(row["review_excluded"] and not row["review_excluded_import_policy"])
+                if will_restore:
                     movies_unarchived += 1
                 if not dry_run:
                     conn.execute(
-                        "UPDATE movies SET review_excluded=0, review_excluded_language=0 WHERE id=?",
-                        (row["id"],),
+                        "UPDATE movies SET review_excluded=?, review_excluded_language=0 WHERE id=?",
+                        (0 if will_restore else row["review_excluded"], row["id"]),
                     )
 
         series_archived = 0
@@ -12325,24 +12351,27 @@ def archive_disabled_language_content(
                 series_where += f" AND id IN ({','.join('?' * len(series_ids))})"
                 series_params = list(series_ids)
         for row in conn.execute(
-            f"SELECT id, review_excluded, review_excluded_language FROM series WHERE {series_where}", series_params
+            f"SELECT id, review_excluded, review_excluded_language, review_excluded_import_policy "
+            f"FROM series WHERE {series_where}", series_params
         ).fetchall():
             langs = _source_languages(conn, "series_sources", "series_id", row["id"])
             eligible = bool(langs & enabled)
-            if not eligible and not row["review_excluded"]:
+            if not eligible and not row["review_excluded_language"]:
                 if not dry_run:
                     conn.execute(
                         "UPDATE series SET review_excluded=1, review_excluded_language=1 WHERE id=?",
                         (row["id"],),
                     )
-                series_archived += 1
+                if not row["review_excluded"]:
+                    series_archived += 1
             elif eligible and row["review_excluded_language"]:
-                if row["review_excluded"]:
+                will_restore = bool(row["review_excluded"] and not row["review_excluded_import_policy"])
+                if will_restore:
                     series_unarchived += 1
                 if not dry_run:
                     conn.execute(
-                        "UPDATE series SET review_excluded=0, review_excluded_language=0 WHERE id=?",
-                        (row["id"],),
+                        "UPDATE series SET review_excluded=?, review_excluded_language=0 WHERE id=?",
+                        (0 if will_restore else row["review_excluded"], row["id"]),
                     )
 
         if not dry_run:
@@ -12354,6 +12383,187 @@ def archive_disabled_language_content(
             "movies_unarchived": movies_unarchived,
             "series_archived": series_archived,
             "series_unarchived": series_unarchived,
+        }
+
+
+def apply_import_exclusion_policy(
+    exclude_prefixes: list[str],
+    exclude_non_latin: bool,
+    exclude_country_codes: list[str],
+    *,
+    dry_run: bool = True,
+    sample_limit: int = 10,
+) -> dict:
+    """Preview or apply import language/country rules to stored cards.
+
+    Sources are evaluated independently. A card is archived only when it has
+    sources and every source matches at least one exclusion. Source rows are
+    never deleted. Manual archive state is untouched, and this sweep restores
+    only the automatic ownership flag that it previously set.
+    """
+    excluded_languages = {str(code).strip().upper() for code in exclude_prefixes if str(code).strip()}
+    excluded_countries = {str(code).strip().upper() for code in exclude_country_codes if str(code).strip()}
+    sample_limit = max(0, min(int(sample_limit), 50))
+
+    def source_reasons(source, fallback_name: str) -> list[str]:
+        raw_name = (source["raw_name"] or fallback_name or "").strip()
+        language = (source["language"] or _source_language(raw_name)).strip().upper()
+        reasons = []
+        if language in excluded_languages:
+            reasons.append(f"language:{language}")
+        country = _country_suffix_code(raw_name)
+        if country and country in excluded_countries:
+            reasons.append(f"country:{country}")
+        if exclude_non_latin and _is_non_latin_name(raw_name):
+            reasons.append("non_latin")
+        return reasons
+
+    with _WRITE_LOCK:
+        conn = _connect()
+        source_counts = {
+            "total": 0,
+            "excluded": 0,
+            "allowed": 0,
+            "reason_matches": {},
+            "provider_types": {},
+        }
+        excluded_source_samples = []
+
+        def evaluate(content_type: str) -> tuple[dict, list[int], list[int]]:
+            table = "movies" if content_type == "movie" else "series"
+            source_table = "movie_sources" if content_type == "movie" else "series_sources"
+            foreign_key = "movie_id" if content_type == "movie" else "series_id"
+            rows = conn.execute(
+                f"SELECT id, name, review_excluded, review_excluded_manual, "
+                f"review_excluded_language, review_excluded_import_policy FROM {table}"
+            ).fetchall()
+            sources_by_card: dict[int, list] = {}
+            for source in conn.execute(
+                f"SELECT s.{foreign_key} AS card_id, s.raw_name, s.language, "
+                f"COALESCE(p.provider_type, 'xc') AS provider_type "
+                f"FROM {source_table} s LEFT JOIN providers p ON p.id=s.provider_id"
+            ).fetchall():
+                sources_by_card.setdefault(source["card_id"], []).append(source)
+
+            archived_ids = []
+            restored_ids = []
+            summary = {
+                "cards_evaluated": 0,
+                "cards_without_sources": 0,
+                "cards_all_sources_excluded": 0,
+                "cards_archived": 0,
+                "cards_restored": 0,
+                "manual_cards_unchanged": 0,
+                "archive_samples": [],
+                "restore_samples": [],
+            }
+            for row in rows:
+                sources = sources_by_card.get(row["id"], [])
+                if not sources:
+                    summary["cards_without_sources"] += 1
+                    continue
+                summary["cards_evaluated"] += 1
+                excluded_sources = 0
+                card_reasons: set[str] = set()
+                for source in sources:
+                    reasons = source_reasons(source, row["name"])
+                    provider_type = source["provider_type"] or "xc"
+                    provider_counts = source_counts["provider_types"].setdefault(
+                        provider_type, {"total": 0, "excluded": 0, "allowed": 0}
+                    )
+                    source_counts["total"] += 1
+                    provider_counts["total"] += 1
+                    if reasons:
+                        excluded_sources += 1
+                        source_counts["excluded"] += 1
+                        provider_counts["excluded"] += 1
+                        card_reasons.update(reasons)
+                        for reason in reasons:
+                            matches = source_counts["reason_matches"]
+                            matches[reason] = matches.get(reason, 0) + 1
+                        if len(excluded_source_samples) < sample_limit:
+                            excluded_source_samples.append({
+                                "content_type": content_type,
+                                "card": row["name"],
+                                "source": source["raw_name"] or row["name"],
+                                "provider_type": provider_type,
+                                "reasons": reasons,
+                            })
+                    else:
+                        source_counts["allowed"] += 1
+                        provider_counts["allowed"] += 1
+
+                should_archive = excluded_sources == len(sources)
+                if should_archive:
+                    summary["cards_all_sources_excluded"] += 1
+                if row["review_excluded_manual"]:
+                    summary["manual_cards_unchanged"] += 1
+                    continue
+                if should_archive and not row["review_excluded_import_policy"]:
+                    archived_ids.append(row["id"])
+                    if not row["review_excluded"]:
+                        summary["cards_archived"] += 1
+                    if len(summary["archive_samples"]) < sample_limit:
+                        summary["archive_samples"].append({
+                            "id": row["id"], "name": row["name"],
+                            "sources": len(sources), "reasons": sorted(card_reasons),
+                        })
+                elif not should_archive and row["review_excluded_import_policy"]:
+                    restored_ids.append(row["id"])
+                    will_restore = bool(row["review_excluded"] and not row["review_excluded_language"])
+                    if will_restore:
+                        summary["cards_restored"] += 1
+                    if len(summary["restore_samples"]) < sample_limit:
+                        summary["restore_samples"].append({
+                            "id": row["id"], "name": row["name"], "sources": len(sources),
+                        })
+            return summary, archived_ids, restored_ids
+
+        movie_summary, movie_archive_ids, movie_restore_ids = evaluate("movie")
+        series_summary, series_archive_ids, series_restore_ids = evaluate("series")
+
+        if not dry_run:
+            now = _now()
+            for table, archive_ids, restore_ids in (
+                ("movies", movie_archive_ids, movie_restore_ids),
+                ("series", series_archive_ids, series_restore_ids),
+            ):
+                for item_id in archive_ids:
+                    conn.execute(
+                        f"UPDATE {table} SET review_excluded=1, review_excluded_import_policy=1, updated_at=? WHERE id=?",
+                        (now, item_id),
+                    )
+                for item_id in restore_ids:
+                    row = conn.execute(
+                        f"SELECT review_excluded_language FROM {table} WHERE id=?", (item_id,)
+                    ).fetchone()
+                    keep_archived = bool(row and row["review_excluded_language"])
+                    conn.execute(
+                        f"UPDATE {table} SET review_excluded=?, review_excluded_import_policy=0, updated_at=? WHERE id=?",
+                        (1 if keep_archived else 0, now, item_id),
+                    )
+
+            for placements_table, id_col, ids in (
+                ("movie_category_placements", "movie_id", movie_archive_ids),
+                ("series_category_placements", "series_id", series_archive_ids),
+            ):
+                if ids:
+                    placeholders = ",".join("?" for _ in ids)
+                    conn.execute(f"DELETE FROM {placements_table} WHERE {id_col} IN ({placeholders})", ids)
+            _commit_with_retry(conn)
+
+        conn.close()
+        return {
+            "dry_run": dry_run,
+            "policy": {
+                "exclude_prefixes": sorted(excluded_languages),
+                "exclude_country_codes": sorted(excluded_countries),
+                "exclude_non_latin": bool(exclude_non_latin),
+            },
+            "sources": source_counts,
+            "excluded_source_samples": excluded_source_samples,
+            "movies": movie_summary,
+            "series": series_summary,
         }
 
 
@@ -12387,7 +12597,9 @@ def bulk_set_review_excluded(content_type: str, ids: list[int], excluded: bool) 
         conn = _connect()
         placeholders = ",".join("?" for _ in ids)
         conn.execute(
-            f"UPDATE {table} SET review_excluded=?, review_excluded_manual=1, updated_at=? WHERE id IN ({placeholders})",
+            f"UPDATE {table} SET review_excluded=?, review_excluded_manual=1, "
+            f"review_excluded_language=0, review_excluded_import_policy=0, updated_at=? "
+            f"WHERE id IN ({placeholders})",
             (1 if excluded else 0, _now(), *ids),
         )
         if excluded:

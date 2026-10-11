@@ -4,6 +4,7 @@ real DB; only TMDB's network search is stubbed."""
 import asyncio
 import os
 
+import config
 import library_importer
 import library_matcher as lm
 
@@ -61,6 +62,24 @@ def test_imports_movie_and_episodes_with_local_paths(db, tmp_path, monkeypatch):
     assert movies["The Matrix"]["tmdb_id"] == "603"           # canonical TMDB title, id stored
     assert movies["The Matrix"]["local_file_path"] == m_path
     assert movies["Some Home Video"]["tmdb_id"] is None       # unmatched still imported, visible
+
+
+def test_future_library_import_uses_explicit_language_exclusion_not_playback(db, tmp_path, monkeypatch):
+    _stub_tmdb(monkeypatch)
+    pid, root = _mk(db, tmp_path)
+    _touch(root, "ES - Blocked Movie (2020).mkv")
+    _touch(root, "EN - Allowed Movie (2020).mkv")
+    config.save_import_language_exclusion(["ES"], False)
+    config.save_enabled_languages(["EN", "ES"])
+
+    result = asyncio.run(library_importer.import_library(pid))
+
+    assert result["files_found"] == 2
+    assert [movie["name"] for movie in _movie(db, pid)] == ["EN - Allowed Movie"]
+    conn = db._connect()
+    source = conn.execute("SELECT raw_name, language FROM movie_sources").fetchone()
+    conn.close()
+    assert dict(source) == {"raw_name": "EN - Allowed Movie", "language": "EN"}
 
 
 def test_rescan_does_not_blank_enriched_detail(db, tmp_path, monkeypatch):

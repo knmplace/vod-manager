@@ -2,6 +2,8 @@
 write one, and Apply rules must count as a catalog refresh."""
 
 import asyncio
+import sqlite3
+import time
 
 import pytest
 
@@ -79,6 +81,65 @@ def test_orphaned_running_runs_are_closed_on_startup(db):
     assert db.get_catalog_sync_run(finished)["status"] == "ready"
     assert db.get_catalog_sync_run(finished)["ready_at"] == "1000.0"
     assert db.get_catalog_sync_run(interrupted)["status"] == "failed"
+
+
+def test_missing_provider_report_keeps_name_without_foreign_key_failure(db):
+    run_id = db.create_catalog_sync_run(999999, "Removed provider")
+    run = db.get_catalog_sync_run(run_id)
+    assert run["provider_id"] is None
+    assert run["provider_name"] == "Removed provider"
+
+
+def test_failed_report_insert_releases_write_transaction(db, monkeypatch):
+    def fail_commit(_conn):
+        raise RuntimeError("report commit failed")
+
+    monkeypatch.setattr(db, "_commit_with_retry", fail_commit)
+    with pytest.raises(RuntimeError, match="report commit failed"):
+        db.create_catalog_sync_run(None, "Report")
+
+    with sqlite3.connect(db.DB_PATH, timeout=0) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.rollback()
+
+
+def test_report_failure_does_not_replace_import_result(db, monkeypatch):
+    pid = db.upsert_provider("Library F", "http://f.invalid", "u", "p", provider_type="plex")
+
+    def fail_report(*_args, **_kwargs):
+        raise RuntimeError("report unavailable")
+
+    async def importer(_provider_id):
+        return {"catalog_changed": False}
+
+    monkeypatch.setattr(db, "create_catalog_sync_run", fail_report)
+    assert asyncio.run(vod_importer.run_tracked_import(pid, importer)) == {"catalog_changed": False}
+
+
+def test_tracked_import_report_write_does_not_block_event_loop(db, monkeypatch):
+    pid = db.upsert_provider("Library G", "http://g.invalid", "u", "p", provider_type="plex")
+    original = db.create_catalog_sync_run
+
+    def slow_report(*args, **kwargs):
+        time.sleep(0.1)
+        return original(*args, **kwargs)
+
+    async def importer(_provider_id):
+        return {"catalog_changed": False}
+
+    monkeypatch.setattr(db, "create_catalog_sync_run", slow_report)
+
+    async def run():
+        start = time.monotonic()
+        async def ticker():
+            await asyncio.sleep(0.02)
+            return time.monotonic() - start
+        result, tick = await asyncio.gather(vod_importer.run_tracked_import(pid, importer), ticker())
+        return result, tick
+
+    result, tick = asyncio.run(run())
+    assert result["catalog_sync_run_id"]
+    assert tick < 0.08
 
 
 def test_apply_rules_stamps_catalog_refresh_time(db, monkeypatch):

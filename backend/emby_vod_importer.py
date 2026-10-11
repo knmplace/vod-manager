@@ -113,6 +113,7 @@ async def import_emby_library(provider_id: int) -> dict:
                     fields = emby_vod_client.extract_common_fields(item)
                     movie_items.append({
                         "name": item.get("Name", ""),
+                        "raw_name": item.get("Name", ""),
                         "year": item.get("ProductionYear"),
                         "provider_stream_id": stream_id,
                         "container_extension": container,
@@ -163,6 +164,7 @@ async def import_emby_library(provider_id: int) -> dict:
                     fields = emby_vod_client.extract_common_fields(show)
                     series_items.append({
                         "name": show.get("Name", ""),
+                        "raw_name": show.get("Name", ""),
                         "year": show.get("ProductionYear"),
                         "provider_series_id": str(series_id),
                         "genre": fields["genre"],

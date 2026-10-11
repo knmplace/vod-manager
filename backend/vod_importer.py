@@ -83,15 +83,15 @@ def _queue_catalog_enrichment_for_changes(
 
 def _current_lang_settings() -> dict:
     """Builds the `lang` dict _should_auto_archive/_row_excluded_by_rule
-    read: enabled_languages (config.get_enabled_languages(), the include-list
-    the language-prefix gate now checks membership against) merged with
-    exclude_non_latin (still config.get_import_language_exclusion(), which
-    also still backs that setting's own "Import Language Exclusion" UI card).
-    Single shared builder so every caller (XC/vod_importer.py, Plex, Emby)
-    stays in sync rather than re-deriving this merge independently."""
+    read from the independent Import Language Exclusion policy. Playback
+    eligibility is intentionally not part of this import-time decision; it is
+    enforced against stored source rows by vod_db._enabled_languages_clause.
+    Single shared builder keeps XC, Plex, Emby/Jellyfin, and library imports in
+    sync rather than letting a provider path re-derive the policy."""
+    settings = config.get_import_language_exclusion()
     return {
-        "enabled_languages": config.get_enabled_languages(),
-        "exclude_non_latin": config.get_import_language_exclusion()["exclude_non_latin"],
+        "exclude_prefixes": [str(code).strip().upper() for code in settings["exclude_prefixes"] if str(code).strip()],
+        "exclude_non_latin": settings["exclude_non_latin"],
     }
 
 
@@ -160,26 +160,19 @@ def _should_auto_archive(
     list; callers pre-fetch it once per import, None reads config."""
     check_name = raw_name if raw_name is not None else name
     lang = lang if lang is not None else _current_lang_settings()
-    # _source_language's default applies here too: a name with no recognized
-    # prefix is untagged EN/ES-convention content, not "unknown" -- without
-    # this fallback, an admin who leaves "EN" out of Enabled Playback
-    # Languages wouldn't actually exclude the untagged titles that setting
-    # counts as EN, since untagged names never match a literal prefix code.
+    # Import Language Exclusion and Enabled Playback Languages are independent
+    # controls. This import-time gate reads only the explicit exclusion list;
+    # playback eligibility is evaluated later against stored source rows. If a
+    # code is both import-excluded and playback-enabled, exclusion wins for
+    # future ingestion while already-stored sources remain playback-eligible.
     #
-    # 2026-09-11: inverted from an explicit exclude-list membership test
-    # (lang["exclude_prefixes"], a separate manually-maintained list that
-    # could silently miss a language -- "IR" was a real gap) to an explicit
-    # include-list membership test against lang["enabled_languages"]
-    # (config.get_enabled_languages(), the same "Enabled Playback Languages"
-    # list already used query-time by vod_db._enabled_languages_clause). Any
-    # language not currently enabled for playback is now excluded at import
-    # time too, with no separate exclude list to keep in sync.
     # Use the same classifier used when the source row is stored. This
     # includes trailing provider country tags such as "Title (DE)" and
     # "Title (PL)", which otherwise default to EN and are only corrected
     # later by language recompute.
     code = vod_db._source_language(raw_name if raw_name is not None else name)
-    if code not in lang["enabled_languages"]:
+    excluded_prefixes = {str(value).strip().upper() for value in lang.get("exclude_prefixes", ()) if str(value).strip()}
+    if code in excluded_prefixes:
         return True
     if lang["exclude_non_latin"] and vod_db._is_non_latin_name(raw_name if raw_name is not None else name):
         return True
@@ -928,6 +921,15 @@ def _start_catalog_workflow(provider_name: str | None, phase: str, *, queued: bo
 _RUN_PHASE_STAMPS: dict[int, dict] = {}
 
 
+def _write_catalog_report(operation, *args, **kwargs):
+    """A reporting failure must not replace an import's result or error."""
+    try:
+        return operation(*args, **kwargs)
+    except Exception:
+        logger.exception("[vod_importer] Sync History report write failed")
+        return None
+
+
 def _workflow_stamps(run_id: int | None) -> tuple[int | None, dict, bool]:
     """Return (target run, its stamp dict, whether it owns the live header)."""
     current = _CATALOG_WORKFLOW_PROGRESS.get("run_id")
@@ -952,11 +954,11 @@ def _set_catalog_workflow_phase(phase: str, *, run_id: int | None = None) -> Non
     if phase == "Preparing catalog review" and not stamps.get("reconciliation_started_at"):
         stamps["reconciliation_started_at"] = time.time()
         if target:
-            vod_db.update_catalog_sync_run(target, reconciliation_started_at=now)
+            _write_catalog_report(vod_db.update_catalog_sync_run, target, reconciliation_started_at=now)
     elif phase == "Resolving known TMDB identities" and not stamps.get("enrichment_started_at"):
         stamps["enrichment_started_at"] = time.time()
         if target:
-            vod_db.update_catalog_sync_run(target, enrichment_started_at=now)
+            _write_catalog_report(vod_db.update_catalog_sync_run, target, enrichment_started_at=now)
 
 
 def mark_catalog_workflow_ready(*, run_id: int | None = None) -> None:
@@ -977,7 +979,7 @@ def mark_catalog_workflow_ready(*, run_id: int | None = None) -> None:
             fields["reconciliation_finished_at"] = str(stamps["reconciliation_finished_at"])
         if stamps.get("enrichment_finished_at"):
             fields["enrichment_finished_at"] = str(stamps["enrichment_finished_at"])
-        vod_db.update_catalog_sync_run(target, **fields)
+        _write_catalog_report(vod_db.update_catalog_sync_run, target, **fields)
     if target is not None:
         _RUN_PHASE_STAMPS.pop(target, None)
 
@@ -990,7 +992,7 @@ def _mark_catalog_workflow_failed(error: str, *, run_id: int | None = None) -> N
             "finished_at": time.time(), "error": error,
         })
     if target:
-        vod_db.update_catalog_sync_run(target, status="failed", error=error, ready_at=str(time.time()))
+        _write_catalog_report(vod_db.update_catalog_sync_run, target, status="failed", error=error, ready_at=str(time.time()))
         _RUN_PHASE_STAMPS.pop(target, None)
 
 
@@ -1007,13 +1009,13 @@ async def _append_catalog_sync_events(run_id: int | None, events: list[dict], su
     if not run_id:
         return
     if events:
-        await asyncio.to_thread(vod_db.record_catalog_sync_events, run_id, extra_events=events)
+        await asyncio.to_thread(_write_catalog_report, vod_db.record_catalog_sync_events, run_id, extra_events=events)
     if summary_updates:
-        report = await asyncio.to_thread(vod_db.get_catalog_sync_run, run_id)
+        report = await asyncio.to_thread(_write_catalog_report, vod_db.get_catalog_sync_run, run_id)
         summary = dict(report.get("summary") or {}) if report else {}
         summary.update(summary_updates)
         await asyncio.to_thread(
-            vod_db.update_catalog_sync_run,
+            _write_catalog_report, vod_db.update_catalog_sync_run,
             run_id,
             summary_json=json.dumps(summary, separators=(",", ":")),
         )
@@ -1029,7 +1031,7 @@ def mark_import_queued(provider_id: int, provider_name: str, queue_position: int
     _start_catalog_workflow(provider_name, "Waiting to import catalog", queued=True)
 
 
-def mark_import_running(provider_id: int, provider_name: str) -> int:
+def mark_import_running(provider_id: int, provider_name: str) -> int | None:
     """Expose a non-XC manual import while its provider adapter is running.
 
     XC imports update this state inside import_provider_catalog.  Plex, Emby,
@@ -1042,11 +1044,12 @@ def mark_import_running(provider_id: int, provider_name: str) -> int:
         "provider_id": provider_id, "provider_name": provider_name,
         "started_at": time.time(), "finished_at": None, "error": None,
     })
-    run_id = vod_db.create_catalog_sync_run(provider_id, provider_name)
+    run_id = _write_catalog_report(vod_db.create_catalog_sync_run, provider_id, provider_name)
     _start_catalog_workflow(provider_name, "Importing provider catalog", run_id=run_id)
     now = str(time.time())
     _CATALOG_WORKFLOW_PROGRESS["import_started_at"] = time.time()
-    vod_db.update_catalog_sync_run(run_id, import_started_at=now)
+    if run_id is not None:
+        _write_catalog_report(vod_db.update_catalog_sync_run, run_id, import_started_at=now)
     return run_id
 
 
@@ -1081,8 +1084,12 @@ def mark_import_finished(
         return
     run_id = run_id or _CATALOG_WORKFLOW_PROGRESS.get("run_id")
     if not run_id:
+        if error:
+            _mark_catalog_workflow_failed(error)
+        else:
+            mark_catalog_workflow_ready()
         return
-    vod_db.update_catalog_sync_run(run_id, import_finished_at=str(time.time()))
+    _write_catalog_report(vod_db.update_catalog_sync_run, run_id, import_finished_at=str(time.time()))
     if error:
         _mark_catalog_workflow_failed(error, run_id=run_id)
         return
@@ -1090,7 +1097,7 @@ def mark_import_finished(
     # with no catalog change nothing ever closed it.
     if result is not None:
         summary = _catalog_sync_summary(result)
-        vod_db.record_catalog_sync_events(
+        _write_catalog_report(vod_db.record_catalog_sync_events,
             run_id,
             movie_ids=result.get("changed_movie_ids", []),
             series_ids=result.get("changed_series_ids", []),
@@ -1098,7 +1105,7 @@ def mark_import_finished(
             created_series_ids=result.get("created_series_ids", []),
             summary=summary,
         )
-        vod_db.update_catalog_sync_run(run_id, summary_json=json.dumps(summary, separators=(",", ":")))
+        _write_catalog_report(vod_db.update_catalog_sync_run, run_id, summary_json=json.dumps(summary, separators=(",", ":")))
     mark_catalog_workflow_ready(run_id=run_id)
 
 
@@ -1109,14 +1116,15 @@ async def run_tracked_import(provider_id: int, importer) -> dict:
     scheduled refresher and Apply rules left these providers out of history.
     """
     provider = await asyncio.to_thread(vod_db.get_provider, provider_id)
-    run_id = mark_import_running(provider_id, provider.get("name") if provider else f"provider {provider_id}")
+    run_id = await asyncio.to_thread(mark_import_running, provider_id, provider.get("name") if provider else f"provider {provider_id}")
     try:
         result = await importer(provider_id)
     except Exception as exc:
-        mark_import_finished(provider_id, import_error_detail(exc), run_id=run_id)
+        await asyncio.to_thread(mark_import_finished, provider_id, import_error_detail(exc), run_id=run_id)
         raise
-    mark_import_finished(provider_id, run_id=run_id, result=result)
-    result["catalog_sync_run_id"] = run_id
+    await asyncio.to_thread(mark_import_finished, provider_id, run_id=run_id, result=result)
+    if run_id is not None:
+        result["catalog_sync_run_id"] = run_id
     return result
 
 
@@ -1145,14 +1153,15 @@ async def import_provider_catalog(provider_id: int, *, schedule_enrichment: bool
     """Run one XC catalog import and expose its lifecycle to the UI."""
     provider = await asyncio.to_thread(vod_db.get_provider, provider_id)
     provider_name = provider.get("name") if provider else f"provider {provider_id}"
-    run_id = await asyncio.to_thread(vod_db.create_catalog_sync_run, provider_id, provider_name)
+    run_id = await asyncio.to_thread(_write_catalog_report, vod_db.create_catalog_sync_run, provider_id, provider_name)
     # SQLite has a single writer and catalog preparation itself is expensive.
     # This lock makes periodic and manual XC imports wait their turn rather
     # than competing for the writer and starving normal API reads.
     async with _XC_IMPORT_LOCK:
         _start_catalog_workflow(provider_name, "Importing provider catalog", run_id=run_id)
         _CATALOG_WORKFLOW_PROGRESS["import_started_at"] = time.time()
-        await asyncio.to_thread(vod_db.update_catalog_sync_run, run_id, import_started_at=str(time.time()))
+        if run_id is not None:
+            await asyncio.to_thread(_write_catalog_report, vod_db.update_catalog_sync_run, run_id, import_started_at=str(time.time()))
         _IMPORT_PROGRESS.update({
             "running": True, "queued": False, "queue_position": None,
             "provider_id": provider_id,
@@ -1164,26 +1173,29 @@ async def import_provider_catalog(provider_id: int, *, schedule_enrichment: bool
         except Exception as exc:
             detail = import_error_detail(exc)
             _IMPORT_PROGRESS.update({"running": False, "finished_at": time.time(), "error": detail})
-            await asyncio.to_thread(vod_db.update_catalog_sync_run, run_id, status="failed", error=detail)
-            _mark_catalog_workflow_failed(detail)
+            if run_id is not None:
+                await asyncio.to_thread(_write_catalog_report, vod_db.update_catalog_sync_run, run_id, status="failed", error=detail)
+            await asyncio.to_thread(_mark_catalog_workflow_failed, detail, run_id=run_id)
             raise
         _IMPORT_PROGRESS.update({"running": False, "finished_at": time.time()})
         _CATALOG_WORKFLOW_PROGRESS["import_finished_at"] = time.time()
-        await asyncio.to_thread(vod_db.update_catalog_sync_run, run_id, import_finished_at=str(time.time()))
-    result["catalog_sync_run_id"] = run_id
-    await asyncio.to_thread(
-        vod_db.record_catalog_sync_events, run_id,
-        movie_ids=result.get("changed_movie_ids", []),
-        series_ids=result.get("changed_series_ids", []),
-        created_movie_ids=result.get("created_movie_ids", []),
-        created_series_ids=result.get("created_series_ids", []),
-        summary=_catalog_sync_summary(result),
-    )
-    await asyncio.to_thread(
-        vod_db.update_catalog_sync_run,
-        run_id,
-        summary_json=json.dumps(_catalog_sync_summary(result), separators=(",", ":")),
-    )
+        if run_id is not None:
+            await asyncio.to_thread(_write_catalog_report, vod_db.update_catalog_sync_run, run_id, import_finished_at=str(time.time()))
+    if run_id is not None:
+        result["catalog_sync_run_id"] = run_id
+        await asyncio.to_thread(
+            _write_catalog_report, vod_db.record_catalog_sync_events, run_id,
+            movie_ids=result.get("changed_movie_ids", []),
+            series_ids=result.get("changed_series_ids", []),
+            created_movie_ids=result.get("created_movie_ids", []),
+            created_series_ids=result.get("created_series_ids", []),
+            summary=_catalog_sync_summary(result),
+        )
+        await asyncio.to_thread(
+            _write_catalog_report, vod_db.update_catalog_sync_run,
+            run_id,
+            summary_json=json.dumps(_catalog_sync_summary(result), separators=(",", ":")),
+        )
     if schedule_enrichment and result["catalog_changed"]:
         result["post_import_enrichment_queued"] = _queue_catalog_enrichment_for_changes(
             changed_movie_ids=set(result.get("changed_movie_ids", [])),
@@ -1196,7 +1208,7 @@ async def import_provider_catalog(provider_id: int, *, schedule_enrichment: bool
             # until that unrelated task finishes. Its pending TMDB work is
             # still picked up by the normal scheduled pass.
             await asyncio.to_thread(
-                vod_db.update_catalog_sync_run,
+                _write_catalog_report, vod_db.update_catalog_sync_run,
                 run_id, status="ready", ready_at=str(time.time()),
             )
     else:
@@ -1206,8 +1218,9 @@ async def import_provider_catalog(provider_id: int, *, schedule_enrichment: bool
         # KNM: 2026-10-04 -- also when the caller defers enrichment (scheduled
         # refresher, manual queue): nothing else closes this run, so it sat
         # at "running" in Sync History forever.
-        mark_catalog_workflow_ready(run_id=run_id)
-        await asyncio.to_thread(vod_db.update_catalog_sync_run, run_id, status="ready", ready_at=str(time.time()))
+        await asyncio.to_thread(mark_catalog_workflow_ready, run_id=run_id)
+        if run_id is not None:
+            await asyncio.to_thread(_write_catalog_report, vod_db.update_catalog_sync_run, run_id, status="ready", ready_at=str(time.time()))
     return result
 
 
@@ -2231,7 +2244,7 @@ async def _post_import_enrichment(
     pinned_run_id = workflow_run_id or _CATALOG_WORKFLOW_PROGRESS.get("run_id")
     try:
         if track_catalog_workflow:
-            _set_catalog_workflow_phase("Resolving known TMDB identities", run_id=pinned_run_id)
+            await asyncio.to_thread(_set_catalog_workflow_phase, "Resolving known TMDB identities", run_id=pinned_run_id)
         movie_count = await asyncio.to_thread(vod_db.count_movies_pending_tmdb_enrichment) if changed_movie_ids is None else await asyncio.to_thread(vod_db.count_movies_pending_tmdb_enrichment, changed_movie_ids)
         series_count = await asyncio.to_thread(vod_db.count_series_pending_tmdb_metadata_enrichment) if changed_series_ids is None else await asyncio.to_thread(vod_db.count_series_pending_tmdb_metadata_enrichment, changed_series_ids)
         movie_limit = min(_TMDB_INITIAL_MOVIE_CAP, max(1, math.ceil(movie_count * _TMDB_INITIAL_FRACTION))) if movie_count else 0
@@ -2254,28 +2267,28 @@ async def _post_import_enrichment(
             pinned_run_id, stamps, _ = _workflow_stamps(pinned_run_id)
             stamps["enrichment_finished_at"] = time.time()
             if pinned_run_id:
-                vod_db.update_catalog_sync_run(
+                await asyncio.to_thread(_write_catalog_report, vod_db.update_catalog_sync_run,
                     pinned_run_id,
                     enrichment_finished_at=str(stamps["enrichment_finished_at"]),
                     status="ready",
                     ready_at=str(time.time()),
                 )
         if track_catalog_workflow:
-            _set_catalog_workflow_phase("Preparing catalog review", run_id=pinned_run_id)
+            await asyncio.to_thread(_set_catalog_workflow_phase, "Preparing catalog review", run_id=pinned_run_id)
         if track_catalog_workflow:
-            mark_catalog_workflow_ready(run_id=pinned_run_id)
+            await asyncio.to_thread(mark_catalog_workflow_ready, run_id=pinned_run_id)
         _schedule_background_tmdb_work()
     except asyncio.CancelledError:
         # KNM: 2026-10-03 CancelledError is a BaseException, so cancellation skipped
         # the handler below and left the run "running" with leaked phase stamps.
         logger.warning("[vod_importer] post-import enrichment cancelled")
         if track_catalog_workflow:
-            _mark_catalog_workflow_failed("automatic enrichment cancelled", run_id=pinned_run_id)
+            await asyncio.to_thread(_mark_catalog_workflow_failed, "automatic enrichment cancelled", run_id=pinned_run_id)
         raise
     except Exception:
         logger.exception("[vod_importer] post-import enrichment failed")
         if track_catalog_workflow:
-            _mark_catalog_workflow_failed("automatic enrichment failed", run_id=pinned_run_id)
+            await asyncio.to_thread(_mark_catalog_workflow_failed, "automatic enrichment failed", run_id=pinned_run_id)
 
 
 def schedule_post_import_enrichment(

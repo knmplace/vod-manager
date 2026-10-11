@@ -213,6 +213,7 @@ async def _import_library_locked(provider_id: int) -> dict:
                 continue
             movie_items.append({
                 "name": name, "year": year, "provider_stream_id": rel, "container_extension": ext,
+                "raw_name": parsed.title,
                 "tmdb_id": tmdb_id, "file_size_bytes": size,
                 "preserve_existing_detail": True,
                 # last_enriched_at deliberately unset: the lazy enrichment pass
@@ -229,7 +230,7 @@ async def _import_library_locked(provider_id: int) -> dict:
             continue
         item = series_items.setdefault(series_id, {
             "name": name, "year": year, "provider_series_id": series_id, "tmdb_id": tmdb_id,
-            "preserve_existing_detail": True, "episodes": [],
+            "raw_name": parsed.title, "preserve_existing_detail": True, "episodes": [],
         })
         seen_episode_ids.add(rel)
         item["episodes"].append({

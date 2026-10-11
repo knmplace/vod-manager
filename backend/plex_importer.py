@@ -133,6 +133,7 @@ async def import_plex_library(provider_id: int) -> dict:
                     fields = plex_client.extract_common_fields(item)
                     movie_items.append({
                         "name": item.get("title", ""),
+                        "raw_name": item.get("title", ""),
                         "year": item.get("year"),
                         "provider_stream_id": part_key,
                         "container_extension": container,
@@ -175,6 +176,7 @@ async def import_plex_library(provider_id: int) -> dict:
                     fields = plex_client.extract_common_fields(show)
                     series_items.append({
                         "name": show.get("title", ""),
+                        "raw_name": show.get("title", ""),
                         "year": show.get("year"),
                         "provider_series_id": str(rating_key),
                         "genre": fields["genre"],

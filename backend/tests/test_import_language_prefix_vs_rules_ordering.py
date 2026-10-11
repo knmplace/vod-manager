@@ -51,7 +51,7 @@ def _enabled_languages_en_only(monkeypatch):
     monkeypatch.setattr(vod_importer.config, "get_enabled_languages", lambda: ["EN"])
     monkeypatch.setattr(
         vod_importer.config, "get_import_language_exclusion",
-        lambda: {"exclude_prefixes": [], "exclude_non_latin": False},
+        lambda: {"exclude_prefixes": ["ES"], "exclude_non_latin": False},
     )
 
 
@@ -130,3 +130,21 @@ def test_unprefixed_english_stream_still_imported(monkeypatch):
 
     assert len(captured["items"]) == 1
     assert captured["items"][0]["raw_name"] == "3 Days in Malay (2023)"
+
+
+def test_xc_series_future_import_uses_explicit_language_exclusion():
+    items, seen_ids = vod_importer._build_series_import_items(
+        [
+            {"name": "ES - Blocked Show", "series_id": "1", "category_id": "5"},
+            {"name": "EN - Allowed Show", "series_id": "2", "category_id": "5"},
+        ],
+        {"5": "Shows"},
+        [],
+        False,
+        {"exclude_prefixes": ["ES"], "exclude_non_latin": False},
+        [],
+        {"genre": [], "description": [], "cast_list": [], "director": []},
+    )
+
+    assert seen_ids == {"1", "2"}
+    assert [item["name"] for item in items] == ["EN - Allowed Show"]

@@ -4,6 +4,7 @@ run that added new episodes showed "0 changes"."""
 
 import asyncio
 
+import config
 import emby_vod_client
 import emby_vod_importer
 import plex_client
@@ -138,6 +139,82 @@ def test_emby_importer_passes_ids_through(db, monkeypatch):
     monkeypatch.setattr(emby_vod_client, "EmbyVodClient", FakeClient)
     monkeypatch.setattr(emby_vod_client, "extract_stream_id", lambda item: ("stream", "mkv"))
     _assert_ids(asyncio.run(emby_vod_importer.import_emby_library(pid)))
+
+
+def test_plex_future_import_uses_explicit_language_exclusion_not_playback(db, monkeypatch):
+    pid = db.upsert_provider("Plex", "http://plex.invalid", "u", "p", provider_type="plex")
+    config.save_import_language_exclusion(["ES"], False)
+    config.save_enabled_languages(["EN", "ES"])
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, provider): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return False
+        async def list_libraries(self): return [{"type": "movie", "key": "1", "title": "Movies"}]
+        async def list_movies(self, key):
+            return [{"title": "ES - Blocked", "ratingKey": "5"}, {"title": "EN - Allowed", "ratingKey": "6"}]
+
+    monkeypatch.setattr(plex_client, "PlexClient", FakeClient)
+    monkeypatch.setattr(plex_client, "extract_part", lambda item: (f"part-{item['ratingKey']}", "mkv"))
+    def capture_movies(_pid, items):
+        captured["items"] = items
+        return {"movies_created": 0, "movies_matched": 0, "total": len(items)}
+    monkeypatch.setattr(plex_importer.vod_db, "bulk_import_plex_movies", capture_movies)
+
+    asyncio.run(plex_importer.import_plex_library(pid))
+
+    assert [item["name"] for item in captured["items"]] == ["EN - Allowed"]
+    assert captured["items"][0]["raw_name"] == "EN - Allowed"
+
+
+def test_emby_and_jellyfin_future_import_use_explicit_language_exclusion(db, monkeypatch):
+    config.save_import_language_exclusion(["ES"], False)
+    config.save_enabled_languages(["EN", "ES"])
+
+    class FakeClient:
+        def __init__(self, provider): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return False
+        async def list_libraries(self): return [{"CollectionType": "movies", "ItemId": "1", "Name": "Movies"}]
+        async def list_movies(self, library_id):
+            return [{"Name": "ES - Blocked", "Id": "5"}, {"Name": "EN - Allowed", "Id": "6"}]
+
+    monkeypatch.setattr(emby_vod_client, "EmbyVodClient", FakeClient)
+    monkeypatch.setattr(emby_vod_client, "extract_stream_id", lambda item: (f"stream-{item['Id']}", "mkv"))
+
+    for provider_type in ("emby", "jellyfin"):
+        pid = db.upsert_provider(provider_type, f"http://{provider_type}.invalid", "u", "p", provider_type=provider_type)
+        captured = {}
+        def capture_movies(_pid, items, captured=captured):
+            captured["items"] = items
+            return {"movies_created": 0, "movies_matched": 0, "total": len(items)}
+        monkeypatch.setattr(
+            emby_vod_importer.vod_db,
+            "bulk_import_plex_movies",
+            capture_movies,
+        )
+        asyncio.run(emby_vod_importer.import_emby_library(pid))
+        assert [item["name"] for item in captured["items"]] == ["EN - Allowed"]
+        assert captured["items"][0]["raw_name"] == "EN - Allowed"
+
+
+def test_shared_library_bulk_import_persists_raw_name_and_language(db):
+    pid = db.upsert_provider("Plex", "http://plex.invalid", "u", "p", provider_type="plex")
+    db.bulk_import_plex_movies(pid, [{
+        "name": "Canonical Movie", "raw_name": "ES - Provider Movie", "year": 2020,
+        "provider_stream_id": "movie-1", "container_extension": "mkv",
+    }])
+    db.bulk_import_plex_series(pid, [{
+        "name": "Canonical Show", "raw_name": "DE - Provider Show", "year": 2021,
+        "provider_series_id": "show-1", "episodes": [],
+    }])
+    conn = db._connect()
+    movie_source = conn.execute("SELECT raw_name, language FROM movie_sources").fetchone()
+    series_source = conn.execute("SELECT raw_name, language FROM series_sources").fetchone()
+    conn.close()
+    assert dict(movie_source) == {"raw_name": "ES - Provider Movie", "language": "ES"}
+    assert dict(series_source) == {"raw_name": "DE - Provider Show", "language": "DE"}
 
 
 def test_library_importer_reports_ids_and_full_resweep_on_removal(db, tmp_path, monkeypatch):
