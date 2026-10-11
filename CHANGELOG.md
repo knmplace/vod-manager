@@ -77,6 +77,13 @@ instead of opening a duplicate request.
   language-archived or restored. Saving applies only that language-owned
   archive state, so unwanted-language cards leave active library/review views
   immediately while a later re-enable restores them safely.
+- âœ… **Language changes now always require approval.** Enabling or disabling a
+  playback language shows the same impact confirmation, with playback records
+  clearly distinguished from review cards that would be language-archived or
+  restored. Saving import-language or country exclusions now also asks for
+  confirmation and states that those rules affect future imports only.
+- âœ… **Improved dark-theme readability.** Muted helper text and sidebar labels
+  are brighter across the built-in themes.
 - **Verification:** full backend suite: 565 passed; frontend production build
   passed (the existing large-chunk warning remains).
 

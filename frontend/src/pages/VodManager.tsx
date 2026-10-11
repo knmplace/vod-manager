@@ -5276,19 +5276,51 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
     const nextCodes = [...enabledLanguageDraft]
     const currentCodes = enabledLanguagesQuery.data?.codes ?? []
     const removed = currentCodes.filter((c) => !nextCodes.includes(c))
+    const added = nextCodes.filter((c) => !currentCodes.includes(c))
     api.post('/vod/enabled-languages/impact/', { codes: nextCodes }).then((r) => {
       const { movies_losing_access, episodes_losing_access, archive_preview } = r.data
       const archived = (archive_preview?.movies_archived ?? 0) + (archive_preview?.series_archived ?? 0)
       const restored = (archive_preview?.movies_unarchived ?? 0) + (archive_preview?.series_unarchived ?? 0)
-      if (!movies_losing_access && !episodes_losing_access && !archived && !restored) {
-        saveEnabledLanguages.mutate(nextCodes)
-        return
-      }
+      const playbackImpact = removed.length
+        ? `Removing ${removed.join(', ')} will leave ${movies_losing_access} movie record(s) and ${episodes_losing_access} episode record(s) without an enabled playback/export source.`
+        : added.length
+          ? `Adding ${added.join(', ')} makes matching stored sources eligible for playback/export again.`
+          : 'This saves the current enabled playback-language selection.'
       askConfirm(
-        `${removed.length ? `Removing ${removed.join(', ')} will immediately take ${movies_losing_access} movie(s) and ${episodes_losing_access} episode(s) out of playback/export.` : 'This language change updates the active playback filter.'} The language sweep will archive ${archived} card(s) with no enabled-language source${restored ? ` and restore ${restored} previously language-archived card(s)` : ''}. Nothing is deleted; re-enabling a language restores only cards this sweep archived. Continue?`,
+        `${playbackImpact} The language-owned review-card sweep would archive ${archived} card(s) and restore ${restored} card(s). A zero archive count means no currently active review card qualifies for this sweep; cards already archived manually or by another rule are left untouched. Nothing is deleted. Continue?`,
         () => saveEnabledLanguages.mutate(nextCodes),
       )
     })
+  }
+
+  function confirmImportLanguageExclusion(nextPrefixes: string[], nextNonLatin: boolean) {
+    const current = importLanguageExclusionQuery.data
+    const added = nextPrefixes.filter((code) => !current?.exclude_prefixes.includes(code))
+    const removed = (current?.exclude_prefixes ?? []).filter((code) => !nextPrefixes.includes(code))
+    const nonLatinChanged = current?.exclude_non_latin !== nextNonLatin
+    const changes = [
+      added.length ? `add ${added.join(', ')} to future import exclusions` : '',
+      removed.length ? `allow ${removed.join(', ')} on future imports` : '',
+      nonLatinChanged ? `${nextNonLatin ? 'exclude' : 'allow'} non-Latin-script titles on future imports` : '',
+    ].filter(Boolean).join('; ')
+    askConfirm(
+      `${changes || 'Save the current import-language exclusion settings'}? This does not delete or change existing catalog cards. Use “Apply rules to existing catalog now” separately if you want a reviewed re-import to apply these rules to existing content.`,
+      () => saveImportLanguageExclusion.mutate({ exclude_prefixes: nextPrefixes, exclude_non_latin: nextNonLatin }),
+    )
+  }
+
+  function confirmImportCountryExclusion(nextCodes: string[]) {
+    const current = importCountryExclusionQuery.data?.exclude_country_codes ?? []
+    const added = nextCodes.filter((code) => !current.includes(code))
+    const removed = current.filter((code) => !nextCodes.includes(code))
+    const changes = [
+      added.length ? `exclude ${added.join(', ')} on future imports` : '',
+      removed.length ? `allow ${removed.join(', ')} on future imports` : '',
+    ].filter(Boolean).join('; ')
+    askConfirm(
+      `${changes || 'Save the current import-country exclusion settings'}? This does not delete or change existing catalog cards.`,
+      () => saveImportCountryExclusion.mutate({ exclude_country_codes: nextCodes }),
+    )
   }
   // Import Country Exclusion -- sibling to Import Language Exclusion above,
   // same shape/pattern, keyed on a title's trailing "(<country code>)" tag
@@ -9150,10 +9182,10 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
           <Button
             size="sm"
             disabled={saveImportLanguageExclusion.isPending}
-            onClick={() => saveImportLanguageExclusion.mutate({
-              exclude_prefixes: [...languageDraft],
-              exclude_non_latin: importLanguageExclusionQuery.data?.exclude_non_latin ?? false,
-            })}
+            onClick={() => confirmImportLanguageExclusion(
+              [...languageDraft],
+              importLanguageExclusionQuery.data?.exclude_non_latin ?? false,
+            )}
           >
             {saveImportLanguageExclusion.isPending ? <Loader2 size={12} className="animate-spin mr-1" /> : null}
             Save selected languages
@@ -9162,10 +9194,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
             <input
               type="checkbox"
               checked={importLanguageExclusionQuery.data?.exclude_non_latin ?? false}
-              onChange={(e) => saveImportLanguageExclusion.mutate({
-                exclude_prefixes: [...languageDraft],
-                exclude_non_latin: e.target.checked,
-              })}
+              onChange={(e) => confirmImportLanguageExclusion([...languageDraft], e.target.checked)}
             />
             Also exclude non-Latin-script titles (Arabic, Thai, Chinese/Japanese/Korean, Cyrillic, Greek, Hebrew, Devanagari)
           </label>
@@ -9349,7 +9378,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
           <Button
             size="sm"
             disabled={saveImportCountryExclusion.isPending}
-            onClick={() => saveImportCountryExclusion.mutate({ exclude_country_codes: [...countryDraft] })}
+            onClick={() => confirmImportCountryExclusion([...countryDraft])}
           >
             {saveImportCountryExclusion.isPending ? <Loader2 size={12} className="animate-spin mr-1" /> : null}
             Save selected countries
