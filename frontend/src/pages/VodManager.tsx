@@ -8375,7 +8375,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
           <span className="text-xs text-muted-foreground">{syncHistorySelected.size} selected</span>
         </div>
         <div className="overflow-x-auto rounded border border-border/60">
-          <table className="w-full text-xs"><thead className="text-left text-muted-foreground bg-muted/20"><tr><th className="p-2 w-8" /><th className="p-2">Run</th><th className="p-2">Provider</th><th className="p-2">Status</th><th className="p-2">Changes</th><th className="p-2">Duration</th></tr></thead>
+          <table className="w-full text-xs"><thead className="text-left text-muted-foreground bg-muted/20"><tr><th className="p-2 w-8"><input type="checkbox" title="Select all reports" aria-label="Select all reports" disabled={!syncHistoryQuery.data?.length} checked={!!syncHistoryQuery.data?.length && syncHistoryQuery.data.every((run) => syncHistorySelected.has(run.id))} onChange={(event) => setSyncHistorySelected(event.target.checked ? new Set((syncHistoryQuery.data ?? []).map((run) => run.id)) : new Set())} /></th><th className="p-2">Run</th><th className="p-2">Provider</th><th className="p-2">Status</th><th className="p-2">Changes</th><th className="p-2">Duration</th></tr></thead>
             <tbody>{(syncHistoryQuery.data ?? []).map((run) => {
               const duration = syncDuration(run.import_started_at, run.ready_at)
               // duration is sourced from the durable report timestamps above
