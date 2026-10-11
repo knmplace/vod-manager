@@ -5163,6 +5163,10 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
     queryKey: ['vod-enabled-languages'],
     queryFn:  () => api.get('/vod/enabled-languages/').then((r) => r.data),
   })
+  const playbackLanguageInventoryQuery = useQuery<{ code: string; movie_count: number; series_count: number; episode_count: number }[]>({
+    queryKey: ['vod-enabled-language-inventory'],
+    queryFn: () => api.get('/vod/enabled-languages/inventory/').then((r) => r.data),
+  })
   const saveEnabledLanguages = useMutation({
     mutationFn: (codes: string[]) => api.post('/vod/enabled-languages/', { codes }),
     onSuccess: (r) => {
@@ -5236,18 +5240,18 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
     enabledLanguageDraftInitialized.current = true
     setEnabledLanguageDraft(new Set(enabledLanguagesQuery.data.codes))
   }, [enabledLanguagesQuery.data])
-  // Same pool-prefix data source as the exclusion picker -- these are the
-  // same per-source language codes, just gated by a different setting.
+  // Playback uses computed source.language (including e.g. trailing (ES)),
+  // not just raw XX| title prefixes used by import-language exclusion.
   const allEnabledLanguageCodes = (() => {
-    const counts = new Map((languagePrefixesQuery.data ?? []).map((p) => [p.code, p.count]))
+    const counts = new Map((playbackLanguageInventoryQuery.data ?? []).map((p) => [p.code, p]))
     for (const code of enabledLanguagesQuery.data?.codes ?? []) {
-      if (!counts.has(code)) counts.set(code, 0)
+      if (!counts.has(code)) counts.set(code, { code, movie_count: 0, series_count: 0, episode_count: 0 })
     }
-    if (!counts.has('EN')) counts.set('EN', 0)
-    if (!counts.has('ES')) counts.set('ES', 0)
+    if (!counts.has('EN')) counts.set('EN', { code: 'EN', movie_count: 0, series_count: 0, episode_count: 0 })
+    if (!counts.has('ES')) counts.set('ES', { code: 'ES', movie_count: 0, series_count: 0, episode_count: 0 })
     return [...counts.entries()]
-      .map(([code, count]) => ({ code, count }))
-      .sort((a, b) => b.count - a.count || a.code.localeCompare(b.code))
+      .map(([, inventory]) => inventory)
+      .sort((a, b) => (b.movie_count + b.series_count + b.episode_count) - (a.movie_count + a.series_count + a.episode_count) || a.code.localeCompare(b.code))
   })()
   const visibleEnabledLanguageCodes = allEnabledLanguageCodes.filter((c) => {
     const label = `${c.code} ${LANGUAGE_CODE_NAMES[c.code] ?? ''}`.toLowerCase()
@@ -9295,7 +9299,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
                 />
                 <span className="font-mono">{c.code}</span>
                 {LANGUAGE_CODE_NAMES[c.code] && <span className="text-muted-foreground">— {LANGUAGE_CODE_NAMES[c.code]}</span>}
-                <span className="text-muted-foreground ml-auto">{c.count > 0 ? `${c.count} title${c.count === 1 ? '' : 's'}` : 'not currently in pool'}</span>
+                <span className="text-muted-foreground ml-auto">{(c.movie_count + c.series_count + c.episode_count) > 0 ? `${c.movie_count} movies · ${c.series_count} shows · ${c.episode_count} episodes` : 'no active sources'}</span>
               </label>
             ))}
             {visibleEnabledLanguageCodes.length === 0 && <p className="text-muted-foreground">No languages match.</p>}

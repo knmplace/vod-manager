@@ -978,6 +978,11 @@ async def get_enabled_languages_settings():
     return {"codes": get_enabled_languages()}
 
 
+@router.get("/enabled-languages/inventory/", dependencies=_GUARDS)
+async def get_enabled_languages_inventory():
+    return await asyncio.to_thread(vod_db.list_playback_language_inventory)
+
+
 @router.post("/enabled-languages/", dependencies=_GUARDS)
 async def save_enabled_languages_settings(body: EnabledLanguagesRequest):
     save_enabled_languages(body.codes)

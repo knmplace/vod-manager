@@ -102,3 +102,18 @@ def test_enabled_languages_clause_uses_configured_codes(db):
     clause, params = db._enabled_languages_clause("ms.language")
     assert params == ["EN", "FR"]
     assert "COALESCE(ms.language, 'EN') IN (?,?)" == clause
+
+
+def test_playback_language_inventory_uses_computed_source_language(db):
+    provider_id = db.upsert_provider("prov1", "http://example.com", "user", "pass")
+    movie_id = db.upsert_movie("Spanish suffix", 2024)
+    conn = db._connect()
+    conn.execute(
+        "INSERT INTO movie_sources (movie_id, provider_id, provider_stream_id, container_extension, raw_name, language, added_at, last_seen_at) VALUES (?,?,?,?,?,?,datetime('now'),datetime('now'))",
+        (movie_id, provider_id, "es-1", "mp4", "Spanish suffix (ES)", "ES"),
+    )
+    db._commit_with_retry(conn)
+    conn.close()
+
+    inventory = {row["code"]: row for row in db.list_playback_language_inventory()}
+    assert inventory["ES"] == {"code": "ES", "movie_count": 1, "series_count": 0, "episode_count": 0}

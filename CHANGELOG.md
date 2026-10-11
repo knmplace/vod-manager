@@ -84,6 +84,10 @@ instead of opening a duplicate request.
   confirmation and states that those rules affect future imports only.
 - âœ… **Improved dark-theme readability.** Muted helper text and sidebar labels
   are brighter across the built-in themes.
+- âœ… **Playback-language counts now match playback.** The picker reports
+  computed source-language inventory for active providers (movies, shows, and
+  episodes separately), including provider tags such as `(ES)`, instead of
+  incorrectly treating only raw `ES|` title prefixes as Spanish content.
 - **Verification:** full backend suite: 565 passed; frontend production build
   passed (the existing large-chunk warning remains).
 

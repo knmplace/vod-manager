@@ -12591,6 +12591,38 @@ def list_all_pool_prefixes() -> list[dict]:
     return sorted(({"code": c, "count": n} for c, n in counts.items()), key=lambda x: -x["count"])
 
 
+def list_playback_language_inventory() -> list[dict]:
+    """Counts active stored source languages using the same ``language``
+    field that playback/export uses.
+
+    This deliberately differs from ``list_all_pool_prefixes``: import-language
+    exclusion is driven by raw provider title prefixes, while playback is
+    driven by computed source languages.  For example, ``Title (ES)`` has no
+    ``ES|`` prefix but is a Spanish playback source.
+    """
+    counts: dict[str, dict[str, int]] = {}
+    sources = (
+        ("movie_sources", "movie_id", "movie_count"),
+        ("series_sources", "series_id", "series_count"),
+        ("episode_sources", "episode_id", "episode_count"),
+    )
+    conn = _connect()
+    for table, id_column, count_key in sources:
+        rows = conn.execute(
+            f"""SELECT COALESCE(NULLIF(s.language, ''), 'EN') AS code,
+                       COUNT(DISTINCT s.{id_column}) AS count
+                  FROM {table} s
+                  JOIN providers p ON p.id=s.provider_id
+                 WHERE p.is_active=1
+              GROUP BY COALESCE(NULLIF(s.language, ''), 'EN')"""
+        ).fetchall()
+        for row in rows:
+            entry = counts.setdefault(row["code"], {"movie_count": 0, "series_count": 0, "episode_count": 0})
+            entry[count_key] = int(row["count"])
+    conn.close()
+    return sorted(({"code": code, **entry} for code, entry in counts.items()), key=lambda item: item["code"])
+
+
 def list_all_pool_country_suffixes() -> list[dict]:
     """Every known trailing "(<country code>)" tag (_country_suffix_code,
     allowlist-only against _KNOWN_COUNTRY_SUFFIX_CODES) actually present
