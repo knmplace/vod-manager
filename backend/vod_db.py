@@ -619,6 +619,23 @@ def init_db() -> None:
             PRIMARY KEY(content_type, item_id)
         );
 
+        -- Durable, administrative import audit.  This is deliberately a
+        -- compact run summary rather than another catalog source of truth:
+        -- removing a report never changes a movie, series, or source.
+        CREATE TABLE IF NOT EXISTS catalog_sync_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider_id INTEGER REFERENCES providers(id) ON DELETE SET NULL,
+            provider_name TEXT NOT NULL,
+            provider_type TEXT NOT NULL,
+            queued_at TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT,
+            status TEXT NOT NULL DEFAULT 'running',
+            summary_json TEXT NOT NULL DEFAULT '{}',
+            error TEXT,
+            created_at TEXT NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_movies_name_year ON movies(name, year);
         CREATE INDEX IF NOT EXISTS idx_series_name_year ON series(name, year);
         CREATE INDEX IF NOT EXISTS idx_episodes_series_season_ep ON episodes(series_id, season_number, episode_number);
@@ -642,6 +659,7 @@ def init_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_dvr_recording_failures_provider_id ON dvr_recording_failures(provider_id);
         CREATE INDEX IF NOT EXISTS idx_vod_stream_failures_created_at ON vod_stream_failures(created_at);
         CREATE INDEX IF NOT EXISTS idx_tmdb_lookup_failures_type_time ON tmdb_lookup_failures(content_type, last_failed_at);
+        CREATE INDEX IF NOT EXISTS idx_catalog_sync_runs_created_at ON catalog_sync_runs(created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_provider_sub_accounts_provider_id ON provider_sub_accounts(provider_id);
         CREATE INDEX IF NOT EXISTS idx_provider_sub_account_live_accounts_sub_account_id ON provider_sub_account_live_accounts(sub_account_id);
         CREATE INDEX IF NOT EXISTS idx_movie_source_owners_source_id ON movie_source_owners(movie_source_id);
@@ -1274,6 +1292,84 @@ def _backfill_source_owners(conn: sqlite3.Connection) -> None:
 
 def _now() -> str:
     return str(time.time())
+
+
+def create_catalog_sync_run(provider_id: int | None, provider_name: str, provider_type: str) -> int:
+    """Start a durable import report before an adapter begins work."""
+    now = _now()
+    with _WRITE_LOCK:
+        conn = _connect()
+        cur = conn.execute(
+            """INSERT INTO catalog_sync_runs
+               (provider_id, provider_name, provider_type, queued_at, started_at, status, created_at)
+               VALUES (?,?,?,?,?,?,?)""",
+            (provider_id, provider_name, provider_type, now, now, "running", now),
+        )
+        _commit_with_retry(conn)
+        run_id = int(cur.lastrowid)
+        conn.close()
+    return run_id
+
+
+def finish_catalog_sync_run(run_id: int, *, summary: dict | None = None, error: str | None = None) -> None:
+    """Close one import report exactly once with a compact, safe summary."""
+    with _WRITE_LOCK:
+        conn = _connect()
+        conn.execute(
+            """UPDATE catalog_sync_runs
+                  SET finished_at=?, status=?, summary_json=?, error=?
+                WHERE id=? AND status='running'""",
+            (_now(), "failed" if error else "ready", json.dumps(summary or {}, separators=(",", ":")), error, run_id),
+        )
+        _commit_with_retry(conn)
+        conn.close()
+
+
+def close_orphaned_catalog_sync_runs() -> int:
+    """Mark reports interrupted by a process restart as final, never live."""
+    with _WRITE_LOCK:
+        conn = _connect()
+        count = conn.execute(
+            """UPDATE catalog_sync_runs
+                  SET finished_at=?, status='failed', error='interrupted by restart'
+                WHERE status='running'""",
+            (_now(),),
+        ).rowcount
+        _commit_with_retry(conn)
+        conn.close()
+    return count
+
+
+def list_catalog_sync_runs(limit: int = 100, offset: int = 0) -> list[dict]:
+    conn = _connect()
+    rows = conn.execute(
+        "SELECT * FROM catalog_sync_runs ORDER BY id DESC LIMIT ? OFFSET ?",
+        (max(1, min(limit, 500)), max(0, offset)),
+    ).fetchall()
+    conn.close()
+    result = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["summary"] = json.loads(item.pop("summary_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            item["summary"] = {}
+        result.append(item)
+    return result
+
+
+def get_catalog_sync_run(run_id: int) -> dict | None:
+    conn = _connect()
+    row = conn.execute("SELECT * FROM catalog_sync_runs WHERE id=?", (run_id,)).fetchone()
+    conn.close()
+    if not row:
+        return None
+    result = dict(row)
+    try:
+        result["summary"] = json.loads(result.pop("summary_json") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        result["summary"] = {}
+    return result
 
 
 def _commit_with_retry(conn: sqlite3.Connection, retries: int = 5) -> None:

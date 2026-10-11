@@ -562,6 +562,20 @@ async def get_xc_credentials():
     return {"username": client["username"], "password": client["password"]}
 
 
+@router.get("/sync-history/", dependencies=_GUARDS)
+async def sync_history(limit: int = 100, offset: int = 0):
+    """Durable summaries for completed catalog imports, newest first."""
+    return await asyncio.to_thread(vod_db.list_catalog_sync_runs, limit, offset)
+
+
+@router.get("/sync-history/{run_id}/", dependencies=_GUARDS)
+async def sync_history_detail(run_id: int):
+    report = await asyncio.to_thread(vod_db.get_catalog_sync_run, run_id)
+    if not report:
+        raise HTTPException(404, detail="sync report not found")
+    return report
+
+
 # ── XC clients (per-instance credentials) ───────────────────────────────────
 
 def _client_out(c: dict) -> dict:
@@ -1680,8 +1694,11 @@ async def _run_provider_catalog_import(provider_id: int) -> dict:
     # so publish their queued -> running transition here instead of leaving
     # the sidebar stuck on "queued" for the whole import.
     track_lifecycle = provider.get("provider_type") != "xc"
+    run_id = None
     if track_lifecycle:
-        vod_importer.mark_import_running(provider_id, provider["name"])
+        run_id = vod_importer.mark_import_running(
+            provider_id, provider["name"], provider.get("provider_type", "unknown"),
+        )
     try:
         if provider.get("provider_type") == "plex":
             result = await plex_importer.import_plex_library(provider_id)
@@ -1698,7 +1715,7 @@ async def _run_provider_catalog_import(provider_id: int) -> dict:
             result = await vod_importer.import_provider_catalog(provider_id, schedule_enrichment=False)
     except Exception as exc:
         if track_lifecycle:
-            vod_importer.mark_import_finished(provider_id, type(exc).__name__)
+            vod_importer.mark_import_finished(provider_id, type(exc).__name__, run_id=run_id)
         # exc_info: some failures here raise with an empty str() (e.g. a bare
         # TimeoutError), which used to log as "failed: " with nothing else
         # to go on -- the full traceback is the only way to actually
@@ -1715,7 +1732,7 @@ async def _run_provider_catalog_import(provider_id: int) -> dict:
     await asyncio.to_thread(vod_db.mark_provider_catalog_refreshed, provider_id)
     await vod_importer.resweep_smart_categories()
     if track_lifecycle:
-        vod_importer.mark_import_finished(provider_id)
+        vod_importer.mark_import_finished(provider_id, run_id=run_id, result=result)
     return result
 
 

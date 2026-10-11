@@ -653,7 +653,18 @@ def mark_import_queued(provider_id: int, provider_name: str, queue_position: int
     })
 
 
-def mark_import_running(provider_id: int, provider_name: str) -> None:
+def _catalog_sync_summary(result: dict | None) -> dict:
+    """Keep Sync History useful without retaining provider payloads or URLs."""
+    result = result or {}
+    fields = (
+        "catalog_changed", "movies_created", "movies_matched", "movies_archived",
+        "movies_unarchived", "series_created", "series_matched", "episodes_imported",
+        "total", "flagged_for_review", "errors",
+    )
+    return {field: result[field] for field in fields if field in result}
+
+
+def mark_import_running(provider_id: int, provider_name: str, provider_type: str = "unknown") -> int:
     """Expose a non-XC manual import while its provider adapter is running.
 
     XC imports update this state inside import_provider_catalog itself.
@@ -666,18 +677,38 @@ def mark_import_running(provider_id: int, provider_name: str) -> None:
         "provider_id": provider_id, "provider_name": provider_name,
         "started_at": time.time(), "finished_at": None, "error": None,
     })
+    return vod_db.create_catalog_sync_run(provider_id, provider_name, provider_type)
 
 
-def mark_import_finished(provider_id: int, error: str | None = None) -> None:
+def mark_import_finished(
+    provider_id: int, error: str | None = None, *, run_id: int | None = None, result: dict | None = None,
+) -> None:
     """Finish a non-XC manual import without clobbering a newer job's state
     (e.g. the queue worker already moved on to the next provider by the
     time this one's cleanup runs)."""
-    if _IMPORT_PROGRESS.get("provider_id") != provider_id:
-        return
-    _IMPORT_PROGRESS.update({
-        "running": False, "queued": False, "queue_position": None,
-        "finished_at": time.time(), "error": error,
-    })
+    if _IMPORT_PROGRESS.get("provider_id") == provider_id:
+        _IMPORT_PROGRESS.update({
+            "running": False, "queued": False, "queue_position": None,
+            "finished_at": time.time(), "error": error,
+        })
+    if run_id is not None:
+        vod_db.finish_catalog_sync_run(run_id, summary=_catalog_sync_summary(result), error=error)
+
+
+async def run_tracked_import(provider_id: int, importer) -> dict:
+    """Run a non-XC adapter with the same durable report as XC imports."""
+    provider = await asyncio.to_thread(vod_db.get_provider, provider_id)
+    provider_name = provider.get("name") if provider else f"provider {provider_id}"
+    provider_type = provider.get("provider_type", "unknown") if provider else "unknown"
+    run_id = mark_import_running(provider_id, provider_name, provider_type)
+    try:
+        result = await importer(provider_id)
+    except Exception as exc:
+        mark_import_finished(provider_id, type(exc).__name__, run_id=run_id)
+        raise
+    mark_import_finished(provider_id, run_id=run_id, result=result)
+    result["catalog_sync_run_id"] = run_id
+    return result
 
 
 def get_process_cpu_percent() -> float | None:
@@ -717,6 +748,12 @@ async def import_provider_catalog(provider_id: int, *, schedule_enrichment: bool
     same writer."""
     provider = await asyncio.to_thread(vod_db.get_provider, provider_id)
     async with _XC_IMPORT_LOCK:
+        run_id = await asyncio.to_thread(
+            vod_db.create_catalog_sync_run,
+            provider_id,
+            provider.get("name") if provider else f"provider {provider_id}",
+            "xc",
+        )
         _IMPORT_PROGRESS.update({
             "running": True, "queued": False, "queue_position": None,
             "provider_id": provider_id,
@@ -727,8 +764,11 @@ async def import_provider_catalog(provider_id: int, *, schedule_enrichment: bool
             result = await _import_provider_catalog_impl(provider_id)
         except Exception as exc:
             _IMPORT_PROGRESS.update({"running": False, "finished_at": time.time(), "error": type(exc).__name__})
+            await asyncio.to_thread(vod_db.finish_catalog_sync_run, run_id, error=type(exc).__name__)
             raise
         _IMPORT_PROGRESS.update({"running": False, "finished_at": time.time()})
+        await asyncio.to_thread(vod_db.finish_catalog_sync_run, run_id, summary=_catalog_sync_summary(result))
+        result["catalog_sync_run_id"] = run_id
     if schedule_enrichment:
         schedule_known_series_identity_reconciliation()
     return result
