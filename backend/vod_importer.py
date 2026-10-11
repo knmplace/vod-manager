@@ -11,6 +11,7 @@ bounded concurrency instead of a human clicking one movie at a time.
 """
 
 import asyncio
+import contextvars
 import inspect
 import math
 import json
@@ -1767,6 +1768,9 @@ async def _enrich_one_series_source(
         )
         return {"fetched": True, "reason": None, "detail_written": False}
 
+    if _BULK_NO_PROVIDER_FETCH.get():
+        return {"fetched": False, "reason": "episodes deferred to trickle/on-demand", "detail_written": False}
+
     client = XCProviderClient(provider)
     try:
         info = _as_dict(await client.get_series_info(str(source["provider_series_id"])))
@@ -2382,6 +2386,11 @@ _ENRICH_PROGRESS: dict = {
     "providers_incomplete": [],
 }
 _ENRICH_CANCEL_REQUESTED = False
+# KNM: 2026-10-11 -- bulk enrichment (scheduled or manual) never asks a
+# provider for episodes; the episode trickle and on-open/play own that.
+_BULK_NO_PROVIDER_FETCH: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_BULK_NO_PROVIDER_FETCH", default=False,
+)
 
 
 def cancel_bulk_enrichment() -> bool:
@@ -2891,7 +2900,14 @@ async def bulk_enrich_all(concurrency: int = 8, force: bool = False, pending_onl
         logger.info("[vod_importer] enrichment already running; skipping overlapping catalog run")
         return
     _ENRICH_CANCEL_REQUESTED = False
+    no_fetch_token = _BULK_NO_PROVIDER_FETCH.set(True)
+    try:
+        await _bulk_enrich_all_inner(concurrency, force, pending_only)
+    finally:
+        _BULK_NO_PROVIDER_FETCH.reset(no_fetch_token)
 
+
+async def _bulk_enrich_all_inner(concurrency: int, force: bool, pending_only: bool) -> None:
     providers = await asyncio.to_thread(vod_db.list_providers)
     configured_provider_count = len(providers)
     # Only providers that can actually perform work participate in the
