@@ -12052,6 +12052,29 @@ _BACKFILL_TABLES = [
 ]
 
 
+_CARD_SOURCES = {"movies": ("movie_sources", "movie_id"), "series": ("series_sources", "series_id")}
+
+
+def _card_source_languages(table: str) -> dict[int, set[str]]:
+    """KNM: 2026-10-11 -- language codes per card from its sources' provider
+    names. Title & Metadata Rules strip "ES|"-style prefixes from card names,
+    so the card name alone made nearly everything look EN."""
+    sources, fk = _CARD_SOURCES[table]
+    conn = _connect()
+    rows = conn.execute(f"SELECT {fk} AS card_id, language, raw_name FROM {sources}").fetchall()
+    conn.close()
+    codes: dict[int, set[str]] = {}
+    for r in rows:
+        code = (r["language"] or _source_language(r["raw_name"])).strip().upper()
+        codes.setdefault(r["card_id"], set()).add(code)
+    return codes
+
+
+def _card_codes(row, source_codes: dict[int, set[str]]) -> set[str]:
+    """Source languages, or the card-name prefix (else EN) for a card with no sources."""
+    return source_codes.get(row["id"]) or {_name_prefix_code(row["name"]) or "EN"}
+
+
 def _missing_artwork_clause(search: str | None, excluded: bool) -> tuple[str, list]:
     where = ["(poster_url IS NULL OR poster_url = '')", "review_excluded = ?"]
     params: list = [1 if excluded else 0]
@@ -12075,7 +12098,8 @@ def _missing_artwork_rows(table: str, search: str | None, excluded: bool, script
         rows = [r for r in rows if _is_non_latin_name(r["name"])]
     if prefixes:
         wanted = set(prefixes)
-        rows = [r for r in rows if _name_prefix_code(r["name"]) in wanted]
+        source_codes = _card_source_languages(table)
+        rows = [r for r in rows if _card_codes(r, source_codes) & wanted]
     return rows
 
 
@@ -12085,10 +12109,10 @@ def list_missing_artwork_prefixes(content_type: str, search: str | None = None, 
     options instead of a fixed guessed-in-advance language list."""
     table = "movies" if content_type == "movie" else "series"
     rows = _missing_artwork_rows(table, search, excluded, script)
+    source_codes = _card_source_languages(table)
     counts: dict[str, int] = {}
     for r in rows:
-        code = _name_prefix_code(r["name"])
-        if code:
+        for code in _card_codes(r, source_codes):
             counts[code] = counts.get(code, 0) + 1
     return sorted(({"code": c, "count": n} for c, n in counts.items()), key=lambda x: -x["count"])
 
@@ -12640,13 +12664,20 @@ def smart_bulk_exclude(content_type: str, ids: list[int], keep_codes: list[str] 
     table = "movies" if content_type == "movie" else "series"
     conn = _connect()
     all_rows = conn.execute(f"SELECT id, name FROM {table}").fetchall()
+    # KNM: 2026-10-11 -- judge a sibling by its sources' raw provider names
+    # (rules may have stripped the prefix from the card name); a card with
+    # no sources falls back to its own name.
+    sources, fk = _CARD_SOURCES[table]
+    raw_codes: dict[int, set] = {}
+    for src in conn.execute(f"SELECT {fk} AS card_id, raw_name FROM {sources}").fetchall():
+        raw_codes.setdefault(src["card_id"], set()).add(_name_prefix_code(src["raw_name"] or ""))
     conn.close()
 
     by_id: dict[int, dict] = {}
     by_bare: dict[str, list[dict]] = {}
     for r in all_rows:
-        code = _name_prefix_code(r["name"])
-        entry = {"id": r["id"], "name": r["name"], "code": code}
+        codes = raw_codes.get(r["id"]) or {_name_prefix_code(r["name"])}
+        entry = {"id": r["id"], "name": r["name"], "codes": codes}
         by_id[r["id"]] = entry
         by_bare.setdefault(_strip_lang_prefixes(r["name"]), []).append(entry)
 
@@ -12659,7 +12690,7 @@ def smart_bulk_exclude(content_type: str, ids: list[int], keep_codes: list[str] 
             continue
         bare = _strip_lang_prefixes(entry["name"])
         has_keeper = any(
-            sib["id"] != item_id and (sib["code"] is None or sib["code"] in keep_set)
+            sib["id"] != item_id and any(code is None or code in keep_set for code in sib["codes"])
             for sib in by_bare.get(bare, [])
         )
         if has_keeper:
@@ -12702,10 +12733,10 @@ def _library_rows(table: str, search: str | None, excluded: bool | None, script:
         rows = [r for r in rows if _is_non_latin_name(r["name"])]
     if prefixes:
         wanted = set(prefixes)
-        # Keep in sync with list_library_prefixes' identical EN fallback --
-        # otherwise "EN" is listed as a selectable filter option but
-        # selecting it silently returns zero rows.
-        rows = [r for r in rows if (_name_prefix_code(r["name"]) or "EN") in wanted]
+        # Keep in sync with list_library_prefixes (same _card_codes) --
+        # otherwise a listed filter option can silently return zero rows.
+        source_codes = _card_source_languages(table)
+        rows = [r for r in rows if _card_codes(r, source_codes) & wanted]
     return rows
 
 
@@ -12875,10 +12906,11 @@ def list_all_pool_country_suffixes() -> list[dict]:
 def list_library_prefixes(content_type: str, search: str | None = None, excluded: bool | None = None, script: str | None = None) -> list[dict]:
     table = "movies" if content_type == "movie" else "series"
     rows = _library_rows(table, search, excluded, script, None)
+    source_codes = _card_source_languages(table)
     counts: dict[str, int] = {}
     for r in rows:
-        code = _name_prefix_code(r["name"]) or "EN"
-        counts[code] = counts.get(code, 0) + 1
+        for code in _card_codes(r, source_codes):
+            counts[code] = counts.get(code, 0) + 1
     return sorted(({"code": c, "count": n} for c, n in counts.items()), key=lambda x: -x["count"])
 
 
