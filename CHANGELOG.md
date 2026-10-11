@@ -31,6 +31,42 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-11 (Fewer provider calls, language tools by source language, TMDB library opt-in)
+
+- ✅ **Bulk enrichment no longer calls your providers for episodes.** A
+  scheduled or manual "enrich all" used to request every show's episode list
+  from the provider (~10,000 calls in one run on the test bed). Episodes now
+  come only from opening or playing a show, the **Fetch Episodes** button, and
+  the paced background episode trickle. Bulk enrichment stays local
+  (Plex/library/TMDB).
+- ✅ **Import Language exclusions work as a real policy.** Excluding an import
+  language now archives cards whose every source is in an excluded language,
+  independent of Playback Languages. **Re-apply** previews the exact
+  archive/restore counts first and only touches archives it created; sources
+  are never deleted and manual archives are left alone. The result also
+  reports how many cards were **already archived**, so a re-run that changes
+  nothing no longer looks like it did nothing.
+- ✅ **Sync History is sturdier and easier to manage.** Run records are written
+  without blocking imports, interrupted runs close cleanly after a restart, and
+  a new **select-all** checkbox selects every report at once.
+- ✅ **Excluded-category cleanup previews the change before saving.**
+- ✅ **Language tools read each source's real language.** Title & Metadata
+  Rules strip prefixes such as `ES|` from card names, which made the Import
+  Language picker, the Library language filter, the Missing Artwork language
+  filter and Smart Exclude treat almost everything as English. They now use
+  each source's stored language, the picker always offers every known code
+  (plus a custom code), and Smart Exclude judges sibling cards by their
+  sources.
+- ✅ **The local TMDB library is now opt-in.** New installs start with it off.
+  While it is on, the daily TMDB ID list download keeps running so local name
+  matching stays current; while it is off, nothing is downloaded. Existing
+  installs that saved the setting as on keep it on. The "Pre-fill top N"
+  setting was removed: the library fills only from titles in your catalog.
+  This change is also on upstream PR
+  [#47](https://github.com/jstevenscl/vod-manager/pull/47).
+- **Verification:** full backend suite: 603 passed; frontend production build
+  passed.
+
 ## 2026-10-10 (Updated to upstream v0.2.24)
 
 - ✅ **Playback-language inventory is easier to scan.** The playback picker is
@@ -200,18 +236,15 @@ upstream `main` and independent of #35.
   - fill settings
   - a lookup box
   - a Clear button
-- ✅ 🔀 **On/off switch.** Off stops the fill and sends every lookup straight
-  to TMDB, as before. Use it if disk space is tight. The existing file stays
-  until you clear it.
+- ✅ 🔀 **On/off switch, off by default** (changed 2026-10-11). Off stops the
+  fill and the daily ID list download, and sends every lookup straight to
+  TMDB, as before. The existing file stays until you clear it.
 - ✅ 🔀 **Shared toast messages.** "Settings saved" and future confirmations
   use one reusable toast component.
-- **Disk usage — expect up to ~1.5 GB.** Measured on the test bed:
-  - after loading TMDB's ID lists (~1.4M IDs) and ~2,000 titles, the file was
-    ~155 MB, of which ~143 MB is a fixed cost for the ID lists
-  - each stored title adds about 6 KB
-  - a full pre-fill at the defaults (100k movies + 100k shows) comes to
-    roughly 1.3–1.5 GB and takes a few weeks at the default rate
-  - lowering "Pre-fill top N" shrinks that proportionally
+- **Disk usage.** Measured on the test bed: TMDB's ID lists (~1.4M IDs) are a
+  fixed ~143 MB, and each stored title adds about 6 KB. Since 2026-10-11 the
+  library fills only from titles in your catalog (the "Pre-fill top N" option
+  was removed), so size tracks your library rather than TMDB's top lists.
 - **Tests:**
   - 36 new tests cover the store, the fill and the on/off routing
   - full backend suite: 251 passed on the upstream PR branch
