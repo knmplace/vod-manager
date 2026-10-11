@@ -42,3 +42,24 @@ def test_all_untagged_pool_shows_en_not_empty(db):
 
     counts = {p["code"]: p["count"] for p in db.list_all_pool_prefixes()}
     assert counts == {"EN": 5}
+
+
+def test_rule_stripped_display_name_counts_source_language(db):
+    # KNM: 2026-10-11 -- Title & Metadata Rules strip "ES - " from the card
+    # name; the picker must still see ES via the source's raw_name.
+    provider_id = db.upsert_provider("prov1", "http://example.com", "user", "pass")
+    _import_movie(db, provider_id, "3 dias en Malay", "es-1", "ES - 3 dias en Malay", tmdb_id=300)
+    _import_movie(db, provider_id, "Amelie", "en-1", "Amelie", tmdb_id=194)
+
+    counts = {p["code"]: p["count"] for p in db.list_all_pool_prefixes()}
+    assert counts == {"ES": 1, "EN": 1}
+
+
+def test_card_with_sources_in_two_languages_counts_under_each(db):
+    p1 = db.upsert_provider("prov1", "http://example.com", "user", "pass")
+    p2 = db.upsert_provider("prov2", "http://example2.com", "user", "pass")
+    _import_movie(db, p1, "Heat", "en-1", "EN| Heat", tmdb_id=949)
+    _import_movie(db, p2, "Heat", "es-1", "ES| Heat", tmdb_id=949)
+
+    counts = {p["code"]: p["count"] for p in db.list_all_pool_prefixes()}
+    assert counts == {"EN": 1, "ES": 1}

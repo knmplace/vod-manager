@@ -5134,7 +5134,10 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
   }, [importLanguageExclusionQuery.data])
   const allLanguageCodes = (() => {
     const counts = new Map((languagePrefixesQuery.data ?? []).map((p) => [p.code, p.count]))
-    for (const code of importLanguageExclusionQuery.data?.exclude_prefixes ?? []) {
+    // KNM: 2026-10-11 -- also offer every named code and anything in the
+    // draft, so a code with no stored titles (because it is already
+    // excluded) can still be re-selected after being unchecked and saved.
+    for (const code of [...(importLanguageExclusionQuery.data?.exclude_prefixes ?? []), ...Object.keys(LANGUAGE_CODE_NAMES), ...languageDraft]) {
       if (!counts.has(code)) counts.set(code, 0)
     }
     return [...counts.entries()]
@@ -5148,6 +5151,10 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
     if (languageShowFilter === 'unselected' && languageDraft.has(c.code)) return false
     return true
   })
+  // A provider tag the picker has never seen (e.g. "EXYU") can be typed in.
+  const typedLanguageCode = languageSearch.trim().toUpperCase()
+  const customLanguageCode = /^[A-Z]{2,6}$/.test(typedLanguageCode) && !allLanguageCodes.some((c) => c.code === typedLanguageCode)
+    ? typedLanguageCode : null
   function toggleLanguageSelected(code: string, index: number, shiftKey: boolean) {
     const willBeChecked = !languageDraft.has(code)
     const next = new Set(languageDraft)
@@ -9235,6 +9242,14 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
                 </button>
                 <span className="text-muted-foreground ml-auto">{languageDraft.size} selected total · shift-click to select a range</span>
               </div>
+              {customLanguageCode && (
+                <button
+                  className="self-start text-xs text-primary underline decoration-dotted"
+                  onClick={() => { setLanguageDraft(new Set([...languageDraft, customLanguageCode])); setLanguageSearch('') }}
+                >
+                  Add and select code "{customLanguageCode}"
+                </button>
+              )}
               <div className="max-h-48 overflow-y-auto space-y-0.5 border border-border rounded p-2 text-xs">
                 {visibleLanguageCodes.map((c, i) => (
                   <label key={c.code} className="flex items-center gap-1.5 select-none">

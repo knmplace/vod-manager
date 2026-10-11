@@ -12791,14 +12791,28 @@ def list_all_pool_prefixes() -> list[dict]:
     were invisible here, making the pool look almost empty and making "EN"
     impossible to select/exclude even though it's the actual language most
     untagged content is in."""
+    # KNM: 2026-10-11 -- count by each source's stored language (from its
+    # raw provider name), not the card name: Title & Metadata Rules commonly
+    # strip "ES|"-style prefixes from the card name, which made every card
+    # look EN and hid real codes from the picker. A card is counted once per
+    # distinct source language; cards with no sources fall back to the name.
     conn = _connect()
     counts: dict[str, int] = {}
-    for table in ("movies", "series"):
-        rows = conn.execute(f"SELECT name FROM {table}").fetchall()
+    for table, sources, fk in (("movies", "movie_sources", "movie_id"), ("series", "series_sources", "series_id")):
+        rows = conn.execute(
+            f"SELECT t.id, t.name, s.language, s.raw_name FROM {table} t "
+            f"LEFT JOIN {sources} s ON s.{fk} = t.id"
+        ).fetchall()
+        seen: set[tuple[int, str]] = set()
         for r in rows:
-            code = _name_prefix_code(r["name"]) or "EN"
-            if code not in _NON_LANGUAGE_PIPE_TAGS:
-                counts[code] = counts.get(code, 0) + 1
+            if r["raw_name"] is None and r["language"] is None:
+                code = _name_prefix_code(r["name"]) or "EN"
+            else:
+                code = (r["language"] or _source_language(r["raw_name"])).strip().upper()
+            if code in _NON_LANGUAGE_PIPE_TAGS or (r["id"], code) in seen:
+                continue
+            seen.add((r["id"], code))
+            counts[code] = counts.get(code, 0) + 1
     conn.close()
     return sorted(({"code": c, "count": n} for c, n in counts.items()), key=lambda x: -x["count"])
 
