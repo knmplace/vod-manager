@@ -9114,7 +9114,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
       {activeTab === 'curation' && (
       <>
       {/* KNM: 2026-10-03 -- the three import/playback language and country filters side by side as equal columns */}
-      <div className="grid gap-4 lg:grid-cols-3 items-stretch">
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.28fr)_minmax(0,1fr)] items-stretch">
         <SectionCard title="Import Language Exclusion" icon={<Trash2 size={14} />}>
           <p className="text-xs text-muted-foreground">
             Auto-archives matching movies/series the moment they're imported (or re-imported) — global across every
@@ -9254,6 +9254,11 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
             needed. Unchecking one instantly removes eligibility for sources in that language, which can take a title
             out of streaming/export entirely if that was its only enabled-language source.
           </p>
+          <p className="text-xs text-muted-foreground">
+            Counts below are stored source records, not active catalog cards. Unchecked languages cannot play;
+            cards with no checked source are archived automatically. Sources remain listed so a language can be
+            reviewed or enabled later, while cards that also have an enabled-language source stay active.
+          </p>
           <div className="flex items-center gap-1.5">
             <input
               className={inputCls('flex-1')}
@@ -9290,16 +9295,15 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
           </div>
           <div className="max-h-48 overflow-y-auto space-y-0.5 border border-border rounded p-2 text-xs">
             {visibleEnabledLanguageCodes.map((c, i) => (
-              <label key={c.code} className="flex items-center gap-1.5 select-none">
+              <label key={c.code} className="grid grid-cols-[auto_auto_minmax(0,1fr)] items-start gap-x-1.5 select-none">
                 <input
                   type="checkbox"
                   checked={enabledLanguageDraft.has(c.code)}
                   onChange={() => {}}
                   onClick={(e) => toggleEnabledLanguageSelected(c.code, i, e.shiftKey)}
                 />
-                <span className="font-mono">{c.code}</span>
-                {LANGUAGE_CODE_NAMES[c.code] && <span className="text-muted-foreground">— {LANGUAGE_CODE_NAMES[c.code]}</span>}
-                <span className="text-muted-foreground ml-auto">{(c.movie_count + c.series_count + c.episode_count) > 0 ? `${c.movie_count} movies · ${c.series_count} shows · ${c.episode_count} episodes` : 'no active sources'}</span>
+                <span className="font-mono" title={LANGUAGE_CODE_NAMES[c.code]}>{c.code}</span>
+                <span className="min-w-0 text-muted-foreground tabular-nums">{(c.movie_count + c.series_count + c.episode_count) > 0 ? `${c.movie_count} movies / ${c.series_count} shows / ${c.episode_count} episodes` : 'no stored sources'}</span>
               </label>
             ))}
             {visibleEnabledLanguageCodes.length === 0 && <p className="text-muted-foreground">No languages match.</p>}

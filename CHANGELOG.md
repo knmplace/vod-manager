@@ -33,6 +33,12 @@ instead of opening a duplicate request.
 
 ## 2026-10-10 (Updated to upstream v0.2.24)
 
+- ✅ **Playback-language inventory is easier to scan.** The playback picker is
+  wider, shows language codes only (the full name remains available as a
+  hover label), and keeps movie/show/episode counts together without crowding.
+  Its helper text now distinguishes stored source records from active catalog
+  cards: unchecked-language-only cards are archived, while alternate disabled
+  sources remain stored for safe review or later re-enabling.
 - 🔀 **Upstream PR [#35](https://github.com/jstevenscl/vod-manager/pull/35) was
   rebuilt as a small Sync History lifecycle proposal.** It now records concise,
   durable start/finish summaries for each catalog import and closes interrupted
