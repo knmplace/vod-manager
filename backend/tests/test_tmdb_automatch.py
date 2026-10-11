@@ -20,6 +20,7 @@ def env(db, tmp_path, monkeypatch):
     for mod in (tmdb_sync, library_matcher):
         monkeypatch.setattr(mod, "get_tmdb_api_key", lambda: "k")
     tmdb_store.init_db()
+    config.save_tmdb_store_settings({"enabled": True})  # library is opt-in
     fake = FakeTmdb()
     monkeypatch.setattr(tmdb_sync, "_tmdb_get", fake)
     return db, fake

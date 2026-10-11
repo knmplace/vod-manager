@@ -1,8 +1,8 @@
 """
 Keeps the local TMDB store (tmdb_store) filled and fresh in the background.
 
-Active only once a TMDB API key is saved (and the store isn't disabled in its
-settings). Each cycle, as due:
+Opt-in: active only once a TMDB API key is saved and the library is turned
+on in its settings. Each cycle, as due:
   - import TMDB's daily ID export (keyless file download, once a day) -- the
     identity/name index used for complete local-match answers;
   - refresh: mark stored titles TMDB reports as changed (/movie/changes,
