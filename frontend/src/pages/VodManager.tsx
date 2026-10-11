@@ -5420,7 +5420,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
   }
   type ImportPolicyCardSummary = {
     cards_evaluated: number; cards_without_sources: number; cards_all_sources_excluded: number
-    cards_archived: number; cards_restored: number; manual_cards_unchanged: number
+    cards_archived: number; cards_restored: number; cards_already_archived?: number; manual_cards_unchanged: number
     archive_samples: { id: number; name: string; sources: number; reasons: string[] }[]
     restore_samples: { id: number; name: string; sources: number }[]
   }
@@ -5455,7 +5455,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
       qc.invalidateQueries({ queryKey: ['vod-missing-artwork'] })
       qc.invalidateQueries({ queryKey: ['vod-missing-artwork-counts'] })
       invalidateApprovalQueues(qc)
-      notify(`Import policy applied: ${report.movies.cards_archived + report.series.cards_archived} archived, ${report.movies.cards_restored + report.series.cards_restored} restored.`)
+      notify(`Import policy applied: ${report.movies.cards_archived + report.series.cards_archived} archived, ${report.movies.cards_restored + report.series.cards_restored} restored, ${(report.movies.cards_already_archived ?? 0) + (report.series.cards_already_archived ?? 0)} already archived.`)
     },
   })
   const [aiKeyInputs, setAiKeyInputs] = useState<{ anthropic: string; openai: string; gemini: string }>({
@@ -9312,7 +9312,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
                 {importPolicyPreview.sources.excluded} of {importPolicyPreview.sources.total} stored movie/show sources match at least one import rule; {importPolicyPreview.sources.allowed} remain allowed.
               </p>
               <p className="text-muted-foreground">
-                Cards: {importPolicyPreview.movies.cards_archived} movies + {importPolicyPreview.series.cards_archived} shows {importPolicyApplied ? 'archived' : 'would be archived'}; {importPolicyPreview.movies.cards_restored} movies + {importPolicyPreview.series.cards_restored} shows {importPolicyApplied ? 'restored' : 'would be restored'}.
+                Cards: {importPolicyPreview.movies.cards_archived} movies + {importPolicyPreview.series.cards_archived} shows {importPolicyApplied ? 'archived' : 'would be archived'}; {importPolicyPreview.movies.cards_restored} movies + {importPolicyPreview.series.cards_restored} shows {importPolicyApplied ? 'restored' : 'would be restored'}; {(importPolicyPreview.movies.cards_already_archived ?? 0) + (importPolicyPreview.series.cards_already_archived ?? 0)} already archived.
               </p>
               <p className="text-muted-foreground">
                 Manual archives unchanged: {importPolicyPreview.movies.manual_cards_unchanged + importPolicyPreview.series.manual_cards_unchanged}. Cards with an allowed source stay active. No cards, sources, or files are deleted.

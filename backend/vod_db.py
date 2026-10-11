@@ -12453,6 +12453,9 @@ def apply_import_exclusion_policy(
                 "cards_all_sources_excluded": 0,
                 "cards_archived": 0,
                 "cards_restored": 0,
+                # KNM: 2026-10-11 matched the rules but were already archived
+                # (earlier sweep, manual, or another rule) -- explains 0/0 re-runs.
+                "cards_already_archived": 0,
                 "manual_cards_unchanged": 0,
                 "archive_samples": [],
                 "restore_samples": [],
@@ -12496,6 +12499,8 @@ def apply_import_exclusion_policy(
                 should_archive = excluded_sources == len(sources)
                 if should_archive:
                     summary["cards_all_sources_excluded"] += 1
+                    if row["review_excluded"] or row["review_excluded_import_policy"]:
+                        summary["cards_already_archived"] += 1
                 if row["review_excluded_manual"]:
                     summary["manual_cards_unchanged"] += 1
                     continue

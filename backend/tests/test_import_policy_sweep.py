@@ -182,3 +182,23 @@ def test_apply_route_rejects_stale_policy_preview(db):
         assert False, "expected stale preview to be rejected"
     except vod_routes.HTTPException as exc:
         assert exc.status_code == 409
+
+
+def test_reapply_reports_cards_already_archived(db):
+    provider_id = _provider(db, "xc")
+    policy_movie = db.upsert_movie("Policy movie", 2020)
+    _movie_source(db, policy_movie, provider_id, "es-1", "ES - Policy movie", "ES")
+    manual_movie = db.upsert_movie("Manual movie", 2021)
+    _movie_source(db, manual_movie, provider_id, "es-2", "ES - Manual movie", "ES")
+    db.bulk_set_review_excluded("movie", [manual_movie], True)
+    allowed_movie = db.upsert_movie("Allowed movie", 2022)
+    _movie_source(db, allowed_movie, provider_id, "en-1", "EN - Allowed movie", "EN")
+
+    first = db.apply_import_exclusion_policy(["ES"], False, [], dry_run=False)
+    assert first["movies"]["cards_archived"] == 1
+    assert first["movies"]["cards_already_archived"] == 1  # the manual one
+
+    again = db.apply_import_exclusion_policy(["ES"], False, [], dry_run=False)
+    assert again["movies"]["cards_archived"] == 0
+    assert again["movies"]["cards_restored"] == 0
+    assert again["movies"]["cards_already_archived"] == 2
