@@ -204,8 +204,8 @@ export default function TmdbStore() {
       <SectionCard title="TMDB Library" icon={<Database size={14} />}>
         <p className="text-xs text-muted-foreground">
           A local copy of TMDB movie and TV details used by your current catalog. Referenced titles are refreshed before
-          the cache limit; unreferenced details are cleared daily. Starts automatically once a TMDB API key is saved
-          under Configuration → API Keys.
+          the cache limit; unreferenced details are cleared daily. It is off until you turn it on above, and needs a
+          TMDB API key under Configuration → API Keys.
         </p>
         {statusQuery.isLoading || !status ? (
           <Loader2 size={14} className="animate-spin" />

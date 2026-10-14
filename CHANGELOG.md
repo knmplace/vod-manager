@@ -31,6 +31,50 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-13 (Updated to upstream v0.2.26)
+
+- ✅ 🔼 **The fork now includes upstream releases [v0.2.25](https://github.com/jstevenscl/vod-manager/releases/tag/v0.2.25) and
+  [v0.2.26](https://github.com/jstevenscl/vod-manager/releases/tag/v0.2.26).** v0.2.25 shipped three of this fork's
+  PRs: Sync History ([#35](https://github.com/jstevenscl/vod-manager/pull/35)),
+  the excluded-category skip, preview and cleanup flow
+  ([#39](https://github.com/jstevenscl/vod-manager/pull/39)), and the opt-in local
+  TMDB library ([#47](https://github.com/jstevenscl/vod-manager/pull/47)). It also
+  fixed the Providers page series count for freshly imported providers.
+  v0.2.26 brings:
+  - MDBList lists are no longer cut off at 500 items.
+  - Large list syncs no longer freeze the app.
+  - TMDB charts (Top Rated, Popular and others) can be used as List Sync sources.
+  - The MDBList API key is hidden in the logs.
+- ✅ **Metadata Review stays fast with the new TMDB ID indexes.** v0.2.26 adds
+  an index on `tmdb_id`, and SQLite started using it for the review list
+  query. That index matches every unenriched row, so the review list would
+  have slowed down. The query now keeps using the small review indexes.
+- ✅ **Language split tools use upstream's version.** Split Movies / Split Series
+  preview and apply now use upstream's implementation. The series split keeps
+  the fork's episode handling: when one provider carries both languages, each
+  episode goes to the matching language's card. Upstream moves every episode
+  from that provider to the new card.
+- ✅ **"Archive new categories" works as upstream ships it again.** New
+  categories are stored separately as auto-archived instead of being written
+  into your saved exclusion list (this replaces the 2026-10-05 change). Their
+  content is imported archived. Categories that the old behaviour added to
+  your saved exclusions stay there until you remove them.
+- ✅ **Movie enrichment counts unchanged re-fetches** (upstream's backoff
+  counter). The fork still never re-polls an enriched movie on a timer.
+- **Deliberate differences from upstream** (unchanged by this update):
+  - The fork's post-import pipeline is kept instead of upstream's known-series
+    identity reconciliation.
+  - Bulk enrichment never calls your providers for episodes, so a newly added
+    provider's episodes are fetched alone.
+  - Our fuller Sync History is kept (per-item events, Movies/Series tabs, deleteable reports).
+  - The TMDB library fills missing catalog titles before refreshing changed ones.
+- 🔀 [#48](https://github.com/jstevenscl/vod-manager/pull/48) and
+  [#49](https://github.com/jstevenscl/vod-manager/pull/49) are being rebuilt on
+  v0.2.26 at upstream's request.
+- **Verification:** full backend suite: 642 passed, 2 skipped (upstream timed
+  movie re-poll tests); upstream's own v0.2.26 tests were also run against the
+  fork code and every difference is explained above; `tsc` clean.
+
 ## 2026-10-11 (Fewer provider calls, language tools by source language, TMDB library opt-in)
 
 - ✅ **Bulk enrichment no longer calls your providers for episodes.** A
@@ -75,14 +119,15 @@ instead of opening a duplicate request.
   Its helper text now distinguishes stored source records from active catalog
   cards: unchecked-language-only cards are archived, while alternate disabled
   sources remain stored for safe review or later re-enabling.
-- 🔀 **Upstream PR [#35](https://github.com/jstevenscl/vod-manager/pull/35) was
-  rebuilt as a small Sync History lifecycle proposal.** It now records concise,
+- 🔼 **Upstream PR [#35](https://github.com/jstevenscl/vod-manager/pull/35) was
+  rebuilt as a small Sync History lifecycle proposal** (shipped upstream in
+  [v0.2.25](https://github.com/jstevenscl/vod-manager/releases/tag/v0.2.25)). It now records concise,
   durable start/finish summaries for each catalog import and closes interrupted
   runs after a restart. The proposal deliberately does not change country
   exclusions, Metadata Review performance queries, enrichment/language rules,
   Duplicate Finder, or reconciliation behavior; those need separate reviewable
-  follow-ups. This changelog entry tracks the proposal only—it is not part of
-  the deployed fork image yet.
+  follow-ups. The fork keeps its own fuller Sync History (per-item change
+  events, Movies/Series tabs, deleteable reports).
 
 - ✅ 🔼 **The fork now includes upstream releases v0.2.21 through v0.2.24.**
   This brings in the vanished-item transaction fix, Jellyfin 12.1 authentication
@@ -95,11 +140,11 @@ instead of opening a duplicate request.
   their own change signal or fallback interval is due.
 - ✅ **Language cleanup only restores its own archives.** Re-enabling a language
   cannot unarchive a title that was archived manually or by category cleanup.
-- ✅ 🔀 **Saved excluded categories are skipped without a delete/recreate
+- ✅ 🔼 **Saved excluded categories are skipped without a delete/recreate
   cycle.** Catalog refreshes no longer import and purge the same excluded XC
   titles every run. Import results now report how many movie and series rows
-  were skipped. Proposed upstream in [#39](https://github.com/jstevenscl/vod-manager/pull/39).
-- ✅ 🔀 **Excluded-category cleanup is preview-first.** Saving XC exclusions
+  were skipped. Shipped upstream in [v0.2.25](https://github.com/jstevenscl/vod-manager/releases/tag/v0.2.25) via [#39](https://github.com/jstevenscl/vod-manager/pull/39).
+- ✅ 🔼 **Excluded-category cleanup is preview-first.** Saving XC exclusions
   shows exact affected source/card counts and sample titles. Existing stored
   content is deleted only after **Apply cleanup** is clicked; scheduled imports
   never run that destructive cleanup automatically. Cards with another source
@@ -219,27 +264,27 @@ needs the local TMDB library).
 
 Proposed upstream as a standalone PR,
 [#47](https://github.com/jstevenscl/vod-manager/pull/47), based on current
-upstream `main` and independent of #35.
+upstream `main` and independent of #35. Shipped upstream in [v0.2.25](https://github.com/jstevenscl/vod-manager/releases/tag/v0.2.25).
 
-- ✅ 🔀 **TMDB lookups are saved locally and reused.** Once a TMDB API key is
+- ✅ 🔼 **TMDB lookups are saved locally and reused.** Once a TMDB API key is
   set, every title the app looks up is stored in `data/tmdb.sqlite` and served
   from there next time. This covers enrichment, Metadata Review search, AI
   resolve candidates, library matching and episode lists. Name searches use
   the local copy only when it finds an exact title match; anything else still
   goes to TMDB.
-- ✅ 🔀 **Background fill.** Current catalog titles that are missing, changed,
+- ✅ 🔼 **Background fill.** Current catalog titles that are missing, changed,
   or aging are fetched in small bursts (defaults: 2,000 × 4 bursts a day,
   20,000 requests/day cap, 4 at a time). TMDB's change feed keeps stored titles
   current.
-- ✅ 🔀 **TMDB Library page** under Curation & Maintenance shows:
+- ✅ 🔼 **TMDB Library page** under Curation & Maintenance shows:
   - store status
   - fill settings
   - a lookup box
   - a Clear button
-- ✅ 🔀 **On/off switch, off by default** (changed 2026-10-11). Off stops the
+- ✅ 🔼 **On/off switch, off by default** (changed 2026-10-11). Off stops the
   fill and the daily ID list download, and sends every lookup straight to
   TMDB, as before. The existing file stays until you clear it.
-- ✅ 🔀 **Shared toast messages.** "Settings saved" and future confirmations
+- ✅ 🔼 **Shared toast messages.** "Settings saved" and future confirmations
   use one reusable toast component.
 - **Disk usage.** Measured on the test bed: TMDB's ID lists (~1.4M IDs) are a
   fixed ~143 MB, and each stored title adds about 6 KB. Since 2026-10-11 the
@@ -257,19 +302,19 @@ upstream `main` and independent of #35.
 All four entries below are proposed upstream as a follow-up commit on
 [#35](https://github.com/jstevenscl/vod-manager/pull/35), which introduced the exact-year gate.
 
-- ✅ 🔀 **Cards with the same TMDB ID now auto-merge when their years differ by
+- ✅ ⛔ **Cards with the same TMDB ID now auto-merge when their years differ by
   1 or 2.** Providers often list a festival or regional year, which left the
   same film as two cards (e.g. *All Roads to Pearla* 2019 / *Sleeping in
   Plastic* 2020). A shared source language is still required, and gaps of 3+
   years stay for manual review.
-- ✅ 🔀 **Duplicate Finder explains each group.** A line under the badges says
+- ✅ ⛔ **Duplicate Finder explains each group.** A line under the badges says
   why the cards were not auto-merged: no TMDB ID, different TMDB IDs, no
   shared language, years too far apart, auto-merge turned off, or that the
   group qualifies and merges on the next refresh.
-- ✅ 🔀 **Year gap is adjustable.** Settings → Duplicate Finder has a 0–3 year
+- ✅ ⛔ **Year gap is adjustable.** Settings → Duplicate Finder has a 0–3 year
   dropdown (default 2; 0 = exact year only). Lowering it later does not split
   cards that already merged.
-- ✅ 🔀 **"Merge existing duplicates now" button.** Automatic merges only
+- ✅ ⛔ **"Merge existing duplicates now" button.** Automatic merges only
   re-check cards an import or refresh touched, so pairs that already qualify
   can sit split. The button runs the same auto-merge (same language and year
   rules) across the whole catalog once. Merges can't be undone, so download a
@@ -278,7 +323,7 @@ All four entries below are proposed upstream as a follow-up commit on
 
 ## 2026-10-05 (Newly discovered categories stay excluded)
 
-- ✅ **"Archive new categories" now keeps a new category excluded.** A
+- ✅ (Replaced 2026-10-13 by upstream's auto-archived model.) **"Archive new categories" now keeps a new category excluded.** A
   category first seen on an import was only excluded for that one run; the
   next import imported its content as active. New categories are now added
   to the provider's saved category exclusions, where you can untick them to
@@ -292,24 +337,25 @@ All four entries below are proposed upstream as a follow-up commit on
   That scope was subsequently replaced by the focused Sync History lifecycle
   proposal documented above. The other work must be proposed again in separate
   current-upstream PRs; this historical entry is retained only to explain why
-  #31, #43, #44, and #45 were closed at the time.
+  #31, #43, #44, and #45 were closed at the time. Entries that pointed at the
+  old #35 scope are now marked ⛔ (not upstream; fork only until re-proposed).
 
 ## 2026-10-04 (Excluded-category purge review fixes)
 
-- ✅ 🔀 **The excluded-category cleanup now uses only your saved exclusion
+- ✅ 🔼 **The excluded-category cleanup now uses only your saved exclusion
   list.** Follow-up to the review of
   [#39](https://github.com/jstevenscl/vod-manager/pull/39). Categories that
   "archive new categories" flags for one run are no longer treated as
   excluded by the cleanup, so their content isn't deleted.
-- ✅ 🔀 **The cleanup logs a warning summary** with counts and example titles
+- ✅ 🔼 **The cleanup logs a warning summary** with counts and example titles
   every time it removes content during an import.
-- ✅ 🔀 **The cleanup preview/apply endpoint is XC-only.** Plex, Emby and
+- ✅ 🔼 **The cleanup preview/apply endpoint is XC-only.** Plex, Emby and
   library providers get an error instead of risking removal of
   uncategorized content.
 
 ## 2026-10-04 (Artwork changes no longer count as catalog changes)
 
-- ✅ 🔀 **New posters from a provider no longer count as catalog changes.**
+- ✅ ⛔ **New posters from a provider no longer count as catalog changes.**
   Proposed upstream in [#35](https://github.com/jstevenscl/vod-manager/pull/35) (originally [#44](https://github.com/jstevenscl/vod-manager/pull/44), closed as superseded).
   A refresh now counts a title as changed only when something that affects
   playback or placement changes: stream id, file type, TMDB id, name,
@@ -322,7 +368,7 @@ All four entries below are proposed upstream as a follow-up commit on
   Verified live: the first refresh after upgrading showed 0 changed titles
   on all 4 providers (one provider had shown about 25,800 the run before),
   and no TMDB re-matching ran.
-- ✅ 🔀 **Opening a show loads its missing episodes.** Proposed upstream in
+- ✅ ⛔ **Opening a show loads its missing episodes.** Proposed upstream in
   [#35](https://github.com/jstevenscl/vod-manager/pull/35) (originally [#45](https://github.com/jstevenscl/vod-manager/pull/45), closed as superseded).
   Imports no longer wait on an episode-sync phase; the background preloader
   fills episodes over time, and opening a show fetches any provider that
@@ -330,24 +376,24 @@ All four entries below are proposed upstream as a follow-up commit on
 
 ## 2026-10-04 (Episode list preloading settings)
 
-- ✅ 🔀 **Episode lists preload about 3x faster, still gently.** Proposed upstream
+- ✅ ⛔ **Episode lists preload about 3x faster, still gently.** Proposed upstream
   in [#35](https://github.com/jstevenscl/vod-manager/pull/35) (originally [#43](https://github.com/jstevenscl/vod-manager/pull/43), closed as superseded). The background
   preloader now pauses 15 minutes between batches instead of 45, so it does
   about 290 shows per hour per provider instead of about 100. It still sends
   one request at a time with 3 seconds between requests.
-- ✅ 🔀 **Preloading is adjustable in Settings → Refresh Schedule.** Proposed
+- ✅ ⛔ **Preloading is adjustable in Settings → Refresh Schedule.** Proposed
   upstream in [#35](https://github.com/jstevenscl/vod-manager/pull/35) (originally [#43](https://github.com/jstevenscl/vod-manager/pull/43)). The new
   "Episode list preloading" section sets shows per batch, the pause between
   batches and the gap between requests. It explains what each one does and
   shows a live shows-per-hour estimate. Setting 0 shows turns preloading off.
   The card's help text is also brighter.
-- ✅ 🔀 **Shows whose episode list failed to load move to the back of the
+- ✅ ⛔ **Shows whose episode list failed to load move to the back of the
   queue.** Proposed upstream in [#35](https://github.com/jstevenscl/vod-manager/pull/35) (originally [#43](https://github.com/jstevenscl/vod-manager/pull/43)).
   The preloader used to keep a failed show at the front, so every batch started
   by re-trying the same dead shows. Now failed shows are tried only after every
   other pending show, and at most once a day. Opening or playing a show still
   loads its episodes right away.
-- ✅ 🔀 **A provider that keeps failing stops its batch early, as intended.**
+- ✅ ⛔ **A provider that keeps failing stops its batch early, as intended.**
   Proposed upstream in [#35](https://github.com/jstevenscl/vod-manager/pull/35) (originally [#43](https://github.com/jstevenscl/vod-manager/pull/43)).
   A failed episode-list request was not counted toward the "3 failures in a row"
   stop, so a failing provider was still sent the whole batch.
@@ -367,14 +413,14 @@ All four entries below are proposed upstream as a follow-up commit on
   Only XC providers wrote a history row; scheduled and Apply-rules refreshes
   of the other types left no trace. Apply rules also handled library
   (rclone/SMB) providers as XC, which failed; they now use the library importer.
-- ✅ 🔀 **Apply rules counts as a catalog refresh.** Proposed upstream in [#42](https://github.com/jstevenscl/vod-manager/pull/42). It re-imports every
+- ✅ 🔼 **Apply rules counts as a catalog refresh.** Shipped upstream in [v0.2.21](https://github.com/jstevenscl/vod-manager/releases/tag/v0.2.21) via [#42](https://github.com/jstevenscl/vod-manager/pull/42). It re-imports every
   provider but didn't reset the refresh timer, so the scheduler imported the
   same provider again shortly after.
 
 ## 2026-10-04 (Series merge keeps provider links)
 
-- ✅ 🔀 **"Apply rules" no longer re-creates the same shows as "new" on every
-  run.** Proposed upstream in [#41](https://github.com/jstevenscl/vod-manager/pull/41). When two cards for the same show were merged, the provider link on
+- ✅ 🔼 **"Apply rules" no longer re-creates the same shows as "new" on every
+  run.** Shipped upstream in [v0.2.21](https://github.com/jstevenscl/vod-manager/releases/tag/v0.2.21) via [#41](https://github.com/jstevenscl/vod-manager/pull/41). When two cards for the same show were merged, the provider link on
   the card being merged away was deleted along with it. On the next import
   that provider's show looked unknown, so it was created again as "new" and
   auto-merged again — about 30–50 shows per provider churned on every run.
@@ -392,15 +438,15 @@ All four entries below are proposed upstream as a follow-up commit on
 
 ## 2026-10-03 (Episode trickle pacing)
 
-The credential fix and the "Provider 5 of 4" label fix are proposed upstream in
-[#40](https://github.com/jstevenscl/vod-manager/pull/40) (follow-up to #39).
+The credential fix and the "Provider 5 of 4" label fix shipped upstream in
+[v0.2.21](https://github.com/jstevenscl/vod-manager/releases/tag/v0.2.21) via [#40](https://github.com/jstevenscl/vod-manager/pull/40) (follow-up to #39).
 Episode trickle pacing stays fork only: it depends on fork-only episode
 discovery changes that upstream doesn't have.
 
-- ✅ 🔀 **Docker build no longer hangs.** The frontend stage now builds once on
+- ✅ 🔼 **Docker build no longer hangs.** The frontend stage now builds once on
   the runner's native platform instead of under arm64 emulation, and the
   build job is capped at 30 minutes. A build that had sat for 36+ minutes now
-  completes in about 7. Proposed upstream in [#39](https://github.com/jstevenscl/vod-manager/pull/39).
+  completes in about 7. Shipped upstream in [v0.2.21](https://github.com/jstevenscl/vod-manager/releases/tag/v0.2.21) via [#39](https://github.com/jstevenscl/vod-manager/pull/39).
 - ✅ **Paced background episode discovery.** Episode lists and stream ids
   for shows that haven't been opened yet are now fetched on their own
   schedule instead of a handful at a time once every enrichment cycle.
@@ -412,18 +458,18 @@ discovery changes that upstream doesn't have.
     (`episode_trickle_batch`, `episode_trickle_interval_seconds`,
     `episode_trickle_spacing_seconds`).
   - Opening a show still fetches its episodes immediately.
-- ✅ 🔀 **Provider credentials hidden in "Apply rules" errors.** A failed
+- ✅ 🔼 **Provider credentials hidden in "Apply rules" errors.** A failed
   provider in the apply-rules summary no longer shows the provider's
-  username and password in the error URL. Proposed upstream in [#40](https://github.com/jstevenscl/vod-manager/pull/40).
+  username and password in the error URL. Shipped upstream in [v0.2.21](https://github.com/jstevenscl/vod-manager/releases/tag/v0.2.21) via [#40](https://github.com/jstevenscl/vod-manager/pull/40).
 - ✅ **Episode trickle no longer collides with "Apply rules".** A trickle
   run that overlapped a catalog import queued episode writes behind the
   import and a few were skipped with "database is locked". The trickle now
   skips its run while a catalog import is in progress, and stops early if
   one starts mid-run; the skipped shows are picked up on the next run.
-- ✅ 🔀 **"Provider 5 of 4" progress label fixed.** While "Apply rules" finished
+- ✅ 🔼 **"Provider 5 of 4" progress label fixed.** While "Apply rules" finished
   its final category re-sweep, the progress text counted one provider past
   the total and still named the last provider. It now reads "All N
-  provider(s) synced — finalizing…". Proposed upstream in [#40](https://github.com/jstevenscl/vod-manager/pull/40).
+  provider(s) synced — finalizing…". Shipped upstream in [v0.2.21](https://github.com/jstevenscl/vod-manager/releases/tag/v0.2.21) via [#40](https://github.com/jstevenscl/vod-manager/pull/40).
 
 ## 2026-10-03 (Curation layout)
 
@@ -473,7 +519,7 @@ discovery changes that upstream doesn't have.
     upstream's category-tag fallback is used last.
 
   **Fixes found during validation**
-  - 🔀 **Excluded categories now remove content already imported.** Adding a
+  - 🔼 **Excluded categories now remove content already imported.** Adding a
     provider category to the import exclusion list used to stop only *new*
     items; anything imported earlier stayed forever. XC imports now remove that
     provider's sources in excluded categories (and uncategorized sources when
@@ -499,7 +545,7 @@ discovery changes that upstream doesn't have.
     even when a newer import starts. Review timing now starts after enrichment
     instead of wrapping it. A cancelled enrichment (shutdown or redeploy) now
     marks its run as failed instead of leaving it "running".
-  - 🔀 TMDB review search (needs-review, missing-artwork, AI suggest, bulk AI)
+  - 🔼 TMDB review search (needs-review, missing-artwork, AI suggest, bulk AI)
     strips a trailing year and country tag from the stored name before
     searching, so titles like `Show (2014) (US)` find their match. Proposed
     upstream in [#39](https://github.com/jstevenscl/vod-manager/pull/39).
@@ -523,7 +569,7 @@ discovery changes that upstream doesn't have.
 
 ## 2026-09-22
 
-- ✅🔀 Provider imports now retain a deleteable, per-run catalog report. Each
+- ✅🔼 Provider imports now retain a deleteable, per-run catalog report. Each
   report records movie/series cards that were added or changed, preserves the
   provider-import, metadata/episode enrichment, and review-preparation timings,
   and can be opened or multi-selected from Curation & Maintenance without
@@ -544,7 +590,7 @@ discovery changes that upstream doesn't have.
 
 ## 2026-09-19
 
-- ✅🔀 Post-import catalog processing now completes the intended staged
+- ✅⛔ Post-import catalog processing now completes the intended staged
   handoff: TMDB metadata resolution runs first, then series-only provider
   detail calls discover episode streams. Movie metadata never falls back to a
   second provider call in this workflow. Automatic TMDB merges require
@@ -576,11 +622,11 @@ discovery changes that upstream doesn't have.
   the release baseline with the latest upstream release while retaining the
   fork-only workflow and operational improvements documented below.
 
-- ✅🔀 Playback relay recovery retries transient provider disconnects by
+- ✅🔼 Playback relay recovery retries transient provider disconnects by
   reopening the upstream at the next byte range. Normal client disconnects
   and superseded range requests remain normal playback behavior, and incomplete
   capacity reservations are hidden from Activity instead of displaying as
-  `undefined`/`NaN`. Proposed upstream in
+  `undefined`/`NaN`. Shipped upstream in [v0.2.20](https://github.com/jstevenscl/vod-manager/releases/tag/v0.2.20) via
   [#34](https://github.com/jstevenscl/vod-manager/pull/34).
 
 - ✅ Production validation with placeholder Provider A confirmed the staged
@@ -603,7 +649,7 @@ discovery changes that upstream doesn't have.
   cleanup and bounded-progress regression coverage passed 24 focused backend
   tests.
 
-- ✅🔀 Xtream/Emby catalog refreshes now scope episode-source ranking to the
+- ✅🔼 Xtream/Emby catalog refreshes now scope episode-source ranking to the
   requested series before SQLite runs its source-selection window, instead of
   ranking the entire episode catalog for every `get_series_info` request.
   Repeated client activity updates are also debounced, eliminating a SQLite
@@ -612,7 +658,7 @@ discovery changes that upstream doesn't have.
   upstream catalog. Regression coverage and before/after measurements are
   recorded with the deployment validation: representative series requests fell
   from about 4.05–4.12 seconds to 16–28 milliseconds on the production-sized
-  catalog snapshot. Proposed upstream in
+  catalog snapshot. Shipped upstream in [v0.2.20](https://github.com/jstevenscl/vod-manager/releases/tag/v0.2.20) via
   [#33](https://github.com/jstevenscl/vod-manager/pull/33).
 
 ## 2026-09-18
@@ -624,7 +670,7 @@ discovery changes that upstream doesn't have.
 - ✅ Enrichment progress now counts canonical series once instead of counting
   each provider source separately, preventing misleading totals above 100%.
 
-- ✅🔀 Metadata Review now provides an explicit **Merge into existing** action
+- ✅⛔ Metadata Review now provides an explicit **Merge into existing** action
   when a reviewer confirms a same-title catalog match that has no TMDB ID.
   Automatic matching remains disabled in that case; the merge requires an
   explicit confirmation. Proposed upstream in

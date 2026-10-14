@@ -51,7 +51,7 @@ async def _run_job(job_id: str) -> None:
                     # to retroactively apply yet -- this just re-runs the same
                     # idempotent import, and exists so a DVR provider doesn't
                     # fall into the XC branch below and error out.
-                    result = await dispatcharr_dvr_importer.import_dvr_recordings(p["id"])
+                    result = await vod_importer.run_tracked_import(p["id"], dispatcharr_dvr_importer.import_dvr_recordings)
                 else:
                     # KNM: 2026-10-04 -- the background TMDB pass picks up
                     # pending items; scheduling a sweep per provider here was

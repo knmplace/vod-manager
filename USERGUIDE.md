@@ -185,6 +185,15 @@ click **Add**.
 
 ![Providers table](docs/screenshots/providers.png)
 
+The **Movies** and **Series** columns show *imported / the provider's own
+reported total* as of its last import (Xtream-Codes providers only). Series
+count as soon as they are imported; their episodes are fetched afterwards by
+enrichment, so the **Episodes** column can lag behind while a new provider
+is still being enriched. Every catalog import is also recorded with its start
+and finish time, outcome and summary; `GET /api/vod/sync-history/` lists the
+recent runs (a run still marked running when the app restarts is closed out as
+failed, "interrupted by restart").
+
 Each provider row also has:
 
 - **Priority** — lower numbers are preferred when the same title is
@@ -387,7 +396,24 @@ providers hit where an item is reported with no category at all — since
 that has no name to match against, it can't be caught by picking specific
 categories and needs its own switch.
 
-![Exclude Categories picker for a provider](docs/screenshots/exclude-categories-modal.png)
+![Exclude Categories picker for a provider, showing the change preview](docs/screenshots/exclude-categories-modal.png)
+
+Changes go through a **preview first**: tick or untick categories and click
+**Preview changes**. Nothing is saved or deleted at that point — the dialog
+lists the categories being newly excluded or allowed again and how many
+stored sources, episode sources and cards the change would affect. Then
+**Confirm & save exclusions** saves the list (a separate confirmation), and
+only after it is saved does **Apply cleanup** appear, which removes what the
+preview showed. Saving alone never deletes stored content.
+
+On Xtream-Codes providers, categories in the saved list are **skipped
+during import** — their movies and series are not created at all, so they
+don't come back after a cleanup. Cleanup removes that provider's sources in
+the excluded categories; a movie or show that another provider also carries
+stays, one left with no source is deleted, and anything you curated by hand is
+never touched. The preview and the cleanup always report the same counts.
+Cleanup is XC-only: for Plex/Emby/Jellyfin the exclusion still applies to future
+imports, but existing content is not removed.
 
 If a provider's own category list has drifted since you last set exclusions
 (a category renamed or removed on their end), the picker calls those out
@@ -1644,7 +1670,18 @@ just the features below. TMDB's terms require attribution (shown on the
 Configuration page and in the README) and limit how long TMDB data may be
 cached (6 months); the key is yours, so following
 [TMDB's API terms](https://www.themoviedb.org/api-terms-of-use) is up to you.
-It unlocks real TMDB search for the Needs Review
+The optional local TMDB library is off by default; turn it on from the TMDB Library page in the sidebar
+(it needs the TMDB key above). It is catalog-first: it fills known movie and show
+IDs only, refreshes retained records after 150 days, removes unreferenced data
+daily, and never serves data older than 170 days. The TMDB Library page
+has a cleanup preview, so you can review the affected records before
+applying removal. Once it is on, TMDB's daily ID export is downloaded at most
+once a day (no API key or request budget needed) so name search can be
+answered locally.
+
+![TMDB Library page](docs/screenshots/tmdb-library.png)
+
+The TMDB key unlocks real TMDB search for the Needs Review
 and Missing Artwork flows above, plus two ways to auto-populate
 categories from a public list — both only ever place items already present
 in your pool; neither pulls in anything new.
@@ -1677,6 +1714,43 @@ as a matching index; it does not pre-fill unrelated title details.
   [MDBList API key](https://mdblist.com) (Configuration → API Keys) unlocks
   MDBList as a second source kind, alongside TMDB Lists.
 
+**Finding a list's ID.** A TMDB List ID is the number at the end of a list's
+own page, `themoviedb.org/list/<number>`. Only user-made lists have one. An
+MDBList ID is the list's numeric ID, shown in the list's API/Info section on
+mdblist.com. Lists of any length are fetched in full (MDBList lists are read
+page by page).
+
+**TMDB charts.** TMDB's built-in browse pages — **Top Rated**, **Popular**,
+**Now Playing**, **Upcoming** (movies) and **Top Rated**, **Popular**,
+**Airing Today**, **On The Air** (TV) — are not lists and have no ID, so they
+have their own source type: in **List Sync**, choose **TMDB Chart** and pick
+one from the dropdown. TMDB keeps these charts current, so the category
+follows them on the normal list-sync schedule (use *Mirror* mode to also drop
+titles that fall off the chart). A chart source covers TMDB's top 500 entries.
+A movie chart fills a movie category and a TV chart a series category.
+
+> **Charts do not update on their own until you turn on List Sync.** Adding a
+> chart source and clicking **Sync now** fills the category once; after that it
+> only changes when you click **Sync now** again. To keep it current
+> automatically, set **Configuration → Refresh Schedule → List Sync (hrs)** to
+> how often it should re-check (e.g. `24` for daily — charts move slowly, so
+> daily is plenty). That one setting applies to every category linked to a
+> TMDB List, MDBList list or TMDB chart; it is blank (off) by default.
+>
+> **Titles that drop off the chart are not removed unless the category is in
+> Mirror mode.** In the default **Add only** mode a sync only ever adds, so the
+> category slowly accumulates everything that has ever been on the chart. Set
+> the category's **On sync** mode to **Mirror (also removes)** (next to its
+> sources) to have it track the chart exactly: anything no longer on the chart
+> is removed on the next sync — including titles you placed by hand, so use
+> Mirror only for categories that exist to reflect their sources. A sync where
+> any source failed to load never removes anything.
+>
+> For a "stays up to date with Top Rated" category: add the chart, choose
+> **Mirror**, and set **List Sync (hrs)**.
+
+![TMDB Chart as a List Sync source](docs/screenshots/category-list-sync-tmdb-chart.png)
+
 ![Multi-source List Sync on a category, with the Add only / Mirror mode picker](docs/screenshots/category-list-sync-mirror-mode.jpg)
 
 Both matching engines work the same way: each list entry's own TMDB id is
@@ -1707,8 +1781,10 @@ page a provider's API returns.
   reconfirmed is gone."
 
 A manual **Sync now** on the category runs immediately; **Configuration →
-Refresh Schedule → List Sync** controls how often it happens automatically
-(off by default).
+Refresh Schedule → List Sync (hrs)** controls how often every list-sourced
+category (TMDB List, MDBList or TMDB chart) re-syncs automatically — **blank
+means off**, the default, in which case categories only update when you click
+**Sync now**.
 
 ---
 

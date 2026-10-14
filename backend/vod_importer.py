@@ -642,16 +642,22 @@ class XCProviderClient:
 async def _import_movies_for_provider(
     client: "XCProviderClient", provider: dict, provider_id: int,
     category_names: dict[str, str], exclude_categories: list[str], exclude_uncategorized: bool,
+    lang: dict | None = None, country: list[str] | None = None, *,
+    archive_categories: set[str] | None = None,
 ) -> tuple[dict, int, set[str]]:
     fetch_started = time.time()
     streams = await client.get_vod_streams()
     fetch_elapsed = time.time() - fetch_started
     movie_name_rules = await asyncio.to_thread(vod_db.get_active_rules_for_field, "movie", "name")
-    lang = _current_lang_settings()
-    country = config.get_import_country_exclusion()
+    # KNM: 2026-10-13 -- upstream's signature passes lang/country in; the fork
+    # still reads them itself when a caller doesn't.
+    if lang is None:
+        lang = _current_lang_settings()
+    if country is None:
+        country = config.get_import_country_exclusion()
     movie_items, seen_stream_ids = await asyncio.to_thread(
         _build_movie_import_items, streams, category_names, exclude_categories,
-        exclude_uncategorized, lang, movie_name_rules, country,
+        exclude_uncategorized, lang, movie_name_rules, country, archive_categories,
     )
     db_started = time.time()
     movie_result = await asyncio.to_thread(vod_db.bulk_import_movies, provider_id, movie_items)
@@ -666,7 +672,7 @@ async def _import_movies_for_provider(
     return movie_result, len(streams), seen_stream_ids
 
 
-def _build_movie_import_items(streams, category_names, exclude_categories, exclude_uncategorized, lang, movie_name_rules, country=None):
+def _build_movie_import_items(streams, category_names, exclude_categories, exclude_uncategorized, lang, movie_name_rules, country=None, archive_categories=None):
     """CPU-only list normalization; deliberately runs outside FastAPI's loop."""
     movie_items = []
     seen_stream_ids = set()
@@ -683,6 +689,8 @@ def _build_movie_import_items(streams, category_names, exclude_categories, exclu
         movie_items.append({
             "name": name,
             "year": year,
+            # KNM: 2026-10-13 -- archive_new_categories content is stored archived.
+            "auto_archive": bool(archive_categories) and (category_name or "").strip() in archive_categories,
             "provider_stream_id": stream_id,
             "container_extension": s.get("container_extension") or "mp4",
             "provider_category_name": category_name,
@@ -729,6 +737,8 @@ def _build_movie_import_items(streams, category_names, exclude_categories, exclu
 async def _import_series_for_provider(
     client: "XCProviderClient", provider: dict, provider_id: int,
     series_category_names: dict[str, str], exclude_categories: list[str], exclude_uncategorized: bool,
+    lang: dict | None = None, country: list[str] | None = None, *,
+    archive_categories: set[str] | None = None,
 ) -> tuple[dict, int, set[str]]:
     fetch_started = time.time()
     series_list = await client.get_series()
@@ -745,11 +755,14 @@ async def _import_series_for_provider(
         field: await asyncio.to_thread(vod_db.get_active_rules_for_field, "series", field)
         for field in ("genre", "description", "cast_list", "director")
     }
-    lang = _current_lang_settings()
-    country = config.get_import_country_exclusion()
+    if lang is None:
+        lang = _current_lang_settings()
+    if country is None:
+        country = config.get_import_country_exclusion()
     series_items, seen_series_ids = await asyncio.to_thread(
         _build_series_import_items, series_list, series_category_names,
         exclude_categories, exclude_uncategorized, lang, series_name_rules, detail_rules, country,
+        archive_categories,
     )
     db_started = time.time()
     series_result = await asyncio.to_thread(vod_db.bulk_import_series, provider_id, series_items)
@@ -764,7 +777,7 @@ async def _import_series_for_provider(
     return series_result, len(series_list), seen_series_ids
 
 
-def _build_series_import_items(series_list, series_category_names, exclude_categories, exclude_uncategorized, lang, series_name_rules, detail_rules, country=None):
+def _build_series_import_items(series_list, series_category_names, exclude_categories, exclude_uncategorized, lang, series_name_rules, detail_rules, country=None, archive_categories=None):
     """CPU-only list normalization; deliberately runs outside FastAPI's loop."""
     series_items = []
     seen_series_ids = set()
@@ -780,6 +793,8 @@ def _build_series_import_items(series_list, series_category_names, exclude_categ
             continue
         series_items.append({
             "name": name,
+            # KNM: 2026-10-13 -- archive_new_categories content is stored archived.
+            "auto_archive": bool(archive_categories) and (category_name or "").strip() in archive_categories,
             "year": year or _coerce_year(s.get("year")),
             "provider_series_id": provider_series_id,
             "provider_category_name": category_name,
@@ -1255,22 +1270,24 @@ async def _import_provider_catalog_impl(provider_id: int) -> dict:
     # refreshed below regardless of the setting, so turning this on later
     # never retroactively archives the whole existing category list.
     seen_category_names = {n for n in category_names.values() if n} | {n for n in series_category_names.values() if n}
-    # KNM: 2026-10-05 -- persist newly discovered categories to the saved
-    # exclusion list. known_import_categories is updated below in this same
-    # run, so a run-only exclusion let the category's content import as active
-    # on the next import. Skipped on a provider's first import (nothing known
-    # yet), otherwise every category would be excluded for good.
+    # KNM: 2026-10-13 -- upstream v0.2.26 model: newly discovered categories
+    # are remembered in auto_archived_categories (not the saved exclusion
+    # list) and their content is imported archived, so it stays reviewable and
+    # turning the setting off un-archives it on the next import. Saved
+    # exclusions are still skipped at import (fork policy). Skipped on a
+    # provider's first import (nothing known yet), otherwise every category
+    # would be archived.
     known_categories = set(provider.get("known_import_categories") or [])
-    if provider.get("archive_new_categories") and known_categories:
-        new_categories = seen_category_names - known_categories - set(exclude_categories)
+    archive_categories: set[str] = set()
+    if provider.get("archive_new_categories"):
+        auto_archived = set(provider.get("auto_archived_categories") or [])
+        new_categories = (seen_category_names - known_categories - auto_archived) if known_categories else set()
         if new_categories:
-            exclude_categories = list(exclude_categories) + sorted(new_categories)
-            await asyncio.to_thread(
-                vod_db.set_provider_import_exclude_categories, provider_id,
-                exclude_categories, exclude_uncategorized,
-            )
+            auto_archived |= new_categories
+            await asyncio.to_thread(vod_db.set_provider_auto_archived_categories, provider_id, sorted(auto_archived))
             logger.info("[vod_importer] provider=%s auto-archiving %d newly discovered categor(y/ies): %s",
                         provider["name"], len(new_categories), ", ".join(sorted(new_categories)))
+        archive_categories = auto_archived - set(exclude_categories)
     await asyncio.to_thread(
         vod_db.set_provider_known_import_categories, provider_id,
         sorted(seen_category_names | set(provider.get("known_import_categories") or [])),
@@ -1291,9 +1308,11 @@ async def _import_provider_catalog_impl(provider_id: int) -> dict:
     # real bottleneck for someone.
     movie_result, streams_total, seen_movie_stream_ids = await _import_movies_for_provider(
         client, provider, provider_id, category_names, exclude_categories, exclude_uncategorized,
+        archive_categories=archive_categories,
     )
     series_result, series_total, seen_series_ids = await _import_series_for_provider(
         client, provider, provider_id, series_category_names, exclude_categories, exclude_uncategorized,
+        archive_categories=archive_categories,
     )
 
     await asyncio.to_thread(vod_db.set_provider_import_totals, provider_id, streams_total, series_total)

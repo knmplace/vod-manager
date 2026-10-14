@@ -50,7 +50,7 @@ what's changed in this fork's image, release by release.
   provider that rate-limits aggressively), the year-review/missing-artwork
   disambiguation flows, and category List Sync; not required for basic operation
 - Optional: a free [MDBList](https://mdblist.com) API key — a second public
-  list source for category List Sync, alongside TMDB Lists
+  list source for category List Sync, alongside TMDB Lists and charts
 - Optional: an API key from Anthropic, OpenAI, and/or Google (Gemini) for
   the AI-assisted features (any one is enough; more than one lets you
   switch providers without re-entering a key)
@@ -421,15 +421,22 @@ flag; fix the actual mismatch (rename, re-match TMDB, move/remove the wrong
 source) from the item itself first.
 
 **Category List Sync** (Manage Categories → the list icon on any category)
-auto-populates a category from one or more public lists — a TMDB List
-and/or an MDBList list, mixed freely on the same category — matching each
+auto-populates a category from one or more public lists — a TMDB List,
+an MDBList list, or one of TMDB's built-in charts (Top Rated, Popular, …),
+mixed freely on the same category — matching each
 list entry against your pool by TMDB id first, falling back to a forgiving
 title+year match. Two sync modes: **Add only** (default) never removes
 anything already placed, for a curated category you're still hand-tuning;
 **Mirror** also removes anything no longer on any linked list, keeping the
 category an exact reflection of its source(s) (e.g. a "Top 100" list that
 cycles over time) — skipped for that pass if any linked source's fetch
-fails, so a transient error never looks like "everything's gone."
+fails, so a transient error never looks like "everything's gone." Lists of
+any length are fetched in full. A category only re-syncs on its own once you set
+Configuration → Refresh Schedule → **List Sync (hrs)** (blank = off, the default;
+otherwise use **Sync now**), and titles that drop off a list or chart are only
+removed in **Mirror** mode.
+
+![TMDB Chart as a List Sync source](docs/screenshots/category-list-sync-tmdb-chart.png)
 
 **Auto-create categories** (per provider, Providers → *Auto-create
 categories*) creates a Smart Category for every distinct category name a
@@ -448,6 +455,13 @@ it before it lands in your library instead of after — off by default, and
 never retroactively archives a category the provider was already reporting
 before you turned it on. Archived content stays archived on later imports
 until you turn the setting off.
+
+**Exclude Categories** (per provider) previews any change before it is saved:
+you see which categories are being added or allowed again and how many stored
+sources and cards would be affected, then confirm saving, and finally confirm a
+separate cleanup. Saved categories are skipped at import so they don't come back.
+
+![Exclude Categories preview](docs/screenshots/exclude-categories-modal.png)
 
 **Stream priority** (Curation & Maintenance → *Stream Priority*) controls
 which of a pool item's multiple real sources gets used first when more than
@@ -478,3 +492,8 @@ This product uses TMDB and the TMDB APIs but is not endorsed, certified, or othe
 You supply your own TMDB API key and are responsible for following
 [TMDB's API terms of use](https://www.themoviedb.org/api-terms-of-use) -- notably that information obtained from
 TMDB may not be cached for longer than 6 months.
+
+The optional local TMDB library is off by default (turn it on from the TMDB Library page). When enabled, it keeps details only for current
+catalog titles, refreshes them after 150 days, and automatically removes
+unreferenced or 170-day-old records. Its cleanup screen always provides a preview
+before deleting anything.

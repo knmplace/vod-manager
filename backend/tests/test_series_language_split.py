@@ -85,9 +85,9 @@ def test_dry_run_report_finds_mixed_language_series(db):
 
     report = db.series_language_split_dry_run_report()
 
-    matching = [r for r in report["series"] if r["series_id"] == series["id"]]
+    matching = [r for r in report["sample"] if r["series_id"] == series["id"]]
     assert len(matching) == 1
-    assert matching[0]["language_groups"] == 2
+    assert len(matching[0]["groups"]) == 2
 
 
 def test_dry_run_report_ignores_single_language_series(db):
@@ -97,7 +97,7 @@ def test_dry_run_report_ignores_single_language_series(db):
 
     report = db.series_language_split_dry_run_report()
 
-    assert all(r["series_id"] != series["id"] for r in report["series"])
+    assert all(r["series_id"] != series["id"] for r in report["sample"])
 
 
 def test_apply_split_creates_new_series_row_for_minority_language(db):
@@ -108,7 +108,7 @@ def test_apply_split_creates_new_series_row_for_minority_language(db):
     result = db.apply_series_language_split()
 
     assert result["series_split"] == 1
-    assert result["new_rows_created"] == 1
+    assert result["rows_created"] == 1
 
     original_sources = db.list_series_sources(original_id)
     assert {s["provider_series_id"] for s in original_sources} == {"en-s1"}
