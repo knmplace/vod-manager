@@ -101,7 +101,8 @@ def test_enabled_languages_clause_uses_configured_codes(db):
     config.save_enabled_languages(["EN", "FR"])
     clause, params = db._enabled_languages_clause("ms.language")
     assert params == ["EN", "FR"]
-    assert "COALESCE(ms.language, 'EN') IN (?,?)" == clause
+    # MULTI-LANG/MULTI-SUB content is never hidden by a language setting (vod_manager-vsz)
+    assert "(COALESCE(ms.language, 'EN') IN (?,?) OR ms.language = 'MULTI')" == clause
 
 
 def test_playback_language_inventory_uses_computed_source_language(db):

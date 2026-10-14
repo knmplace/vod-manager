@@ -120,7 +120,8 @@ def test_referenced_refresh_queue_includes_missing_changed_and_preexpiry_rows():
 
     queued = tmdb_store.list_catalog_refresh_ids("movie", {1, 2, 3, 4}, 10)
 
-    assert queued == [4, 2, 3]
+    # KNM: 2026-10-14 -- upstream v0.3.00 queues changed rows first, then missing, then oldest.
+    assert queued == [3, 4, 2]
 
 
 def test_reads_never_serve_data_at_hard_cache_age():

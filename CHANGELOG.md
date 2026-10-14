@@ -31,6 +31,43 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-14 (Updated to upstream v0.3.00)
+
+- ✅ 🔼 **The fork now includes upstream release
+  [v0.3.00](https://github.com/jstevenscl/vod-manager/releases/tag/v0.3.00)**,
+  and the version shown in the app is now 0.3.00. v0.3.00 ships this fork's automatic TMDB matching
+  ([#48](https://github.com/jstevenscl/vod-manager/pull/48)) and local TMDB
+  answer cache ([#49](https://github.com/jstevenscl/vod-manager/pull/49)), plus
+  upstream's fix for the series language split reported from this fork (GH#52).
+  It also brings:
+  - **.strm export** of the curated library for Emby/Jellyfin (Configuration >
+    Emby / Jellyfin Library).
+  - **TMDB episode titles per series** (fill placeholders or replace all). A
+    renamed or hand-edited episode name is no longer reverted by a provider re-sync.
+  - **Providers can be added inactive** (the default), so nothing imports
+    before Exclude Categories is set. The Catalog status card names every
+    active provider whose last import failed.
+  - **MULTI-LANG / MULTI-SUB content** is its own language. Language filters
+    never hide it, and it can merge with any language.
+  - An Emby-type provider that is really Jellyfin 12.1 (no `/emby` alias) now
+    plays and shows posters.
+  - Gemini Flash-Lite model option; the Gemini key no longer appears in logs.
+  - Bulk TMDB episode titles, MDBList Lists section, per-category schedule
+    picker for list categories, and an All categories dropdown on Movies/TV Shows.
+  - Every database connection is closed even when a write fails, so one
+    failed write can no longer leave the database locked.
+- **How the fork merged it:**
+  - The fork's own database code was kept as the base, and upstream's
+    functional changes were added to it (episode name lock, failed-import list,
+    Jellyfin path flag, MULTI language, provider active flag on sources).
+  - Upstream's connection cleanup was applied to the fork's code the same way.
+  - The fork's TMDB retention preview and import-policy preview/apply screens
+    are kept. The failed-import message appears in the fork's catalog panel.
+  - The TMDB library now refreshes changed titles before filling missing ones
+    (upstream's order). This replaces the fork's missing-first order.
+- **Verification:** full backend suite: 704 passed, 2 skipped (upstream's own new
+  tests included); `tsc` clean; frontend build OK.
+
 ## 2026-10-14 (Metadata Review picks and enrichment Stop)
 
 - ✅ **A Metadata Review TMDB match with no release year can be selected.**
@@ -78,10 +115,9 @@ instead of opening a duplicate request.
   - Bulk enrichment never calls your providers for episodes, so a newly added
     provider's episodes are fetched alone.
   - Our fuller Sync History is kept (per-item events, Movies/Series tabs, deleteable reports).
-  - The TMDB library fills missing catalog titles before refreshing changed ones.
-- 🔀 [#48](https://github.com/jstevenscl/vod-manager/pull/48) and
-  [#49](https://github.com/jstevenscl/vod-manager/pull/49) are being rebuilt on
-  v0.2.26 at upstream's request.
+- 🔼 [#48](https://github.com/jstevenscl/vod-manager/pull/48) and
+  [#49](https://github.com/jstevenscl/vod-manager/pull/49) were rebuilt on
+  v0.2.26 and shipped in upstream v0.3.00.
 - **Verification:** full backend suite: 642 passed, 2 skipped (upstream timed
   movie re-poll tests); upstream's own v0.2.26 tests were also run against the
   fork code and every difference is explained above; `tsc` clean.
@@ -225,48 +261,48 @@ instead of opening a duplicate request.
 
 ## 2026-10-07 (Local TMDB name search is fast again)
 
-Added to upstream PR [#49](https://github.com/jstevenscl/vod-manager/pull/49).
+Shipped in upstream [v0.3.00](https://github.com/jstevenscl/vod-manager/releases/tag/v0.3.00). Added to upstream PR [#49](https://github.com/jstevenscl/vod-manager/pull/49).
 
-- ✅ 🔀 **Matching titles without a TMDB ID no longer stalls.** Each name search
+- ✅ 🔼 **Matching titles without a TMDB ID no longer stalls.** Each name search
   in the local TMDB library was taking about 35 seconds once it held ~200K
   names, so automatic matching managed only about one title every 30 seconds.
   The search now takes milliseconds.
 
 ## 2026-10-06 (TMDB answers cached locally)
 
-Proposed upstream as a standalone PR,
+Shipped in upstream [v0.3.00](https://github.com/jstevenscl/vod-manager/releases/tag/v0.3.00). Proposed upstream as a standalone PR,
 [#49](https://github.com/jstevenscl/vod-manager/pull/49), built on #48.
 
-- ✅ 🔀 **Repeated questions are answered from the short-lived local cache.** Name searches and IMDb
+- ✅ 🔼 **Repeated questions are answered from the short-lived local cache.** Name searches and IMDb
   lookups made by automatic matching, library import, Metadata Review and the
   TMDB Library page are now saved in the local TMDB library. Asking again is
   answered locally and counts as a local lookup, not a TMDB request, until the
   daily catalog-first retention pass clears non-empty search responses.
-- ✅ 🔀 **"Nothing found" is remembered for 7 days**, then TMDB is asked again.
-- ✅ 🔀 **Search results are saved in full.** Full details for the top 5 results
+- ✅ 🔼 **"Nothing found" is remembered for 7 days**, then TMDB is asked again.
+- ✅ 🔼 **Search results are saved in full.** Full details for the top 5 results
   of each search are stored until the daily retention pass, so immediate repeat
   work can reuse them without retaining unrelated results long-term.
-- ✅ 🔀 **TMDB list sync saves the titles it returns.** List contents are still
+- ✅ 🔼 **TMDB list sync saves the titles it returns.** List contents are still
   checked live.
 
 ## 2026-10-05 (Automatic TMDB matching for titles without an ID)
 
-Proposed upstream as a standalone PR,
+Shipped in upstream [v0.3.00](https://github.com/jstevenscl/vod-manager/releases/tag/v0.3.00). Proposed upstream as a standalone PR,
 [#48](https://github.com/jstevenscl/vod-manager/pull/48), built on #47 (it
 needs the local TMDB library).
 
-- ✅ 🔀 **Titles without a TMDB ID are matched automatically.** After each fill
+- ✅ 🔼 **Titles without a TMDB ID are matched automatically.** After each fill
   burst (or when you click "Match titles without a TMDB ID"), up to 2,000
   catalog titles without an ID are matched by name and year. Series are matched
   first. The local TMDB library is checked first, and TMDB is searched only if
   it has no match. A match is applied the same way a reviewer would apply it,
   so cards for the same show from different providers merge into one.
-- ✅ 🔀 **Unclear results go to Metadata Review.** The title stays visible while
+- ✅ 🔼 **Unclear results go to Metadata Review.** The title stays visible while
   it waits there, and nothing is guessed. Unclear means more than one possible
   match, a year that doesn't agree with TMDB's, or no year when TMDB has other
   titles with the same name. Titles TMDB doesn't know are tried again a week
   later.
-- ✅ 🔀 **Local hit rate.** The TMDB Library page shows how many of today's
+- ✅ 🔼 **Local hit rate.** The TMDB Library page shows how many of today's
   lookups were answered locally.
 - **Tests:** 13 new tests. Full backend suite: 487 passed. Frontend build is
   clean.

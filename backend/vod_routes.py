@@ -10,6 +10,8 @@ from pydantic import BaseModel
 
 from auth import verify_session
 from config import (
+    get_strm_export_settings,
+    save_strm_export_settings as _save_strm_export_settings,
     get_ai_model,
     get_ai_provider,
     get_anthropic_api_key,
@@ -63,6 +65,7 @@ import rclone_client
 import plex_client
 import plex_importer
 import portal_auth
+import strm_export
 import tmdb_sync
 import vod_bulk_ai_service
 import vod_db
@@ -218,6 +221,10 @@ class ProviderRequest(BaseModel):
     max_streams: int = 0
     priority: int = 0
     provider_type: str = "xc"
+    # False = a NEW provider starts inactive, so the scheduled catalog refresh
+    # (which imports active providers) can't pull its whole catalog before the
+    # user has set up category exclusions. Ignored when updating an existing one.
+    is_active: bool = True
     library_backend: str = "local"
     # Backend-specific fields for a non-local library source (host, share,
     # port, bucket, region, endpoint, domain, ...) plus secret sub-fields
@@ -384,12 +391,17 @@ class DiscoveredProfileKey(BaseModel):
 
 class ImportDiscoveredProfilesRequest(BaseModel):
     profiles: list[DiscoveredProfileKey]
+    # Same reasoning as ProviderRequest.is_active: an active provider is imported
+    # straight away, before Exclude Categories can be set up. Applies only to
+    # providers this call creates, never to ones already imported.
+    start_inactive: bool = True
 
 
 class ImportDiscoveredProfilesAsSubAccountsRequest(BaseModel):
     profiles: list[DiscoveredProfileKey]
     provider_id: Optional[int] = None
     new_provider_name: Optional[str] = None
+    start_inactive: bool = True  # only used when new_provider_name creates a provider
 
 
 class CategoryRequest(BaseModel):
@@ -1371,6 +1383,7 @@ async def upsert_provider(body: ProviderRequest):
                 merged[key] = existing_secrets.get(key)
         remote_config = merged
 
+    is_new_provider = not any(p["name"] == body.name for p in vod_db.list_providers())
     provider_id = vod_db.upsert_provider(
         body.name, body.base_url, body.username, password, body.max_streams, body.priority, body.provider_type,
         library_backend=body.library_backend, library_remote_config=remote_config or None,
@@ -1379,6 +1392,8 @@ async def upsert_provider(body: ProviderRequest):
     # evict any pooled client built under the old ones so the next call opens
     # a genuinely fresh connection instead of reusing stale credentials.
     await vod_importer.evict_provider_client(provider_id)
+    if is_new_provider and not body.is_active:
+        vod_db.set_provider_active(provider_id, False)
 
     sync_error = None
     if body.provider_type == "library":
@@ -1588,7 +1603,7 @@ async def import_discovered_dispatcharr_accounts(connection_id: int, body: Impor
         if not profile:
             continue
         try:
-            imported.append(vod_sync.import_discovered_profile(connection_id, profile))
+            imported.append(vod_sync.import_discovered_profile(connection_id, profile, start_inactive=body.start_inactive))
         except ValueError as exc:
             skipped.append({"name": profile["name"], "reason": str(exc)})
     return {"imported": imported, "skipped": skipped}
@@ -1614,6 +1629,7 @@ async def import_discovered_dispatcharr_accounts_as_subaccounts(
     try:
         return vod_sync.import_discovered_profiles_as_subaccounts(
             connection_id, profiles, provider_id=body.provider_id, new_provider_name=body.new_provider_name,
+            start_inactive=body.start_inactive,
         )
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc))
@@ -4003,6 +4019,115 @@ async def apply_tmdb_title_series(series_id: int):
     return result
 
 
+class StrmExportSettingsRequest(BaseModel):
+    output_dir: str = ""
+    base_url: str = ""
+    xc_client_id: Optional[int] = None
+    include_movies: bool = True
+    include_series: bool = True
+    include_unmatched: bool = False
+    mirror: bool = True
+    interval_hours: int = 0
+
+
+@router.get("/strm-export/", dependencies=_GUARDS)
+async def get_strm_export():
+    return {"settings": get_strm_export_settings(), "status": strm_export.get_status()}
+
+
+@router.post("/strm-export/settings/", dependencies=_GUARDS)
+async def save_strm_export_settings(body: StrmExportSettingsRequest):
+    settings = body.model_dump()
+    settings["output_dir"] = settings["output_dir"].strip()
+    settings["base_url"] = settings["base_url"].strip().rstrip("/")
+    settings["interval_hours"] = max(0, settings["interval_hours"])
+    _save_strm_export_settings(settings)
+    return {"settings": get_strm_export_settings()}
+
+
+@router.post("/strm-export/run/", dependencies=_GUARDS)
+async def run_strm_export(dry_run: bool = False):
+    """dry_run=true reports what would be written/removed without touching disk."""
+    try:
+        return await asyncio.to_thread(strm_export.run_tracked_export, None, dry_run)
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(409, detail=str(exc))
+    except OSError as exc:
+        raise HTTPException(500, detail=f"Couldn't write to the output folder: {exc}")
+
+
+@router.post("/series/{series_id}/tmdb-episode-titles/", dependencies=_GUARDS)
+async def apply_tmdb_episode_titles(series_id: int, mode: str = "fill", dry_run: bool = False):
+    """Sets this one series' episode names from TMDB (matched on season +
+    episode number). mode=fill only replaces blank/placeholder names (default);
+    mode=replace overwrites every matched name. dry_run=true previews the counts.
+    Renamed episodes are locked so a provider re-sync does not revert them."""
+    series = vod_db.get_series(series_id)
+    if not series:
+        raise HTTPException(404, detail="series not found")
+    if not series.get("tmdb_id"):
+        raise HTTPException(400, detail="no confirmed TMDB id for this series")
+    try:
+        episodes = await tmdb_sync.get_series_episode_list_cached(str(series["tmdb_id"]))
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(502, detail=str(exc))
+    names = {(e["season_number"], e["episode_number"]): e["name"] for e in episodes if e.get("name")}
+    if not names:
+        raise HTTPException(502, detail="TMDB returned no episode names for this series")
+    try:
+        return await asyncio.to_thread(vod_db.apply_tmdb_episode_titles, series_id, names, mode, dry_run)
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc))
+
+
+class BulkEpisodeTitlesRequest(BaseModel):
+    ids: list[int]
+    mode: str = "fill"
+    dry_run: bool = True
+
+
+@router.post("/series/tmdb-episode-titles/bulk/", dependencies=_GUARDS)
+async def bulk_apply_tmdb_episode_titles(body: BulkEpisodeTitlesRequest):
+    """The per-series TMDB episode-title fill for a hand-picked set of series
+    (at most 50 per call -- the UI chunks bigger selections). Same fill/replace
+    modes and dry-run preview as the single-series route; a series that has no
+    confirmed TMDB id, or that TMDB can't answer for, is counted and skipped
+    rather than failing the whole batch."""
+    if body.mode not in ("fill", "replace"):
+        raise HTTPException(400, detail="mode must be 'fill' or 'replace'")
+    if len(body.ids) > 50:
+        raise HTTPException(400, detail="at most 50 series per request")
+    totals = {"series_checked": 0, "series_changed": 0, "episodes_renamed": 0, "series_without_tmdb": 0,
+              "series_failed": 0, "failures": [], "dry_run": body.dry_run}
+    for series_id in body.ids:
+        series = await asyncio.to_thread(vod_db.get_series, series_id)
+        if not series:
+            continue
+        totals["series_checked"] += 1
+        if not series.get("tmdb_id"):
+            totals["series_without_tmdb"] += 1
+            continue
+        try:
+            episodes = await tmdb_sync.get_series_episode_list_cached(str(series["tmdb_id"]))
+            names = {(e["season_number"], e["episode_number"]): e["name"] for e in episodes if e.get("name")}
+            if not names:
+                raise RuntimeError("TMDB returned no episode names")
+            result = await asyncio.to_thread(vod_db.apply_tmdb_episode_titles, series_id, names, body.mode, body.dry_run)
+        except (ValueError, RuntimeError) as exc:
+            totals["series_failed"] += 1
+            if len(totals["failures"]) < 5:
+                totals["failures"].append(f"{series.get('name')}: {tmdb_sync._redact(exc)}")
+            continue
+        if result.get("renamed"):
+            totals["series_changed"] += 1
+            totals["episodes_renamed"] += result["renamed"]
+    return totals
+
+
 @router.post("/series/tmdb-title/bulk-apply/", dependencies=_GUARDS)
 async def bulk_apply_tmdb_title_series(after_id: int = 0, limit: int = 100):
     """See bulk_apply_tmdb_title_movies' identical docstring -- same reasoning."""
@@ -4120,6 +4245,7 @@ async def runtime_status():
         "catalog_workflow": vod_importer.get_catalog_workflow_progress(),
         "review_summary": await asyncio.to_thread(vod_db.get_review_summary),
         "process_cpu_percent": vod_importer.get_process_cpu_percent(),
+        "failed_imports": await asyncio.to_thread(vod_db.list_failed_provider_imports),
     }
 
 

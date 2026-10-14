@@ -65,6 +65,7 @@ interface RuntimeStatus {
     invalid_tmdb: { movies: number; series: number }
   }
   process_cpu_percent: number | null
+  failed_imports?: { provider_id: number; provider_name: string; error: string | null }[]
 }
 const NAV_GROUPS: NavGroup[] = [
   { label: 'VOD Library', items: [
@@ -189,6 +190,15 @@ export default function App() {
       ? `Details: ${runtimeStatusQuery.data.enrichment.movies_done}/${runtimeStatusQuery.data.enrichment.movies_total} movies · ${runtimeStatusQuery.data.enrichment.series_done}/${runtimeStatusQuery.data.enrichment.series_total} series`
       : workflow?.phase ?? 'Working on catalog…'
   const navGroups = hideDvrTabQuery.data?.hidden ? NAV_GROUPS.filter((g) => g.label !== 'DVR') : NAV_GROUPS
+  // KNM: 2026-10-14 -- upstream v0.3.00 failed_imports status, in the fork's own status panel.
+  const runtime = runtimeStatusQuery.data
+  const failedImports = runtime?.failed_imports ?? []
+  // failed_imports (latest run per active provider) supersedes the in-memory last-import error, which
+  // lingers after a provider is deleted or fixed; only fall back to it for an older backend.
+  const catalogFailed = runtime?.failed_imports !== undefined ? failedImports.length > 0 : !!runtime?.import.error
+  const failedSummary = failedImports.length
+    ? failedImports.slice(0, 3).map((f) => `${f.provider_name}${f.error ? ` (${f.error})` : ''}`).join('; ') + (failedImports.length > 3 ? ` and ${failedImports.length - 3} more` : '')
+    : `${runtime?.import.provider_name ?? 'a provider'}${runtime?.import.error ? ` (${runtime.import.error})` : ''}`
   useEffect(() => {
     if (isLoading) return
     if (!settings?.has_credentials) {
@@ -311,9 +321,9 @@ export default function App() {
               <p className="mt-1">TMDB: {runtimeStatusQuery.data.tmdb.done}/{runtimeStatusQuery.data.tmdb.total}</p>
             ) : runtimeStatusQuery.data?.enrichment.running ? (
               <p className="mt-1">Enriching: {runtimeStatusQuery.data.enrichment.movies_done}/{runtimeStatusQuery.data.enrichment.movies_total} movies · {runtimeStatusQuery.data.enrichment.series_done}/{runtimeStatusQuery.data.enrichment.series_total} series</p>
-            ) : runtimeStatusQuery.data?.import.error ? (
+            ) : catalogFailed ? (
               // KNM: 2026-10-04 -- imports run in the background now; without this a failed one just fell back to "Idle" (upstream PR #31 review).
-              <p className="mt-1 text-destructive">{runtimeStatusQuery.data.import.provider_name ?? 'Provider'} import failed: {runtimeStatusQuery.data.import.error}</p>
+              <p className="mt-1 text-destructive">Import failed for {failedSummary}. Check {failedImports.length > 1 ? 'those providers' : 'that provider'} in Providers and retry.</p>
             ) : (
               <p className={workflowIsReady ? 'mt-1 text-emerald-400' : workflowHasFailed ? 'mt-1 text-destructive' : 'mt-1'}>
                 {workflowIsReady ? 'Catalog ready for review' : workflowHasFailed ? (workflow?.error ?? 'Automatic catalog work needs attention.') : 'Idle'}

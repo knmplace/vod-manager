@@ -53,7 +53,8 @@ def test_burst_refreshes_only_catalog_references(store, monkeypatch):
     fetched = []
     monkeypatch.setattr(tmdb_sync, "fetch_title_payload", _fake_fetch(store, fetched))
     result = asyncio.run(tmdb_fill.run_burst(size=6))
-    assert fetched[:3] == [("movie", 1), ("movie", 2), ("movie", 50)]
+    # KNM: 2026-10-14 -- upstream v0.3.00 refreshes changed titles before missing ones.
+    assert fetched[:3] == [("movie", 50), ("movie", 1), ("movie", 2)]
     assert ("tv", 7) in fetched
     assert result["fetched"] == 4
     assert all(tmdb_id != 999 for _, tmdb_id in fetched)

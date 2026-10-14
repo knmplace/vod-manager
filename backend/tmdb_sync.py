@@ -116,7 +116,7 @@ def store_enabled() -> bool:
     return bool(get_tmdb_store_settings()["enabled"])
 
 
-# KNM: 2026-10-05 local-vs-TMDB hit-rate counter (TMDB Library page). Never
+# Local-vs-TMDB hit-rate counter (TMDB Library page). Never
 # lets a counter write break the lookup itself.
 async def note_lookup(local: bool) -> None:
     if not store_enabled():
@@ -180,7 +180,7 @@ async def fetch_title_payload(media_type: str, tmdb_id, *, use_store: bool = Tru
     return data
 
 
-# KNM: 2026-10-06 every TMDB answer is kept locally -- /search and /find
+# Every TMDB answer is kept locally -- /search and /find
 # responses go in tmdb_store.searches, and the titles they name (top 5 per
 # search) are saved with full details, so the next ask is answered locally.
 _KEEP_TOP_RESULTS = 5
@@ -286,7 +286,7 @@ async def fetch_list_items(list_id: str) -> list[dict]:
             break
         page += 1
 
-    # KNM: 2026-10-06 membership stays live; the titles themselves are kept locally.
+    # Membership stays live; the titles themselves are kept locally.
     for media_type in ("movie", "tv"):
         await store_titles(media_type, [i.get("id") for i in items if i.get("media_type") == media_type])
     return items

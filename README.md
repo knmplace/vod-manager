@@ -98,6 +98,23 @@ mechanism as Drive/Dropbox but is less thoroughly tested. Full setup for
 each backend in
 [USERGUIDE.md](USERGUIDE.md#library-sources--local-folders-smb-sftp-and-cloud-storage).
 
+## Emby and Jellyfin: .strm export
+
+Emby and Jellyfin can't use the Xtream (XC) API for movies and shows, but they
+can scan a folder. **Configuration → Emby / Jellyfin Library (.strm export)**
+writes your curated library as small `.strm` files (one stream URL each, in
+`Movies/Title (Year) [tmdbid-N]/` and `Shows/Show (Year) [tmdbid-N]/Season NN/`
+folders) into a folder you mount into the media server. Playback still goes
+through VOD & DVR Manager, so source failover keeps working. It follows the same
+visibility rules as the XC catalog, can be limited to a dedicated XC user's
+categories, skips titles without a confirmed TMDB id by default, and can re-run
+on a schedule. Preview first, export when ready.
+
+![The Emby / Jellyfin Library (.strm export) card](docs/screenshots/strm-export.png)
+
+See the [User Guide](USERGUIDE.md#emby-and-jellyfin-the-strm-export) for the
+shared-folder compose setup.
+
 ## Connecting Dispatcharr instances
 
 VOD & DVR Manager distinguishes two separate relationships with Dispatcharr:
@@ -184,7 +201,9 @@ is active) unlocks three assists, none of which ever apply anything
 automatically — every one is a suggestion you still review and confirm. If a
 request fails, the message shows the provider's own reason (retired model,
 quota, rejected key). Gemini defaults to the `gemini-flash-latest` alias, since
-Google retires specific model versions quickly:
+Google retires specific model versions quickly. A free-tier Gemini key allows only
+about 20 requests a day per model, so pick **Flash-Lite** (counted separately) or
+enable billing if you use it heavily:
 
 - **Suggest a category with AI** (Categories) — describe a category in
   plain English and the AI proposes a structured filter rule using the
@@ -331,7 +350,8 @@ empty.
 - **Streaming credentials are never written to logs.** The XC protocol
   embeds them in the URL itself (its own convention, not ours) — both the
   app's own logging and the container's access log redact them before
-  anything is written to stdout.
+  anything is written to stdout. API keys that travel in a request URL
+  (TMDB, MDBList, Gemini, Emby/Jellyfin) are redacted from the logs the same way.
 - **Every connected instance gets its own credential**, not a shared one —
   Configuration → Connected Instances. Revoke or regenerate one without
   affecting the others if a specific instance's credential is ever
@@ -360,9 +380,10 @@ Configuration → Refresh Schedule controls how often background work runs:
   providers that don't report changes follow the same backoff; background
   passes start about one TTL apart, with at least a 15-minute rest.
 - **List Sync** — how often categories with a linked public list source
-  (TMDB List or MDBList) auto-resync. Off (manual "Sync now" only) by
+  (TMDB List, MDBList or a TMDB chart) auto-resync. Off (manual "Sync now" only) by
   default — enabling it adds new recurring API traffic to whichever
-  source(s) each category uses.
+  source(s) each category uses. Any one category can also have its own
+  schedule (hourly to weekly) in Manage Categories.
 
 ## Backup and restore
 
@@ -386,7 +407,9 @@ language-aware filter and sibling-safe bulk archiving), **Language Filter**
 poster-missing items), **Enabled Playback Languages** (a live,
 preview-first playback/export filter by source language — separate from the
 import-time Language Exclusion above; cards with no enabled-language source
-are language-archived, never deleted, and safely restored if re-enabled), **Duplicate Finder** (matches on
+are language-archived, never deleted, and safely restored if re-enabled;
+content a provider tags [MULTI-LANG]/[MULTI-SUB] is its own always-visible
+"MULTI" language), **Duplicate Finder** (matches on
 punctuation variants, adjacent-year mislabeling, and TMDB id, with one-click
 bulk merges for both fully-corroborated TMDB-confirmed matches and a second,
 separate tier where only one candidate carries a self-consistent TMDB id; an
@@ -407,7 +430,8 @@ Every movie/series can also be manually renamed or have its year corrected
 from its own detail view, for whatever a provider's own catalog data got
 wrong with no other way to fix it — including setting its TMDB id directly
 when you already know the correct match, and (for a series) editing an
-individual episode's name/number. **Apply TMDB Titles** (Movies/TV Shows
+individual episode's name/number, or filling one series' episode names from TMDB
+(**Use TMDB episode titles**, with a preview first). **Apply TMDB Titles** (Movies/TV Shows
 toolbar) does this in bulk for every already-confirmed TMDB match at once,
 instead of one item at a time. **Client Title Format** (Curation &
 Maintenance) is a separate, ongoing setting to have VOD clients see a
@@ -496,4 +520,6 @@ TMDB may not be cached for longer than 6 months.
 The optional local TMDB library is off by default (turn it on from the TMDB Library page). When enabled, it keeps details only for current
 catalog titles, refreshes them after 150 days, and automatically removes
 unreferenced or 170-day-old records. Its cleanup screen always provides a preview
-before deleting anything.
+before deleting anything. With it on, titles a provider sent without a TMDB ID are
+matched by name and year in the background (never guessing: uncertain ones go to
+Metadata Review), so the same title from different providers merges into one card.

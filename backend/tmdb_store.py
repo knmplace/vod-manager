@@ -114,6 +114,9 @@ CREATE TABLE IF NOT EXISTS searches (
 # make every read treat the hard limit as expired.
 MAX_CACHE_AGE_SECONDS = 170 * 86400
 REFRESH_CACHE_AGE_SECONDS = 150 * 86400
+# Every /search and /find answer is kept so the same question
+# never goes to TMDB twice. "Nothing found" is re-asked after a week (TMDB gains
+# titles); a found answer is kept until the next retention pass.
 EMPTY_SEARCH_MAX_AGE = 7 * 86400
 # After _upgrade, so they also apply to a store created before these columns existed.
 _INDEXES = """
@@ -324,7 +327,7 @@ def _fts_query(norm: str) -> str:
     return " ".join(f'"{token}"' for token in norm.split())
 
 
-# KNM: 2026-10-07 CROSS JOIN pins the text index as the outer loop. With a
+# CROSS JOIN pins the text index as the outer loop. With a
 # plain JOIN, SQLite scanned every stored name and ran the match per row
 # (~35 s per search at ~200K names, vs ~1 ms).
 _NAME_SEARCH_SQL = """SELECT t.media_type, t.tmdb_id, t.title, t.original_title, t.year, t.release_date,
@@ -344,10 +347,7 @@ def search(media_type: str, query: str, year: int | None = None, limit: int = 10
     if not norm:
         return []
     with _conn() as conn:
-        rows = conn.execute(
-            _NAME_SEARCH_SQL,
-            (_fts_query(norm), media_type, time.time() - MAX_CACHE_AGE_SECONDS),
-        ).fetchall()
+        rows = conn.execute(_NAME_SEARCH_SQL, (_fts_query(norm), media_type, time.time() - MAX_CACHE_AGE_SECONDS)).fetchall()
     best: dict[int, tuple] = {}
     for row in rows:
         exact = row["norm"] == norm
@@ -556,7 +556,7 @@ def add_requests(count: int) -> None:
     _add_counter(_today_key(), count)
 
 
-# KNM: 2026-10-05 local-vs-TMDB hit rate for the TMDB Library page -- every
+# Local-vs-TMDB hit rate for the TMDB Library page -- every
 # app lookup (not the background fill) counts as answered locally or by TMDB.
 def count_lookup(local: bool) -> None:
     _add_counter(_today_key("lookups_local" if local else "lookups_tmdb"), 1)
@@ -674,7 +674,9 @@ def list_catalog_refresh_ids(
                WHERE r.media_type=?
                  AND (t.tmdb_id IS NULL OR t.fetched_at<=? OR COALESCE(t.changed_at, 0)>t.fetched_at)
                  AND (g.tmdb_id IS NULL OR g.marked_at<=?)
-               ORDER BY (t.tmdb_id IS NULL) DESC, COALESCE(t.fetched_at, 0), r.tmdb_id
+               ORDER BY CASE WHEN COALESCE(t.changed_at, 0)>COALESCE(t.fetched_at, 0) THEN 0
+                             WHEN t.tmdb_id IS NULL THEN 1 ELSE 2 END,
+                        COALESCE(t.fetched_at, 0), r.tmdb_id
                LIMIT ?""",
             (media_type, refresh_cutoff, gone_cutoff, limit),
         ).fetchall()

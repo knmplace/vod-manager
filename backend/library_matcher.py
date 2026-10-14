@@ -174,7 +174,7 @@ async def match(parsed: ParsedPath) -> MatchResult:
     return await match_title(parsed.title, content_type, parsed.year)
 
 
-# KNM: 2026-10-05 split out of match() so catalog titles with no TMDB ID can
+# Split out of match() so catalog titles with no TMDB ID can
 # be auto-matched by name+year too (tmdb_automatch).
 async def match_title(title: str, content_type: str, year: int | None) -> MatchResult:
     """Name(+year) -> TMDB under decide()'s never-guess rules; local library

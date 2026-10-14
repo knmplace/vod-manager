@@ -202,7 +202,7 @@ async def run_due_jobs() -> bool:
         await asyncio.to_thread(tmdb_store.set_meta, "changes_run_at", now)
     if now >= await asyncio.to_thread(meta, "next_burst_at"):
         await _run("burst", run_burst())
-        # KNM: 2026-10-05 then assign TMDB IDs to catalog titles that have none.
+        # Then assign TMDB IDs to catalog titles that have none.
         if settings["auto_match_batch"]:
             await _run("match", tmdb_automatch.run_auto_match())
         interval = _DAY / max(1, settings["bursts_per_day"])
@@ -292,7 +292,7 @@ async def lookup(query: str, media_type: str, year: int | None = None, limit: in
         return {"source": "local", "results": [_present(h) for h in hits]}
     if not get_tmdb_api_key() or not query:
         return {"source": "local", "results": []}
-    # KNM: 2026-10-06 the search answer is kept too, and its top results saved.
+    # The search answer is kept too, and its top results saved.
     data, kept = await tmdb_sync.tmdb_search(media_type, query, year)
     ids = [int(item["id"]) for item in data.get("results", [])[:5] if item.get("id") is not None]
     await tmdb_sync.store_titles(media_type, ids)  # no-op for titles already saved
