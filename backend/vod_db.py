@@ -1419,6 +1419,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_movies_metadata_review_missing ON movies(id) WHERE review_excluded=0 AND tmdb_id IS NULL AND year IS NULL")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_series_metadata_review_flag ON series(id) WHERE review_excluded=0 AND needs_year_review=1")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_series_metadata_review_missing ON series(id) WHERE review_excluded=0 AND tmdb_id IS NULL AND year IS NULL")
+    # KNM: 2026-10-14 -- heal movies enriched before _release_year_fields
+    # existed: held, yearless, but TMDB already gave a release date. Uses the
+    # small partial flag index; a no-op once caught up.
+    conn.execute("""UPDATE movies SET year=CAST(substr(release_date, 1, 4) AS INTEGER), needs_year_review=0
+                    WHERE needs_year_review=1 AND review_excluded=0 AND year IS NULL
+                      AND tmdb_id IS NOT NULL AND release_date GLOB '[0-9][0-9][0-9][0-9]*'""")
 
     _commit_with_retry(conn)
 
@@ -7317,6 +7323,18 @@ def movie_needs_enrichment(movie_id: int) -> bool:
     return bool(movie) and not movie.get("last_enriched_at")
 
 
+# KNM: 2026-10-14 -- a held (needs_year_review=1) yearless movie takes its year
+# from the TMDB release date, as series do from first_air_date; otherwise it
+# stays held out of every category and hidden from Metadata Review.
+def _release_year_fields(row, fields: dict) -> None:
+    release_date = str(fields.get("release_date") or "")
+    if row is None or not row["needs_year_review"] or row["year"] is not None:
+        return
+    if len(release_date) >= 4 and release_date[:4].isdigit():
+        fields["year"] = int(release_date[:4])
+        fields["needs_year_review"] = 0
+
+
 def set_movie_enrichment(movie_id: int, **fields) -> None:
     """Persist detail-level fields fetched from a provider's get_vod_info, and
     stamp last_enriched_at so we don't re-fetch this movie again for
@@ -7330,6 +7348,7 @@ def set_movie_enrichment(movie_id: int, **fields) -> None:
             # re-polls an enriched movie on a timer (see movie_needs_enrichment).
             row = conn.execute("SELECT * FROM movies WHERE id=?", (movie_id,)).fetchone()
             fields["last_enriched_at"] = _now()
+            _release_year_fields(row, fields)
             if row is not None:
                 fields["enrich_stable_count"] = _next_enrich_stable_count(row, fields)
             sets = ", ".join(f"{k}=?" for k in fields)
@@ -7475,6 +7494,7 @@ def apply_movie_enrichment_batch(items: list[dict]) -> None:
                         fields = dict(item.get("fields") or {})
                         row = conn.execute("SELECT * FROM movies WHERE id=?", (movie_id,)).fetchone()
                         fields["last_enriched_at"] = _now()
+                        _release_year_fields(row, fields)
                         if row is not None:
                             fields["enrich_stable_count"] = _next_enrich_stable_count(row, fields)
                         sets = ", ".join(f"{k}=?" for k in fields)
@@ -8749,7 +8769,7 @@ def _add_episode_source_row(
                provider_category_name=excluded.provider_category_name,
                bitrate=COALESCE(excluded.bitrate, episode_sources.bitrate),
                language=excluded.language""",
-        (episode_id, provider_id, provider_stream_id, container_extension, file_size_bytes, local_file_path, raw_name, provider_category_name, bitrate, _source_language(raw_name), _now(), _now()),
+        (episode_id, provider_id, provider_stream_id, container_extension, file_size_bytes, local_file_path, raw_name, provider_category_name, bitrate, _source_language(raw_name, provider_category_name), _now(), _now()),
     )
     return conn.execute(
         "SELECT id FROM episode_sources WHERE provider_id=? AND provider_stream_id=?",
@@ -9577,7 +9597,7 @@ def bulk_import_movies(provider_id: int, items: list[dict], _retry_depth: int = 
                         insert_index = None
                         did_create = did_match = did_flag = did_archive = did_unarchive = False
 
-                        item_lang = _source_language(item.get("raw_name"))
+                        item_lang = _source_language(item.get("raw_name"), item.get("provider_category_name"))
                         existing_source = sources_by_stream_id.get(item["provider_stream_id"])
                         source_fingerprint, legacy_fingerprint = _source_fingerprints("movie", item)
                         source_changed = not existing_source or existing_source["catalog_fingerprint"] != source_fingerprint
@@ -9770,7 +9790,7 @@ def bulk_import_movies(provider_id: int, items: list[dict], _retry_depth: int = 
                                            raw_name=excluded.raw_name, language=excluded.language, catalog_fingerprint=excluded.catalog_fingerprint,
                                            provider_detail_deferred=excluded.provider_detail_deferred""",
                                     (entry["movie_id"], provider_id, item["provider_stream_id"], item.get("container_extension", "mp4"),
-                                     item.get("provider_category_name"), item.get("raw_name"), _source_language(item.get("raw_name")), entry["source_fingerprint"],
+                                     item.get("provider_category_name"), item.get("raw_name"), _source_language(item.get("raw_name"), item.get("provider_category_name")), entry["source_fingerprint"],
                                      int(not item.get("tmdb_id")), now, now),
                                 )
                                 sources_changed += 1
@@ -9994,7 +10014,7 @@ def bulk_import_series(provider_id: int, items: list[dict], _retry_depth: int = 
                         did_create = did_match = did_flag = did_archive = did_unarchive = False
                         cat_update_needed = False
 
-                        item_lang = _source_language(item.get("raw_name"))
+                        item_lang = _source_language(item.get("raw_name"), item.get("provider_category_name"))
                         source_fingerprint, legacy_fingerprint = _source_fingerprints("series", item)
                         previous_fingerprint = source_fingerprints.get(item.get("provider_series_id"))
                         source_changed = item.get("provider_series_id") not in source_fingerprints or previous_fingerprint != source_fingerprint
@@ -10167,7 +10187,7 @@ def bulk_import_series(provider_id: int, items: list[dict], _retry_depth: int = 
                                     "ON CONFLICT(provider_id, provider_series_id) DO UPDATE SET "
                                     "series_id=excluded.series_id, provider_category_name=excluded.provider_category_name, "
                                     "raw_name=excluded.raw_name, language=excluded.language, catalog_fingerprint=excluded.catalog_fingerprint, provider_detail_deferred=excluded.provider_detail_deferred, last_seen_at=excluded.last_seen_at",
-                                    (series_id, provider_id, item.get("provider_series_id"), item.get("provider_category_name"), item.get("raw_name"), _source_language(item.get("raw_name")), entry["source_fingerprint"], int(not item.get("tmdb_id")), now, now),
+                                    (series_id, provider_id, item.get("provider_series_id"), item.get("provider_category_name"), item.get("raw_name"), _source_language(item.get("raw_name"), item.get("provider_category_name")), entry["source_fingerprint"], int(not item.get("tmdb_id")), now, now),
                                 )
                                 sources_changed += 1
                             elif entry["fingerprint_upgrade"]:
@@ -10495,7 +10515,7 @@ def bulk_import_plex_movies(provider_id: int, items: list[dict]) -> dict:
                                    movie_id=excluded.movie_id, last_seen_at=excluded.last_seen_at, plex_rating_key=excluded.plex_rating_key,
                                    file_size_bytes=excluded.file_size_bytes, provider_category_name=excluded.provider_category_name,
                                    raw_name=excluded.raw_name, language=excluded.language""",
-                            (movie_id, provider_id, item["provider_stream_id"], item.get("container_extension", "mp4"), item.get("plex_rating_key"), item.get("file_size_bytes"), item.get("provider_category_name"), raw_name, _source_language(raw_name), now, now),
+                            (movie_id, provider_id, item["provider_stream_id"], item.get("container_extension", "mp4"), item.get("plex_rating_key"), item.get("file_size_bytes"), item.get("provider_category_name"), raw_name, _source_language(raw_name, item.get("provider_category_name")), now, now),
                         )
                         created += did_create
                         matched += did_match
@@ -10701,7 +10721,7 @@ def bulk_import_plex_series(provider_id: int, items: list[dict]) -> dict:
                                 "ON CONFLICT(provider_id, provider_series_id) DO UPDATE SET "
                                 "series_id=excluded.series_id, provider_category_name=excluded.provider_category_name, "
                                 "raw_name=excluded.raw_name, language=excluded.language, last_seen_at=excluded.last_seen_at",
-                                (series_id, provider_id, item.get("provider_series_id"), item.get("provider_category_name"), raw_name, _source_language(raw_name), now, now),
+                                (series_id, provider_id, item.get("provider_series_id"), item.get("provider_category_name"), raw_name, _source_language(raw_name, item.get("provider_category_name")), now, now),
                             )
 
                         for ep in item.get("episodes", []):
@@ -11947,7 +11967,28 @@ def list_metadata_review(content_type: str | None = None) -> dict:
         conn.close()
 
 
+# KNM: 2026-10-14 -- the toolbar "Metadata Review (N)" count, from the same
+# query as the review page (it used to count the needs_year_review hold queue).
+def count_metadata_review() -> dict:
+    conn = _connect()
+    try:
+        out = {}
+        for table, key in (("movies", "movies"), ("series", "series")):
+            row = conn.execute(
+                f"SELECT COUNT(*) AS total, COALESCE(SUM(is_adult), 0) AS adult FROM ({_metadata_review_sql(table)})"
+            ).fetchone()
+            out[key] = {"total": row["total"], "adult": row["adult"]}
+        conn.close()
+        return out
+    finally:
+        conn.close()
+
+
 def _metadata_review_sql(table: str) -> str:
+    # KNM: 2026-10-14 -- a held row with a TMDB id still belongs here once
+    # enrichment has run and left it yearless (e.g. TMDB has no first-air date);
+    # before enrichment it is left to the enrichment year write.
+    enriched_col = "last_enriched_at" if table == "movies" else "tmdb_metadata_enriched_at"
     # KNM: 2026-10-04 -- restored upstream's UNION form (upstream PR #35 review):
     # SQLite won't split an OR across the two partial idx_*_metadata_review_*
     # indexes, so the OR form full-scanned (8s+ on ~115k rows). Keeps the fork's
@@ -11957,7 +11998,8 @@ def _metadata_review_sql(table: str) -> str:
     # un-enriched row) away from the small partial review index; the missing
     # branch needs the literal term for its partial index, so it's pinned.
     return f"""SELECT * FROM (
-                SELECT * FROM {table} WHERE review_excluded=0 AND needs_year_review=1 AND +tmdb_id IS NULL
+                SELECT * FROM {table} WHERE review_excluded=0 AND needs_year_review=1
+                  AND (+tmdb_id IS NULL OR (year IS NULL AND {enriched_col} IS NOT NULL))
                 UNION
                 SELECT * FROM {table} INDEXED BY idx_{table}_metadata_review_missing
                   WHERE review_excluded=0 AND tmdb_id IS NULL AND year IS NULL
@@ -12587,6 +12629,9 @@ def _source_language(raw_name: str | None, category_name: str | None = None) -> 
     return _category_prefix_code(category_name) or "EN"
 
 
+# KNM: 2026-10-14 -- backfill/recompute (and the import writers) pass the
+# provider category to _source_language so category-only tags such as
+# "(MULTI-SUBS)" are detected, matching upstream since v0.2.18.
 _BACKFILL_TABLES = [
     ("movie_sources", "movie_id", "movies"),
     ("series_sources", "series_id", "series"),
@@ -12606,11 +12651,11 @@ def language_backfill_dry_run_report(sample_size: int = 5) -> dict:
         report = {}
         for table, fk_col, parent_table in _BACKFILL_TABLES:
             rows = conn.execute(
-                f"SELECT raw_name, {fk_col} AS parent_id FROM {table} WHERE language IS NULL"
+                f"SELECT raw_name, provider_category_name, {fk_col} AS parent_id FROM {table} WHERE language IS NULL"
             ).fetchall()
             by_code: dict[str, dict] = {}
             for row in rows:
-                code = _source_language(row["raw_name"])
+                code = _source_language(row["raw_name"], row["provider_category_name"])
                 bucket = by_code.setdefault(code, {"count": 0, "sample_titles": [], "_parent_ids": set()})
                 bucket["count"] += 1
                 bucket["_parent_ids"].add(row["parent_id"])
@@ -12638,11 +12683,11 @@ def apply_language_backfill() -> int:
         conn = _connect()
         try:
             for table, _fk_col, _parent_table in _BACKFILL_TABLES:
-                rows = conn.execute(f"SELECT id, raw_name FROM {table} WHERE language IS NULL").fetchall()
+                rows = conn.execute(f"SELECT id, raw_name, provider_category_name FROM {table} WHERE language IS NULL").fetchall()
                 for row in rows:
                     conn.execute(
                         f"UPDATE {table} SET language = ? WHERE id = ?",
-                        (_source_language(row["raw_name"]), row["id"]),
+                        (_source_language(row["raw_name"], row["provider_category_name"]), row["id"]),
                     )
                 total += len(rows)
             _commit_with_retry(conn)
@@ -12666,11 +12711,11 @@ def language_recompute_dry_run_report(sample_size: int = 5) -> dict:
         report = {}
         for table, fk_col, parent_table in _BACKFILL_TABLES:
             rows = conn.execute(
-                f"SELECT raw_name, language, {fk_col} AS parent_id FROM {table} WHERE language IS NOT NULL"
+                f"SELECT raw_name, provider_category_name, language, {fk_col} AS parent_id FROM {table} WHERE language IS NOT NULL"
             ).fetchall()
             by_code: dict[str, dict] = {}
             for row in rows:
-                recomputed = _source_language(row["raw_name"])
+                recomputed = _source_language(row["raw_name"], row["provider_category_name"])
                 if recomputed == row["language"]:
                     continue
                 bucket = by_code.setdefault(recomputed, {"count": 0, "sample_titles": [], "_parent_ids": set()})
@@ -12703,9 +12748,9 @@ def apply_language_recompute() -> int:
         conn = _connect()
         try:
             for table, _fk_col, _parent_table in _BACKFILL_TABLES:
-                rows = conn.execute(f"SELECT id, raw_name, language FROM {table} WHERE language IS NOT NULL").fetchall()
+                rows = conn.execute(f"SELECT id, raw_name, provider_category_name, language FROM {table} WHERE language IS NOT NULL").fetchall()
                 for row in rows:
-                    recomputed = _source_language(row["raw_name"])
+                    recomputed = _source_language(row["raw_name"], row["provider_category_name"])
                     if recomputed != row["language"]:
                         conn.execute(
                             f"UPDATE {table} SET language = ? WHERE id = ?",

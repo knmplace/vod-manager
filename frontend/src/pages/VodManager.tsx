@@ -6634,6 +6634,16 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
     queryKey: ['vod-needs-review'],
     queryFn:  () => api.get('/vod/needs-review/').then((r) => r.data),
   })
+  // KNM: 2026-10-14 -- toolbar count uses the review page's own query (and its
+  // hide-adult toggle); needs-review only counted the year hold queue.
+  const metadataReviewCountsQuery = useQuery<Record<'movies' | 'series', { total: number; adult: number }>>({
+    queryKey: ['vod-metadata-review', 'counts'],
+    queryFn:  () => api.get('/vod/metadata-review/counts/').then((r) => r.data),
+  })
+  const metadataReviewCount = (key: 'movies' | 'series') => {
+    const c = metadataReviewCountsQuery.data?.[key]
+    return c ? (metadataHideAdult ? c.total - c.adult : c.total) : 0
+  }
   const metadataReviewQuery = useQuery<NeedsReviewData>({
     queryKey: ['vod-metadata-review'],
     queryFn:  () => api.get('/vod/metadata-review/').then((r) => r.data),
@@ -11342,7 +11352,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
         <div className="flex items-center gap-1.5 flex-wrap">
           <Button size="sm" variant="outline" onClick={() => setCategoriesModalOpen('movie')}>Manage Categories</Button>
           <Button size="sm" variant="outline" onClick={() => { setMetadataContentType('movie'); setActiveTab('metadata') }}>
-            Metadata Review{needsReviewQuery.data?.movies.length ? ` (${needsReviewQuery.data.movies.length})` : ''}
+            Metadata Review{metadataReviewCount('movies') ? ` (${metadataReviewCount('movies')})` : ''}
           </Button>
           <Button size="sm" variant="outline" onClick={() => setMissingArtworkModalOpen('movie')}>
             Missing Artwork{missingArtworkCountsQuery.data?.movies ? ` (${missingArtworkCountsQuery.data.movies})` : ''}
@@ -11525,7 +11535,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
         <div className="flex items-center gap-1.5 flex-wrap">
           <Button size="sm" variant="outline" onClick={() => setCategoriesModalOpen('series')}>Manage Categories</Button>
           <Button size="sm" variant="outline" onClick={() => { setMetadataContentType('series'); setActiveTab('metadata') }}>
-            Metadata Review{needsReviewQuery.data?.series.length ? ` (${needsReviewQuery.data.series.length})` : ''}
+            Metadata Review{metadataReviewCount('series') ? ` (${metadataReviewCount('series')})` : ''}
           </Button>
           <Button size="sm" variant="outline" onClick={() => setMissingArtworkModalOpen('series')}>
             Missing Artwork{missingArtworkCountsQuery.data?.series ? ` (${missingArtworkCountsQuery.data.series})` : ''}

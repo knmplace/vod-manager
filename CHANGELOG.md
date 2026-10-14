@@ -31,6 +31,26 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-14 (Metadata Review count and held movies)
+
+- ✅ **Movies held for a year review now take their year from TMDB.** A
+  movie matched to TMDB but held because its year was unknown never got the
+  year from TMDB's release date (TV shows already did). It stayed held out of
+  every category, so XC players never saw it, and it was missing from Metadata
+  Review too. Enrichment now fills in the year and releases the hold, and
+  movies already affected are fixed automatically at startup.
+- ✅ **Metadata Review lists TMDB-matched titles that still have no year.**
+  If TMDB itself has no date (e.g. a show with no first air date), the title
+  now appears in Metadata Review so you can set the year by hand.
+- ✅ **The "Metadata Review (N)" button count matches the page.** It counted a
+  different list, so it could show "(1)" over an empty page. It now uses
+  the same list as the page and follows its "Hide adult titles" setting.
+- ✅ **Language detection reads tags from the provider category too.**
+  Import, Language Backfill and Language Recompute only looked at the title,
+  so a title in a category like "CRUNCHYROLL SERIES (MULTI-SUBS)" was stored
+  as English. Running Language Recompute once fixes existing rows. Upstream
+  already behaved this way.
+
 ## 2026-10-14 (Updated to upstream v0.3.00)
 
 - ✅ 🔼 **The fork now includes upstream release

@@ -3205,6 +3205,12 @@ async def year_review_suggestions(content_type: str, item_id: int, q: Optional[s
         raise HTTPException(502, detail=f"TMDB search failed: {exc}")
 
 
+# KNM: 2026-10-14 -- toolbar count from the same query as the review page.
+@router.get("/metadata-review/counts/", dependencies=_GUARDS)
+async def metadata_review_counts():
+    return await asyncio.to_thread(vod_db.count_metadata_review)
+
+
 @router.get("/metadata-review/", dependencies=_GUARDS)
 async def list_metadata_review(content_type: Optional[str] = None):
     """Human-review queue for missing or ambiguous TMDB identity fields."""
