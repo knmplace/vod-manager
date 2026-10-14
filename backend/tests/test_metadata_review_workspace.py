@@ -66,3 +66,32 @@ def test_get_process_cpu_percent_first_call_returns_none_or_float():
 def test_get_active_bulk_ai_status_defaults_idle():
     status = vod_bulk_ai_service.get_active_bulk_ai_status()
     assert status == {"running": False, "done": 0, "total": 0, "jobs": 0}
+
+
+def test_bulk_ai_confident_yearless_pick_sets_tmdb_id(db, monkeypatch):
+    """A confident TMDB pick with no release year (unreleased/new title) used to
+    be skipped; it now sets the TMDB ID alone, which clears the review row."""
+    import asyncio
+    import ai_assist
+    import tmdb_sync
+
+    provider_id = db.upsert_provider("XC-Test", "http://example.com", "user", "pass")
+    db.bulk_import_movies(provider_id, [
+        {"name": "Arthurs Empire", "year": None, "provider_stream_id": "1", "container_extension": "mkv"},
+    ])
+    item_id = db.list_metadata_review("movie")["movies"][0]["id"]
+
+    async def fake_search(query, content_type):
+        return [{"tmdb_id": "999001", "name": "Arthurs Empire", "year": None}]
+
+    async def fake_suggest(*args, **kwargs):
+        return {"best_match_index": 0, "confidence": "high", "reasoning": "exact"}
+
+    monkeypatch.setattr(tmdb_sync, "search_title", fake_search)
+    monkeypatch.setattr(ai_assist, "suggest_year_review_match", fake_suggest)
+
+    result = asyncio.run(vod_bulk_ai_service._resolve_one_needs_review("movie", item_id))
+
+    assert result["status"] == "resolved"
+    assert str(db.get_movie(item_id)["tmdb_id"]) == "999001"
+    assert not db.list_metadata_review("movie")["movies"]

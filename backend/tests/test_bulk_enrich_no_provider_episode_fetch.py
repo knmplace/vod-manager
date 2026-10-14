@@ -48,8 +48,8 @@ def xc_env(monkeypatch):
     monkeypatch.setattr(vod_importer.vod_db, "enrich_series_episodes_batch", lambda *a: None)
     monkeypatch.setattr(vod_importer.vod_db, "set_series_source_enrichment", lambda *a: None)
     monkeypatch.setattr(vod_importer.vod_db, "set_series_enrichment", lambda *a, **kw: None)
-    monkeypatch.setattr(vod_importer.vod_db, "auto_merge_movies_by_tmdb_batch", lambda ids: None)
-    monkeypatch.setattr(vod_importer.vod_db, "auto_merge_series_by_tmdb_batch", lambda ids: None)
+    monkeypatch.setattr(vod_importer.vod_db, "auto_merge_movies_by_tmdb_batch", lambda ids, should_stop=None: None)
+    monkeypatch.setattr(vod_importer.vod_db, "auto_merge_series_by_tmdb_batch", lambda ids, should_stop=None: None)
     monkeypatch.setitem(vod_importer._ENRICH_PROGRESS, "running", False)
     return calls
 

@@ -141,8 +141,8 @@ def test_empty_configured_providers_do_not_reduce_active_lane_concurrency(monkey
     )
     monkeypatch.setattr(vod_importer.vod_db, "list_all_series_ids", lambda provider_id=None, **kw: [20] if provider_id is None else [])
     monkeypatch.setattr(vod_importer, "_run_provider_enrichment", fake_run)
-    monkeypatch.setattr(vod_importer.vod_db, "auto_merge_movies_by_tmdb_batch", lambda ids: None)
-    monkeypatch.setattr(vod_importer.vod_db, "auto_merge_series_by_tmdb_batch", lambda ids: None)
+    monkeypatch.setattr(vod_importer.vod_db, "auto_merge_movies_by_tmdb_batch", lambda ids, should_stop=None: None)
+    monkeypatch.setattr(vod_importer.vod_db, "auto_merge_series_by_tmdb_batch", lambda ids, should_stop=None: None)
 
     asyncio.run(vod_importer.bulk_enrich_all(concurrency=8, pending_only=True))
 
@@ -302,8 +302,8 @@ def test_shared_series_across_providers_is_counted_once(monkeypatch):
     monkeypatch.setattr(vod_importer.vod_db, "list_movie_ids_pending_provider_enrichment", lambda provider_id=None: [])
     monkeypatch.setattr(vod_importer.vod_db, "list_pending_series_sources", lambda provider_id=None: pending[provider_id])
     monkeypatch.setattr(vod_importer.vod_db, "has_pending_series_source_enrichment", lambda provider_id: True)
-    monkeypatch.setattr(vod_importer.vod_db, "auto_merge_movies_by_tmdb_batch", lambda ids: None)
-    monkeypatch.setattr(vod_importer.vod_db, "auto_merge_series_by_tmdb_batch", lambda ids: None)
+    monkeypatch.setattr(vod_importer.vod_db, "auto_merge_movies_by_tmdb_batch", lambda ids, should_stop=None: None)
+    monkeypatch.setattr(vod_importer.vod_db, "auto_merge_series_by_tmdb_batch", lambda ids, should_stop=None: None)
     monkeypatch.setattr(vod_importer.vod_db, "auto_merge_movie_tmdb_collisions", lambda: None)
     monkeypatch.setattr(vod_importer.vod_db, "auto_merge_series_tmdb_collisions", lambda: None)
 

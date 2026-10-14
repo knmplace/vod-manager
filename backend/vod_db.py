@@ -10906,7 +10906,7 @@ def auto_merge_series_by_tmdb(series_id: int) -> list[dict]:
     return merge_events
 
 
-def auto_merge_movies_by_tmdb_batch(movie_ids) -> list[dict]:
+def auto_merge_movies_by_tmdb_batch(movie_ids, should_stop=None) -> list[dict]:
     """Bulk-enrich's end-of-run merge sweep (see vod_importer.bulk_enrich_all)
     used to fan out one asyncio.to_thread(auto_merge_movie_by_tmdb, id) task
     per affected id via asyncio.gather -- against a full-catalog run that's
@@ -10920,16 +10920,21 @@ def auto_merge_movies_by_tmdb_batch(movie_ids) -> list[dict]:
     order with none of that overhead."""
     events = []
     for movie_id in movie_ids:
+        # KNM: 2026-10-13 -- should_stop lets a bulk-enrich cancel end the sweep.
+        if should_stop and should_stop():
+            break
         events.extend(auto_merge_movie_by_tmdb(movie_id) or [])
     return events
 
 
-def auto_merge_series_by_tmdb_batch(series_ids) -> list[dict]:
+def auto_merge_series_by_tmdb_batch(series_ids, should_stop=None) -> list[dict]:
     """Series counterpart to auto_merge_movies_by_tmdb_batch -- same
     single-thread-sequential fix for the same per-id asyncio.gather fan-out
     problem, see that function's docstring."""
     events = []
     for series_id in series_ids:
+        if should_stop and should_stop():
+            break
         events.extend(auto_merge_series_by_tmdb(series_id) or [])
     return events
 

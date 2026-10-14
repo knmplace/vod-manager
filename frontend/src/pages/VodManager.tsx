@@ -1775,11 +1775,14 @@ function NeedsReviewRow({ contentType, item, qc, xcCredentials, queue = 'identit
                 return (
                 <button
                   key={s.tmdb_id}
-                  disabled={resolve.isPending || resolvedYear == null}
+                  disabled={resolve.isPending || setTmdbId.isPending}
                   className="flex items-start gap-2 w-full border border-border rounded px-2 py-1.5 hover:bg-accent text-left disabled:opacity-50"
-                  title={resolvedYear == null ? 'This TMDB result has no release year; set a year manually instead.' : undefined}
+                  title={resolvedYear == null ? 'TMDB has no release year for this result; selecting it sets the TMDB ID only.' : undefined}
                   onClick={() => {
+                    // KNM: 2026-10-13 -- a yearless TMDB result (unreleased/new title) was unclickable;
+                    // set the TMDB ID alone, same as the manual Apply path, which clears the review.
                     if (resolvedYear != null) resolve.mutate({ year: resolvedYear, tmdb_id: s.tmdb_id })
+                    else setTmdbId.mutate(Number(s.tmdb_id))
                   }}
                 >
                   <PosterThumb

@@ -136,15 +136,26 @@ async def _resolve_one_needs_review(content_type: str, item_id: int) -> dict:
         }
 
     pick = candidates[idx]
-    if pick.get("year") is None or not pick.get("tmdb_id"):
-        return {"id": item_id, "name": item["name"], "status": "skipped", "detail": "confident TMDB result has no usable ID/year"}
+    if not pick.get("tmdb_id"):
+        return {"id": item_id, "name": item["name"], "status": "skipped", "detail": "confident TMDB result has no usable ID"}
+    # KNM: 2026-10-13 -- a confident pick with no TMDB year (unreleased/new title) was
+    # skipped; set the TMDB ID alone, as the manual card/Apply path does.
+    year = pick.get("year") if pick.get("year") is not None else item.get("year")
+    if year is None:
+        try:
+            result = vod_db.set_tmdb_id(content_type, item_id, int(pick["tmdb_id"]))
+        except ValueError as exc:
+            return {"id": item_id, "name": item["name"], "status": "error", "detail": str(exc)}
+        if result.get("merged_into"):
+            return {"id": item_id, "name": item["name"], "status": "resolved", "detail": f"merged into #{result['merged_into']}"}
+        return {"id": item_id, "name": item["name"], "status": "resolved", "detail": f"set tmdb_id={pick['tmdb_id']} (TMDB has no year)"}
     try:
-        result = vod_db.resolve_year_review(content_type, item_id, pick.get("year"), pick.get("tmdb_id"))
+        result = vod_db.resolve_year_review(content_type, item_id, year, pick.get("tmdb_id"))
     except ValueError as exc:
         return {"id": item_id, "name": item["name"], "status": "error", "detail": str(exc)}
     if result.get("merged_into"):
         return {"id": item_id, "name": item["name"], "status": "resolved", "detail": f"merged into #{result['merged_into']}"}
-    return {"id": item_id, "name": item["name"], "status": "resolved", "detail": f"set year {pick.get('year')} (tmdb_id={pick.get('tmdb_id')})"}
+    return {"id": item_id, "name": item["name"], "status": "resolved", "detail": f"set year {year} (tmdb_id={pick.get('tmdb_id')})"}
 
 
 async def _run_needs_review_job(job_id: str, content_type: str, ids: list[int]) -> None:

@@ -31,6 +31,17 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-14 (Metadata Review picks and enrichment Stop)
+
+- ✅ **A Metadata Review TMDB match with no release year can be selected.**
+  TMDB has no year yet for some new or unreleased titles, and their candidate
+  card was greyed out. Selecting it now sets the TMDB ID, the same as entering
+  the ID by hand, and clears the item from review. Bulk AI resolve does the same
+  for a confident yearless match, which it used to skip.
+- ✅ **Stop works during the end of an enrichment run.** The duplicate-merge
+  passes that run after enrichment ignored Stop, and a large run could only be
+  ended by restarting the container. They now stop after the item in progress.
+
 ## 2026-10-13 (Updated to upstream v0.2.26)
 
 - ✅ 🔼 **The fork now includes upstream releases [v0.2.25](https://github.com/jstevenscl/vod-manager/releases/tag/v0.2.25) and

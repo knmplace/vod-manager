@@ -3072,15 +3072,24 @@ async def _bulk_enrich_all_inner(concurrency: int, force: bool, pending_only: bo
         # the executor at once, which is what drove host CPU to 1200%+/near-
         # total saturation during the 2026-09-14 dry-run. See
         # auto_merge_movies_by_tmdb_batch's docstring in vod_db.py.
-        await asyncio.to_thread(vod_db.auto_merge_movies_by_tmdb_batch, merged_movie_ids)
-        await asyncio.to_thread(vod_db.auto_merge_series_by_tmdb_batch, merged_series_ids)
+        # KNM: 2026-10-13 -- these sweeps ignored Stop (a live run needed docker
+        # stop); check cancel per id and between sweeps.
+        def cancelled() -> bool:
+            return _ENRICH_CANCEL_REQUESTED
+
+        await asyncio.to_thread(vod_db.auto_merge_movies_by_tmdb_batch, merged_movie_ids, should_stop=cancelled)
+        if cancelled():
+            return
+        await asyncio.to_thread(vod_db.auto_merge_series_by_tmdb_batch, merged_series_ids, should_stop=cancelled)
+        if cancelled():
+            return
         # Reconcile only the IDs touched by this bounded run.  A full collision
         # scan remains available only as an explicit maintenance call.
         if merged_movie_ids:
             await _run_scoped_collision_sweep(
                 vod_db.auto_merge_movie_tmdb_collisions, merged_movie_ids,
             )
-        if merged_series_ids:
+        if merged_series_ids and not cancelled():
             await _run_scoped_collision_sweep(
                 vod_db.auto_merge_series_tmdb_collisions, merged_series_ids,
             )
