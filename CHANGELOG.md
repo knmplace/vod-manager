@@ -33,7 +33,7 @@ instead of opening a duplicate request.
 
 ## 2026-10-15 (Archived movies get their TMDB year)
 
-- ✅ **Archived movies now show their year too.** The startup fix that gives
+- ✅ 🔀 [#56](https://github.com/jstevenscl/vod-manager/pull/56) **Archived movies now show their year too.** The startup fix that gives
   held, yearless movies their year from the TMDB release date skipped movies
   archived by language or import rules, so they showed a blank year under
   **Show archived** and would come back still held if restored. They are now
@@ -62,7 +62,7 @@ instead of opening a duplicate request.
   nothing when done, so a burst with nothing to fetch looked like the button
   did nothing. Each job now shows a toast and a "Last ..." line with what it
   did, e.g. "nothing to fetch — every catalog title is stored and up to date".
-- ✅ **Movies held for a year review now take their year from TMDB.** A
+- ✅ 🔀 [#56](https://github.com/jstevenscl/vod-manager/pull/56) **Movies held for a year review now take their year from TMDB.** A
   movie matched to TMDB but held because its year was unknown never got the
   year from TMDB's release date (TV shows already did). It stayed held out of
   every category, so XC players never saw it, and it was missing from Metadata
