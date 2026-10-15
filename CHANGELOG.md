@@ -33,17 +33,17 @@ instead of opening a duplicate request.
 
 ## 2026-10-14 (TMDB library keeps popular titles)
 
-- ✅ **The TMDB library also stores the most popular TMDB titles.** It used to
+- ✅ 🔀 [#55](https://github.com/jstevenscl/vod-manager/pull/55) **The TMDB library also stores the most popular TMDB titles.** It used to
   store only titles already in your catalog, so every newly imported title
   cost a TMDB call, even blockbusters. After your catalog, fill bursts now
   also fetch the top **Popular titles to keep** movies and TV shows from
   TMDB's daily export (default 25,000 of each; adult titles are never
   included; 0 = catalog only). New drops are then usually local already.
-- ✅ **Titles leaving the catalog are kept until the cache limit.** The daily
+- ✅ 🔀 [#55](https://github.com/jstevenscl/vod-manager/pull/55) **Titles leaving the catalog are kept until the cache limit.** The daily
   cleanup deleted any title no longer in the catalog, so one that dropped out
   and came back was fetched again. Stored titles now stay until the 170-day
   cache limit, which still keeps the library inside TMDB's six-month rule.
-- ✅ **The library file is compacted.** Deletes left free space in the file
+- ✅ 🔀 [#55](https://github.com/jstevenscl/vod-manager/pull/55) **The library file is compacted.** Deletes left free space in the file
   that was never given back (about half of it on a long-running install).
   The daily cleanup now compacts the file when more than a quarter is free.
 
