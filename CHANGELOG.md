@@ -33,6 +33,11 @@ instead of opening a duplicate request.
 
 ## 2026-10-14 (Metadata Review count and held movies)
 
+- ✅ **TMDB library jobs report their result.** "Run fill burst now", "Check
+  TMDB changes" and "Refresh TMDB ID list" run in the background and showed
+  nothing when done, so a burst with nothing to fetch looked like the button
+  did nothing. Each job now shows a toast and a "Last ..." line with what it
+  did, e.g. "nothing to fetch — every catalog title is stored and up to date".
 - ✅ **Movies held for a year review now take their year from TMDB.** A
   movie matched to TMDB but held because its year was unknown never got the
   year from TMDB's release date (TV shows already did). It stayed held out of
