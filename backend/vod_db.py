@@ -1420,10 +1420,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_series_metadata_review_flag ON series(id) WHERE review_excluded=0 AND needs_year_review=1")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_series_metadata_review_missing ON series(id) WHERE review_excluded=0 AND tmdb_id IS NULL AND year IS NULL")
     # KNM: 2026-10-14 -- heal movies enriched before _release_year_fields
-    # existed: held, yearless, but TMDB already gave a release date. Uses the
-    # small partial flag index; a no-op once caught up.
+    # existed: held, yearless, but TMDB already gave a release date. A no-op
+    # once caught up.
+    # KNM: 2026-10-15 -- archived rows included too, so "Show archived" shows
+    # the year and a restored card comes back already fixed.
     conn.execute("""UPDATE movies SET year=CAST(substr(release_date, 1, 4) AS INTEGER), needs_year_review=0
-                    WHERE needs_year_review=1 AND review_excluded=0 AND year IS NULL
+                    WHERE needs_year_review=1 AND year IS NULL
                       AND tmdb_id IS NOT NULL AND release_date GLOB '[0-9][0-9][0-9][0-9]*'""")
 
     _commit_with_retry(conn)

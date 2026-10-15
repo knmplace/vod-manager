@@ -31,6 +31,14 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-15 (Archived movies get their TMDB year)
+
+- ✅ **Archived movies now show their year too.** The startup fix that gives
+  held, yearless movies their year from the TMDB release date skipped movies
+  archived by language or import rules, so they showed a blank year under
+  **Show archived** and would come back still held if restored. They are now
+  fixed the same way and stay archived.
+
 ## 2026-10-14 (TMDB library keeps popular titles)
 
 - ✅ 🔀 [#55](https://github.com/jstevenscl/vod-manager/pull/55) **The TMDB library also stores the most popular TMDB titles.** It used to

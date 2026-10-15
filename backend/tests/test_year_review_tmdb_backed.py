@@ -56,6 +56,21 @@ def test_startup_heals_already_enriched_stuck_movies(db):
     assert _row(db, blank)["needs_year_review"] == 1
 
 
+# KNM: 2026-10-15 -- archived (rule-excluded) movies also take the TMDB year,
+# so they look right under "Show archived" and come back fixed if restored.
+def test_startup_heals_archived_stuck_movies(db):
+    mid = _movie(db, enriched=True, release_date="2019-10-02")
+    conn = db._connect()
+    conn.execute("UPDATE movies SET review_excluded=1 WHERE id=?", (mid,))
+    conn.commit()
+    conn.close()
+    db.init_db()
+    row = _row(db, mid)
+    assert row["year"] == 2019
+    assert row["needs_year_review"] == 0
+    assert row["review_excluded"] == 1
+
+
 def test_review_lists_enriched_tmdb_backed_rows_still_missing_a_year(db):
     _movie(db, name="Pending", enriched=False)
     _movie(db, name="Yearless", enriched=True)
