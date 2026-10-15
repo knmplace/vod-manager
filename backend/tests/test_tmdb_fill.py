@@ -42,6 +42,7 @@ def _fake_fetch(store, fetched):
 
 
 def test_burst_refreshes_only_catalog_references(store, monkeypatch):
+    config.save_tmdb_store_settings({"popular_keep": 0})  # KNM: 2026-10-14 -- popular fill off
     store.upsert_payload("movie", _movie(50, "Old"))
     store.mark_changed("movie", [50])
     _seed_export(store, "movie", [999])
@@ -168,7 +169,8 @@ def test_retention_uses_current_catalog_ids(store, monkeypatch):
     assert preview["dry_run"] is True and preview["unreferenced_titles"] == 1
     assert store.get_title("movie", 2) is not None
 
+    # KNM: 2026-10-14 -- unused titles are now kept until the cache age limit.
     applied = asyncio.run(tmdb_fill.retention(dry_run=False))
-    assert applied["titles_removed"] == 1
+    assert applied["titles_removed"] == 0
     assert store.get_title("movie", 1) is not None
-    assert store.get_title("movie", 2) is None
+    assert store.get_title("movie", 2) is not None

@@ -1808,9 +1808,11 @@ Configuration page and in the README) and limit how long TMDB data may be
 cached (6 months); the key is yours, so following
 [TMDB's API terms](https://www.themoviedb.org/api-terms-of-use) is up to you.
 The optional local TMDB library is off by default; turn it on from the TMDB Library page in the sidebar
-(it needs the TMDB key above). It is catalog-first: it fills known movie and show
-IDs only, refreshes retained records after 150 days, removes unreferenced data
-daily, and never serves data older than 170 days. The TMDB Library page
+(it needs the TMDB key above). It fills your catalog's movie and show IDs first,
+then the most popular TMDB titles (**Popular titles to keep**, default 25,000 movies
+and 25,000 shows; **0 = catalog only**), so newly imported titles are usually local
+already and need no TMDB call. It refreshes records after 150 days, keeps any
+stored title until 170 days, and never serves data older than that. The TMDB Library page
 has a cleanup preview, so you can review the affected records before
 applying removal. Once it is on, TMDB's daily ID export is downloaded at most
 once a day (no API key or request budget needed) so name search can be
@@ -1844,17 +1846,20 @@ and Missing Artwork flows above, plus two ways to auto-populate
 categories from a public list — both only ever place items already present
 in your pool; neither pulls in anything new.
 
-The **TMDB Library** keeps reusable detail data only for movies and shows in
-the current catalog. A daily retention pass removes unreferenced title and
-season data, non-empty search responses, and unreferenced missing-title
-markers. Referenced titles are queued for refresh after 150 days, and no
+The **TMDB Library** keeps reusable detail data for movies and shows in the
+current catalog plus the most popular TMDB titles. A title that leaves the
+catalog is kept until it reaches the cache age limit, so it costs no new call if
+it comes back. A daily retention pass removes 170-day-old title, season and
+missing-title data plus non-empty search responses, then compacts the file when
+more than a quarter of it is free space. Catalog and popular titles are queued for refresh after 150 days, and no
 cached TMDB response is served once it reaches 170 days. This leaves time to
 refresh before TMDB's six-month maximum even if a scheduled request fails.
 Use **Preview retention cleanup** to see exact counts without changing data;
 **Apply retention cleanup** shows a confirmation before deleting anything.
-Background fill requests only current catalog IDs that are missing, changed,
-or due for refresh. TMDB's daily ID/name export is replaced daily and is used
-as a matching index; it does not pre-fill unrelated title details.
+Background fill requests current catalog IDs that are missing, changed, or due
+for refresh first; leftover burst budget then fills the most popular titles from
+TMDB's daily ID/name export (adult titles are never included). The export is
+replaced daily and is also used as a matching index.
 
 - **TMDB Lists** (Curation & Maintenance) — link a public TMDB List (a
   personal watchlist, or a well-known curated list like IMDB's Top 250) to

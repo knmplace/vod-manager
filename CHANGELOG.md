@@ -31,9 +31,25 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-14 (TMDB library keeps popular titles)
+
+- ✅ **The TMDB library also stores the most popular TMDB titles.** It used to
+  store only titles already in your catalog, so every newly imported title
+  cost a TMDB call, even blockbusters. After your catalog, fill bursts now
+  also fetch the top **Popular titles to keep** movies and TV shows from
+  TMDB's daily export (default 25,000 of each; adult titles are never
+  included; 0 = catalog only). New drops are then usually local already.
+- ✅ **Titles leaving the catalog are kept until the cache limit.** The daily
+  cleanup deleted any title no longer in the catalog, so one that dropped out
+  and came back was fetched again. Stored titles now stay until the 170-day
+  cache limit, which still keeps the library inside TMDB's six-month rule.
+- ✅ **The library file is compacted.** Deletes left free space in the file
+  that was never given back (about half of it on a long-running install).
+  The daily cleanup now compacts the file when more than a quarter is free.
+
 ## 2026-10-14 (Metadata Review count and held movies)
 
-- ✅ **TMDB library jobs report their result.** "Run fill burst now", "Check
+- ✅ 🔀 [#54](https://github.com/jstevenscl/vod-manager/pull/54) **TMDB library jobs report their result.** "Run fill burst now", "Check
   TMDB changes" and "Refresh TMDB ID list" run in the background and showed
   nothing when done, so a burst with nothing to fetch looked like the button
   did nothing. Each job now shows a toast and a "Last ..." line with what it

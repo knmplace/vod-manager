@@ -45,7 +45,7 @@ def test_catalog_ids_include_movie_and_series(db):
     assert db.list_catalog_tmdb_ids() == {"movie": {101}, "tv": {202}}
 
 
-def test_retention_preview_then_apply_keeps_only_current_catalog_data(db):
+def test_retention_preview_then_apply_removes_only_expired_data(db):
     provider_id = db.upsert_provider("provider", "http://example.invalid", "u", "p")
     db.bulk_import_movies(provider_id, [
         {"name": "Current", "year": 2020, "provider_stream_id": "m1", "container_extension": "mp4", "tmdb_id": "1", "_has_detail": True},
@@ -79,28 +79,29 @@ def test_retention_preview_then_apply_keeps_only_current_catalog_data(db):
         "seasons_removed": 1,
         "searches_removed": 1,
         "gone_removed": 1,
-        "titles_removed": 2,
+        "titles_removed": 1,
     }
     assert tmdb_store.get_title("movie", 3) is not None
 
+    # KNM: 2026-10-14 -- unused (unreferenced) titles stay until the cache age limit.
     applied = tmdb_store.retention_cleanup(referenced, dry_run=False)
-    assert applied["titles_removed"] == 2
+    assert applied["titles_removed"] == 1
     assert tmdb_store.get_title("movie", 1) is not None
     assert tmdb_store.get_title("movie", 2) is None
-    assert tmdb_store.get_title("movie", 3) is None
+    assert tmdb_store.get_title("movie", 3) is not None
     assert tmdb_store.get_title("tv", 10) is not None
     assert tmdb_store.get_season(10, 1) is None
     assert tmdb_store.get_search("search/movie", "old query") is None
 
 
-def test_retention_removes_fresh_nonempty_searches_and_unreferenced_gone_markers(db):
+def test_retention_removes_fresh_nonempty_searches_but_keeps_fresh_gone_markers(db):
     tmdb_store.put_search("search/movie", "unrelated", None, {"results": [{"id": 99}]}, False)
     tmdb_store.put_search("search/movie", "empty", None, {"results": []}, True)
     tmdb_store.mark_gone("movie", 404)
 
     preview = tmdb_store.retention_cleanup({"movie": set(), "tv": set()})
     assert preview["searches_removed"] == 1
-    assert preview["gone_removed"] == 1
+    assert preview["gone_removed"] == 0  # KNM: 2026-10-14 -- kept until the cache age limit
 
     tmdb_store.retention_cleanup({"movie": set(), "tv": set()}, dry_run=False)
     assert tmdb_store.get_search("search/movie", "unrelated") is None

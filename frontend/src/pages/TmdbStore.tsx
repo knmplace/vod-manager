@@ -16,6 +16,7 @@ interface StoreSettings {
   daily_budget: number
   concurrency: number
   auto_match_batch: number
+  popular_keep: number
 }
 interface TypeStats {
   media_type: MediaType
@@ -79,8 +80,8 @@ function jobResultText(r: Record<string, unknown>): string | null {
     case 'burst':
       if (r.skipped) return `Last fill burst: skipped — ${r.skipped}`
       if (!Number(r.fetched) && !Number(r.failed) && !Number(r.gone))
-        return 'Last fill burst: nothing to fetch — every catalog title is stored and up to date'
-      return `Last fill burst: ${n(r.fetched)} fetched, ${n(r.failed)} failed, ${n(r.gone)} no longer on TMDB`
+        return 'Last fill burst: nothing to fetch — every catalog and popular title is stored and up to date'
+      return `Last fill burst: ${n(r.fetched)} fetched (${n(r.popular)} popular), ${n(r.failed)} failed, ${n(r.gone)} no longer on TMDB`
     case 'changes': {
       const m = perType(r, 'movie'), t = perType(r, 'tv')
       return `Last change check: ${n(m.changed_on_tmdb)} movies and ${n(t.changed_on_tmdb)} TV shows changed on TMDB; `
@@ -108,6 +109,7 @@ const SETTING_FIELDS: { key: Exclude<keyof StoreSettings, 'enabled'>; label: str
   { key: 'daily_budget', label: 'Daily request budget', hint: 'Fill bursts stop once this many TMDB requests were made today.' },
   { key: 'concurrency', label: 'Parallel requests', hint: 'Concurrent requests during a burst — keep low to stay light on bandwidth.' },
   { key: 'auto_match_batch', label: 'Titles to match per burst', hint: 'Catalog titles without a TMDB ID matched by name and year after each burst. 0 turns it off.' },
+  { key: 'popular_keep', label: 'Popular titles to keep', hint: 'Also store this many of the most popular TMDB movies and TV shows (each), filled after your catalog, so new titles are usually local already. 0 = catalog only.' },
 ]
 
 export default function TmdbStore() {
@@ -224,7 +226,7 @@ export default function TmdbStore() {
             </div>
             <p className="text-xs text-muted-foreground flex-1 min-w-[16rem]">
               {enabled
-                ? 'On: TMDB details are saved locally and reused for titles in your current catalog.'
+                ? 'On: TMDB details are saved locally for your catalog and the most popular TMDB titles, and reused instead of calling TMDB.'
                 : 'Off: nothing is stored; every lookup goes straight to TMDB. Use this if disk space is tight.'}
             </p>
             {!enabled && status.db_size_bytes > 0 && (
@@ -248,8 +250,8 @@ export default function TmdbStore() {
       )}
       <SectionCard title="TMDB Library" icon={<Database size={14} />}>
         <p className="text-xs text-muted-foreground">
-          A local copy of TMDB movie and TV details used by your current catalog. Referenced titles are refreshed before
-          the cache limit; unreferenced details are cleared daily. It is off until you turn it on above, and needs a
+          A local copy of TMDB movie and TV details for your catalog plus the most popular TMDB titles. Catalog and popular
+          titles are refreshed before the cache limit; any title is kept until that limit, then removed. It is off until you turn it on above, and needs a
           TMDB API key under Configuration → API Keys.
         </p>
         {statusQuery.isLoading || !status ? (
@@ -351,8 +353,8 @@ export default function TmdbStore() {
               <div className="rounded border border-warning/50 bg-warning/10 p-3 space-y-1.5 text-xs">
                 <p className="font-medium">Retention preview — nothing has been deleted</p>
                 <p>
-                  {fmtNum(retentionPreview.referenced)} catalog TMDB IDs are retained. Cleanup would remove{' '}
-                  {fmtNum(retentionPreview.unreferenced_titles)} unreferenced and {fmtNum(retentionPreview.expired_referenced_titles)} expired title record(s),{' '}
+                  {fmtNum(retentionPreview.referenced)} catalog TMDB IDs; {fmtNum(retentionPreview.unreferenced_titles)} stored titles are not in the catalog and are kept until the cache limit. Cleanup would remove{' '}
+                  {fmtNum(retentionPreview.titles_removed)} expired title record(s) ({fmtNum(retentionPreview.expired_referenced_titles)} in the catalog, refetched next burst),{' '}
                   {fmtNum(retentionPreview.seasons_removed)} season cache row(s), {fmtNum(retentionPreview.searches_removed)} old search answer(s), and{' '}
                   {fmtNum(retentionPreview.gone_removed)} old missing-title marker(s).
                 </p>

@@ -500,9 +500,11 @@ Full details and screenshots for each in
 
 ### Local TMDB retention
 
-The local TMDB library is catalog-first: it fills or refreshes only TMDB IDs
-attached to movies and shows currently in the database. A daily retention pass
-removes unreferenced title/season details and ephemeral search data. Referenced
+The local TMDB library fills TMDB IDs attached to movies and shows in the
+database first, then the most popular TMDB titles (25,000 per type by default),
+so new catalog titles are usually local already. Stored titles are kept until
+the cache age limit; a daily retention pass removes 170-day-old records and
+ephemeral search data and compacts the file. Catalog and popular
 records refresh after 150 days, and cached TMDB responses are never served at
 170 days, leaving headroom inside TMDB's six-month cache limit. The TMDB
 Library page can preview the exact cleanup counts before a confirmed manual
@@ -517,9 +519,9 @@ You supply your own TMDB API key and are responsible for following
 [TMDB's API terms of use](https://www.themoviedb.org/api-terms-of-use) -- notably that information obtained from
 TMDB may not be cached for longer than 6 months.
 
-The optional local TMDB library is off by default (turn it on from the TMDB Library page). When enabled, it keeps details only for current
-catalog titles, refreshes them after 150 days, and automatically removes
-unreferenced or 170-day-old records. Its cleanup screen always provides a preview
+The optional local TMDB library is off by default (turn it on from the TMDB Library page). When enabled, it keeps details for current
+catalog titles and the most popular TMDB titles, refreshes them after 150 days, and automatically removes
+170-day-old records. Its cleanup screen always provides a preview
 before deleting anything. With it on, titles a provider sent without a TMDB ID are
 matched by name and year in the background (never guessing: uncertain ones go to
 Metadata Review), so the same title from different providers merges into one card.
