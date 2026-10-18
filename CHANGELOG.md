@@ -31,6 +31,28 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-18 (Radarr/Sonarr library handoff — screens)
+
+- ✅ **Library handoff settings, import status and a notice bell.**
+  - **Before:** the handoff could only be set up through the API, the
+    download queue showed only download status (`done · 1.2 GB`), and stall
+    or failure notices were stored but never shown.
+  - **After:** Settings → **Library handoff (Radarr / Sonarr)**, next to
+    Downloads, has the URL and API key for each app (saved keys show as
+    "API key (saved)" and are never sent back). **Test** checks the
+    connection and fills the root folder and quality profile lists. The
+    card also holds the finished folders, the same folders as
+    Radarr/Sonarr see them, how new shows and movies are monitored, and
+    the three notice hours plus the give-up hour.
+  - Queue rows show the import step under the download status: *Add to
+    Radarr/Sonarr manually* (amber), *Waiting for encoder*, *Importing
+    into Radarr/Sonarr*, *In library* (lime), and *Import failed* / *Import
+    timed out*. Hovering a chip shows the reason. Failed and timed-out
+    imports get a **Retry import** button.
+  - A bell in the top bar shows open notices with a count, checks every
+    60 s, pops a toast once for each new one, and keeps each notice until
+    you press **Acknowledge**.
+
 ## 2026-10-18 (Radarr/Sonarr library handoff — backend)
 
 - ✅ **Finished downloads can be handed to Radarr/Sonarr, so they land in
