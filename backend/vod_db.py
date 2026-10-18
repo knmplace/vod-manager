@@ -1136,6 +1136,17 @@ def _migrate(conn: sqlite3.Connection) -> None:
         finished_at        TEXT
     )""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_download_jobs_status ON download_jobs(status)")
+    # KNM: 2026-10-18 persistent notices (notices.py): stay until acknowledged.
+    conn.execute("""CREATE TABLE IF NOT EXISTS notices (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind            TEXT NOT NULL,
+        severity        TEXT NOT NULL DEFAULT 'info',   -- info|warn|error
+        title           TEXT NOT NULL,
+        body            TEXT,
+        job_id          INTEGER,
+        created_at      TEXT NOT NULL,
+        acknowledged_at TEXT
+    )""")
     migrations = [
         ("movies", "last_enriched_at", "TEXT"),
         # 1 = the name was set deliberately (manual edit or "Use TMDB episode
@@ -1428,6 +1439,17 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # Do not conflate provider episode/detail enrichment with canonical
         # TMDB identity/title enrichment.
         ("series", "tmdb_metadata_enriched_at", "TEXT"),
+        # KNM: 2026-10-18 library handoff (arr_handoff.py): NULL = not handed to Radarr/Sonarr.
+        # add|ready|needs_manual|waiting|importing|imported|failed|timed_out
+        ("download_jobs", "import_status", "TEXT"),
+        ("download_jobs", "import_stage", "INTEGER NOT NULL DEFAULT 0"),   # stall notices already sent
+        ("download_jobs", "import_note", "TEXT"),
+        ("download_jobs", "arr_id", "INTEGER"),            # Radarr movie id / Sonarr series id
+        ("download_jobs", "import_cmd_id", "INTEGER"),
+        ("download_jobs", "import_cmd_at", "REAL"),
+        ("download_jobs", "import_seen_size", "INTEGER"),  # size-stable check before importing
+        ("download_jobs", "import_seen_at", "REAL"),
+        ("download_jobs", "import_since", "REAL"),         # start of the stall clock
     ]
     for table, column, coltype in migrations:
         existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -15246,6 +15268,62 @@ def next_download_jobs(limit: int, now: float, exclude_ids: set[int] | None = No
 
 _DOWNLOAD_FIELDS = {"status", "note", "error", "bytes_done", "total_bytes", "progress", "provider_name",
                     "final_path", "final_size", "next_try_at", "started_at", "finished_at"}
+
+
+_IMPORT_FIELDS = {"import_status", "import_stage", "import_note", "arr_id", "import_cmd_id", "import_cmd_at",
+                  "import_seen_size", "import_seen_at", "import_since"}
+_DOWNLOAD_FIELDS |= _IMPORT_FIELDS
+
+
+def update_import(job_id: int, **fields) -> bool:
+    """Updates only the library-handoff columns of a job."""
+    bad = set(fields) - _IMPORT_FIELDS
+    if bad:
+        raise ValueError(f"not an import field: {sorted(bad)}")
+    return update_download_job(job_id, **fields)
+
+
+def list_import_jobs(statuses: tuple[str, ...]) -> list[dict]:
+    conn = _connect()
+    try:
+        rows = conn.execute("SELECT * FROM download_jobs WHERE import_status IN (" + ",".join("?" for _ in statuses)
+                            + ") ORDER BY id", statuses).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def add_notice(kind: str, severity: str, title: str, body: str | None, job_id: int | None) -> int:
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            cur = conn.execute("INSERT INTO notices (kind, severity, title, body, job_id, created_at) VALUES (?,?,?,?,?,?)",
+                               (kind, severity, title, body, job_id, _now()))
+            _commit_with_retry(conn)
+            return cur.lastrowid
+        finally:
+            conn.close()
+
+
+def list_open_notices() -> list[dict]:
+    conn = _connect()
+    try:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM notices WHERE acknowledged_at IS NULL ORDER BY id DESC").fetchall()]
+    finally:
+        conn.close()
+
+
+def acknowledge_notice(notice_id: int) -> bool:
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            n = conn.execute("UPDATE notices SET acknowledged_at=? WHERE id=? AND acknowledged_at IS NULL",
+                             (_now(), notice_id)).rowcount
+            _commit_with_retry(conn)
+            return n > 0
+        finally:
+            conn.close()
 
 
 def update_download_job(job_id: int, only_if_status: tuple[str, ...] | None = None, **fields) -> bool:
