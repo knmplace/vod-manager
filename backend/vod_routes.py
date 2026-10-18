@@ -4460,10 +4460,13 @@ async def ack_notice(notice_id: int):
 
 @router.post("/downloads/clear/", dependencies=_GUARDS)
 async def clear_downloads():
-    finished = [j["id"] for j in await asyncio.to_thread(vod_db.list_download_jobs, 100000)
+    finished = [j for j in await asyncio.to_thread(vod_db.list_download_jobs, 100000)
                 if j["status"] in ("done", "failed", "cancelled")]
-    await asyncio.to_thread(vod_downloader.purge_work, finished)   # drop their unfinished leftovers too
-    return {"cleared": await asyncio.to_thread(vod_db.clear_finished_downloads)}
+    # KNM: keep rows whose library import is still pending, or the watcher loses them (2026-10-18)
+    pending = [j for j in finished if j.get("import_status") in vod_db.PENDING_IMPORT_STATUSES]
+    clear_ids = [j["id"] for j in finished if j not in pending]
+    await asyncio.to_thread(vod_downloader.purge_work, clear_ids)   # drop their unfinished leftovers too
+    return {"cleared": await asyncio.to_thread(vod_db.clear_finished_downloads), "kept": len(pending)}
 
 
 @router.post("/series/{series_id}/tmdb-episode-titles/", dependencies=_GUARDS)

@@ -15410,12 +15410,20 @@ def cancel_download_jobs(job_ids: list[int] | None = None) -> list[int]:
             conn.close()
 
 
+# KNM: rows whose Radarr/Sonarr import is still in flight must survive "Clear finished" (2026-10-18)
+PENDING_IMPORT_STATUSES = ("add", "ready", "waiting", "importing")
+_CLEARABLE = ("status IN ('done','failed','cancelled') AND "
+              "(import_status IS NULL OR import_status NOT IN ("
+              + ",".join(f"'{s}'" for s in PENDING_IMPORT_STATUSES) + "))")
+
+
 def clear_finished_downloads() -> int:
-    """Removes finished/failed/cancelled rows from the list (never touches files)."""
+    """Removes finished/failed/cancelled rows from the list (never touches files).
+    Rows still waiting on a Radarr/Sonarr import are kept."""
     with _WRITE_LOCK:
         conn = _connect()
         try:
-            n = conn.execute("DELETE FROM download_jobs WHERE status IN ('done','failed','cancelled')").rowcount
+            n = conn.execute(f"DELETE FROM download_jobs WHERE {_CLEARABLE}").rowcount
             _commit_with_retry(conn)
             return n
         finally:

@@ -121,3 +121,17 @@ def test_retry_import(db, tmp_path):
     with pytest.raises(HTTPException) as exc:
         asyncio.run(vod_routes.retry_import(jid))              # waiting already: nothing to retry
     assert exc.value.status_code == 404
+
+
+@pytest.mark.parametrize("status", ["add", "ready", "waiting", "importing"])
+def test_clear_keeps_pending_imports(db, tmp_path, status):
+    jid = _handoff_job(db, tmp_path, status)
+    assert asyncio.run(vod_routes.clear_downloads()) == {"cleared": 0, "kept": 1}
+    assert vod_db.get_download_job(jid) is not None
+
+
+@pytest.mark.parametrize("status", ["imported", "failed", "timed_out", "needs_manual", None])
+def test_clear_removes_settled_imports(db, tmp_path, status):
+    jid = _handoff_job(db, tmp_path, status)
+    assert asyncio.run(vod_routes.clear_downloads()) == {"cleared": 1, "kept": 0}
+    assert vod_db.get_download_job(jid) is None

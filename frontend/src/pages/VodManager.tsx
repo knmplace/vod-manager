@@ -2610,7 +2610,10 @@ function DownloadsCard() {
   })
   const cancelJobs = useMutation({ mutationFn: (ids: number[] | null) => api.post('/vod/downloads/cancel/', { job_ids: ids }), onSuccess: refresh })
   const retryJob = useMutation({ mutationFn: (id: number) => api.post(`/vod/downloads/${id}/retry/`), onSuccess: refresh })
-  const clearJobs = useMutation({ mutationFn: () => api.post('/vod/downloads/clear/'), onSuccess: refresh })
+  const clearJobs = useMutation({
+    mutationFn: () => api.post('/vod/downloads/clear/').then((r) => r.data as { cleared: number; kept: number }),
+    onSuccess: (r) => { refresh(); if (r.kept) toast.info(`${r.kept} kept: library import still pending`) },
+  })
   const retryImport = useMutation({ mutationFn: (id: number) => api.post(`/vod/downloads/${id}/retry-import/`), onSuccess: refresh, onError: (e: any) => toast.error(errText(e)) })
   // hands the finished file to the browser you are using (a phone, say) through a short-lived link
   const saveToDevice = useMutation({

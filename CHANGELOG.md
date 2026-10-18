@@ -57,6 +57,13 @@ instead of opening a duplicate request.
   - A bell in the top bar shows open notices with a count, checks every
     60 s, pops a toast once for each new one, and keeps each notice until
     you press **Acknowledge**.
+  - **Clear finished** no longer drops pending imports (found in the first
+    live test). **Before:** it deleted every done/failed/cancelled row,
+    including downloads still waiting for the encoder or being imported, so
+    the watcher lost them and the file never reached Radarr/Sonarr.
+    **After:** those rows stay in the queue until the import settles
+    (in library, failed, timed out or manual), and a toast says
+    "N kept: library import still pending".
 
 ## 2026-10-18 (Radarr/Sonarr library handoff — backend)
 
