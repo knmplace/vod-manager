@@ -31,6 +31,25 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-18 (Synced with upstream v0.3.03)
+
+- 🔼 **Upstream v0.3.01 – v0.3.03 merged; the fork now reports version 0.3.03.**
+  New from upstream: a **No TMDB ID** filter and select-all-filtered; Select
+  all/none in category access; **automatic TMDB episode titles** (hourly,
+  opt-in per series); one-click **genre categories**; **remove titles from a
+  category**, and the removal sticks; bulk AI explains why items were skipped;
+  List Sync in the category schedule dropdown; and opt-in **Downloads** into
+  a movies/TV library folder (off by default), with optional re-encoding,
+  GPU encoders, a CPU thread cap, and a processing folder so unfinished files
+  never land in the library. The image now includes `vainfo` and the Intel
+  media driver. Our open upstream PRs (#53–#56) are not part of these releases
+  and stay in the fork as before.
+- ✅ **Automatic episode titles use the local TMDB library first.** Each pass
+  fills placeholder episode names from the local TMDB library, and asks TMDB
+  only for names still missing after that. A series the library already covers
+  costs no TMDB request, not even the daily refresh of the newest season.
+  "Run now" shows how many series were filled locally.
+
 ## 2026-10-15 (Archived movies get their TMDB year)
 
 - ✅ 🔀 [#56](https://github.com/jstevenscl/vod-manager/pull/56) **Archived movies now show their year too.** The startup fix that gives
