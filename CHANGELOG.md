@@ -33,7 +33,7 @@ instead of opening a duplicate request.
 
 ## 2026-10-18 (In Library badge)
 
-- ✅ **In Library badge for titles your own media server already has.**
+- ✅ 🔀 [#60](https://github.com/jstevenscl/vod-manager/pull/60) **In Library badge for titles your own media server already has.**
   - **Before:** nothing showed whether a movie, show or episode was already
     in your own Plex, Jellyfin or Emby library, so it was easy to download
     something you already had.
@@ -65,7 +65,7 @@ instead of opening a duplicate request.
 
 ## 2026-10-18 (Library handoff — folder help)
 
-- ✅ **Clearer handoff folder settings.**
+- ✅ 🔀 [#59](https://github.com/jstevenscl/vod-manager/pull/59) **Clearer handoff folder settings.**
   - **Before:** the second folder row read "Same folders in Radarr/Sonarr",
     which looked like it wanted the Radarr/Sonarr library folders. Entering
     those made Radarr/Sonarr import from an empty folder, and the only
