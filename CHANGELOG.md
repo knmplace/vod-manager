@@ -31,6 +31,31 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-18 (In Library badge)
+
+- ✅ **In Library badge for titles your own media server already has.**
+  - **Before:** nothing showed whether a movie, show or episode was already
+    in your own Plex, Jellyfin or Emby library, so it was easy to download
+    something you already had.
+  - **After:** Settings → **In Library (your Plex / Jellyfin / Emby)**, next
+    to Library handoff, takes one or more servers (type, URL, token / API
+    key; **Copy from provider** copies an existing Plex/Jellyfin/Emby
+    provider). **Test** checks the connection and lists the server's movie
+    and TV libraries; only the ticked ones count. The ticked libraries are
+    read every 6 hours by default (changeable), on **Scan now**, and right
+    after Radarr/Sonarr import a download. Titles are matched by TMDB id,
+    then IMDb id, then title + year (±1).
+  - Movie and show cards get a lime **In Library** badge (hover shows
+    which server and library, e.g. "Plex: Movies"), episodes in a show's
+    list get a small "✓ in library" mark, and the Movies and TV Shows tabs
+    have a **Hide / Only In Library** filter. Queuing something already
+    there asks first ("Already in your library (Plex: Movies)" → **Download
+    anyway** / Cancel); a season or a multi-select lists which titles or
+    episodes are already there.
+  - Cards and episode lists only read a local list; the media server is
+    contacted only by Test, the scan and Scan now. "Place all filtered" and
+    "Remove all filtered" are disabled while the In Library filter is on.
+
 ## 2026-10-18 (Library handoff — folder help)
 
 - ✅ **Clearer handoff folder settings.**

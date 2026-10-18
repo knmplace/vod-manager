@@ -484,6 +484,77 @@ def save_handoff_settings(settings: dict) -> None:
     _update_raw(_mutate)
 
 
+# KNM: 2026-10-18 In Library badge -- the user's own media servers (see library_presence.py).
+# Entered separately from providers; "Copy from provider" copies values in, it doesn't link.
+LIBRARY_SERVER_TYPES = ("plex", "jellyfin", "emby")
+_LIBRARY_SCAN_HOURS_DEFAULT = 6
+
+
+def get_library_presence_settings() -> dict:
+    saved = _read_raw().get("library_presence") or {}
+    servers = []
+    for s in saved.get("servers") or []:
+        servers.append({
+            "id": s["id"], "type": s["type"], "name": s.get("name") or s["type"].title(), "url": s.get("url") or "",
+            "has_key": bool(s.get("api_key")),
+            "libraries": [{"key": str(lib["key"]), "title": lib.get("title") or "", "kind": lib.get("kind") or ""}
+                          for lib in s.get("libraries") or []],
+        })
+    try:
+        hours = max(1, int(saved.get("scan_hours") or _LIBRARY_SCAN_HOURS_DEFAULT))
+    except (TypeError, ValueError):
+        hours = _LIBRARY_SCAN_HOURS_DEFAULT
+    return {"servers": servers, "scan_hours": hours}
+
+
+def get_library_server_key(server_id: str) -> str | None:
+    import secrets_util
+    for s in (_read_raw().get("library_presence") or {}).get("servers") or []:
+        if s["id"] == server_id and s.get("api_key"):
+            return secrets_util.decrypt_value(s["api_key"])
+    return None
+
+
+def save_library_presence_settings(settings: dict) -> None:
+    """Replaces the server list. A server without an id is new; a blank key keeps
+    the saved one for that id (keys are never sent to the browser); '-' clears it."""
+    import secrets_util
+    import uuid
+    servers = []
+    for s in settings.get("servers") or []:
+        stype = (s.get("type") or "").strip().lower()
+        if stype not in LIBRARY_SERVER_TYPES:
+            raise ValueError("Server type must be one of: " + ", ".join(LIBRARY_SERVER_TYPES))
+        key = (s.get("api_key") or "").strip()
+        servers.append({
+            "id": s.get("id") or uuid.uuid4().hex[:8], "type": stype,
+            "name": (s.get("name") or "").strip() or stype.title(),
+            "url": (s.get("url") or "").strip().rstrip("/"),
+            "libraries": [{"key": str(lib["key"]), "title": lib.get("title") or "", "kind": lib.get("kind") or ""}
+                          for lib in s.get("libraries") or []],
+            # Encrypt before taking the config lock: encrypt_value may itself write the key file via _update_raw.
+            "_key": None if key == "-" else secrets_util.encrypt_value(key) if key else "",
+        })
+    try:
+        raw = settings.get("scan_hours")
+        hours = max(1, int(_LIBRARY_SCAN_HOURS_DEFAULT if raw in (None, "") else raw))
+    except (TypeError, ValueError):
+        hours = _LIBRARY_SCAN_HOURS_DEFAULT
+
+    def _mutate(data: dict) -> None:
+        old = {s["id"]: s for s in (data.get("library_presence") or {}).get("servers") or []}
+        out = []
+        for s in servers:
+            enc = s.pop("_key")
+            if enc:
+                s["api_key"] = enc
+            elif enc == "" and old.get(s["id"], {}).get("api_key"):
+                s["api_key"] = old[s["id"]]["api_key"]
+            out.append(s)
+        data["library_presence"] = {**(data.get("library_presence") or {}), "servers": out, "scan_hours": hours}
+    _update_raw(_mutate)
+
+
 _AUTO_EPISODE_TITLE_MODES = ("off", "applied", "all")
 
 
