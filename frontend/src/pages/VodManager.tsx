@@ -2796,14 +2796,16 @@ function DownloadsCard() {
                       {(j.error || j.note) && <div className={j.error ? 'text-destructive text-[11px]' : 'text-muted-foreground text-[11px]'}>{j.error ?? j.note}</div>}
                     </td>
                     <td className="py-1 pr-2 whitespace-nowrap text-muted-foreground">{j.preset === 'original' ? 'original' : j.preset.replace('_', ' ')}</td>
-                    <td className="py-1 pr-2 w-36">
+                    <td className={`py-1 pr-2 ${j.import_status ? 'min-w-36' : 'w-36'}`}>
                       {j.status === 'running' && (
                         <div className="h-1.5 rounded bg-border overflow-hidden"><div className="h-full bg-primary" style={{ width: `${Math.round(j.progress * 100)}%` }} /></div>
                       )}
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                       <span className={statusColor[j.status]}>
                         {j.status === 'running' ? `${Math.round(j.progress * 100)}% · ${dlBytes(j.bytes_done)}${j.provider_name ? ` · ${j.provider_name}` : ''}` : j.status === 'done' ? `done · ${dlBytes(j.final_size)}` : j.status}
                       </span>
                       <ImportChip job={j} />
+                      </div>
                     </td>
                     <td className="py-1 whitespace-nowrap text-right">
                       {(j.status === 'queued' || j.status === 'running') && <button className="text-muted-foreground hover:text-destructive" title="Cancel" onClick={() => cancelJobs.mutate([j.id])}><X size={12} /></button>}
@@ -2841,7 +2843,7 @@ function ImportChip({ job }: { job: DownloadJob }) {
   const app = job.kind === 'movie' ? 'Radarr' : 'Sonarr'
   const chip: Record<string, [string, string]> = {
     needs_manual: [`Add to ${app} manually`, 'border-amber-500/40 bg-amber-500/10 text-amber-500'],
-    waiting: ['Waiting for encoder', 'border-border text-muted-foreground'],
+    waiting: ['Waiting for encoder', 'border-sky-500/50 bg-sky-500/15 text-sky-600 dark:text-sky-300'],
     importing: [`Importing into ${app}`, 'border-primary/40 bg-primary/10 text-primary'],
     imported: ['In library', 'border-lime-500/40 bg-lime-500/15 text-lime-500'],
     failed: ['Import failed', 'border-destructive/40 bg-destructive/10 text-destructive'],
@@ -2849,7 +2851,7 @@ function ImportChip({ job }: { job: DownloadJob }) {
   }
   const hit = job.import_status ? chip[job.import_status] : undefined
   if (!hit) return null
-  return <span className={`mt-0.5 inline-block rounded border px-1 text-[10px] ${hit[1]}`} title={job.import_note ?? undefined}>{hit[0]}</span>
+  return <span className={`inline-block whitespace-nowrap rounded border px-1.5 py-px text-[11px] font-medium ${hit[1]}`} title={job.import_note ?? undefined}>{hit[0]}</span>
 }
 
 function HandoffCard() {

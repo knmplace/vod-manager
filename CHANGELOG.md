@@ -49,6 +49,11 @@ instead of opening a duplicate request.
     into Radarr/Sonarr*, *In library* (lime), and *Import failed* / *Import
     timed out*. Hovering a chip shows the reason. Failed and timed-out
     imports get a **Retry import** button.
+  - Import chip made easier to read (after the first live test).
+    **Before:** a small grey 10 px chip on its own line under
+    `done · 1.4 GB`, easy to miss. **After:** the chip sits on the same
+    line as the download status, 11 px and medium weight, and *Waiting for
+    encoder* is sky blue instead of grey.
   - A bell in the top bar shows open notices with a count, checks every
     60 s, pops a toast once for each new one, and keeps each notice until
     you press **Acknowledge**.
