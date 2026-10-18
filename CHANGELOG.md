@@ -49,7 +49,9 @@ instead of opening a duplicate request.
     ticked ones count. The ticked libraries are
     read every 6 hours by default (changeable), on **Scan now**, and right
     after Radarr/Sonarr import a download. Titles are matched by TMDB id,
-    then IMDb id, then title + year (±1).
+    then IMDb id, then title + year (±1). A just-imported title stays
+    marked until a server scan lists it (or for 24 h), so the badge doesn't
+    flicker off before Plex/Jellyfin/Emby has indexed the file.
   - Movie and show cards get a lime **In Library** badge (hover shows
     which server and library, e.g. "Plex: Movies"), episodes in a show's
     list get a small "✓ in library" mark, and the Movies and TV Shows tabs

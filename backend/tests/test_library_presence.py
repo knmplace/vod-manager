@@ -3,6 +3,9 @@ Jellyfin / Emby responses), library_presence replace semantics, matching, and th
 local-only lookups used by cards, episode lists and the queue dialog."""
 
 import asyncio
+import logging
+import threading
+import time
 
 import pytest
 from fastapi import HTTPException
@@ -361,16 +364,98 @@ def test_scan_all_replaces_and_keeps_failed_server_rows(db, monkeypatch):
     assert vod_db.presence_labels("movie", [mid]) == {mid: "Plex: Movies"}
 
 
-def test_successful_full_scan_clears_import_marks(db, monkeypatch):
-    _save([_plex_server()])
-    vod_db.add_library_presence_rows("import", "Radarr", [_row(tmdb="5", library="imported")])
+def _import_mark(tmdb="5", title="Imported", year=2020, age_secs=0):
+    vod_db.add_library_presence_rows(library_presence.IMPORT_SERVER, "Radarr",
+                                     [_row(tmdb=tmdb, title=title, year=year, library="just imported")])
+    if age_secs:
+        conn = vod_db._connect()
+        conn.execute("UPDATE library_presence SET seen_at=? WHERE server='import'", (str(time.time() - age_secs),))
+        conn.commit()
+        conn.close()
 
+
+def _scan_returning(monkeypatch, rows, during=None):
     async def fake_fetch(server, key):
-        return []
+        if during:
+            during()
+        return rows
 
     monkeypatch.setattr(library_presence, "fetch_server", fake_fetch)
-    asyncio.run(library_presence.scan_all())
-    assert vod_db.list_library_presence() == []
+    return asyncio.run(library_presence.scan_all())
+
+
+def _import_rows():
+    return [r for r in vod_db.list_library_presence() if r["server"] == library_presence.IMPORT_SERVER]
+
+
+def test_import_mark_survives_a_scan_that_lacks_the_title(db, monkeypatch):
+    _save([_plex_server()])
+    mid = _movie("Imported", 2020, tmdb="5")
+    _import_mark(age_secs=60)                    # the server hasn't indexed the file yet
+    _scan_returning(monkeypatch, [_row(tmdb="949")])
+    assert len(_import_rows()) == 1
+    assert vod_db.presence_labels("movie", [mid]) == {mid: "Radarr: just imported"}
+
+
+def test_import_mark_dropped_once_a_server_row_matches(db, monkeypatch):
+    _save([_plex_server()])
+    mid = _movie("Imported", 2020, tmdb="5")
+    _import_mark(age_secs=60)
+    _scan_returning(monkeypatch, [_row(tmdb="5", title="Imported", year=2020)])
+    assert _import_rows() == []
+    assert vod_db.presence_labels("movie", [mid]) == {mid: "Plex: Movies"}
+
+
+def test_import_mark_dropped_after_24_hours(db, monkeypatch):
+    _save([_plex_server()])
+    mid = _movie("Imported", 2020, tmdb="5")
+    _import_mark(age_secs=25 * 3600)
+    _scan_returning(monkeypatch, [])
+    assert _import_rows() == []
+    assert vod_db.presence_labels("movie", [mid]) == {}
+
+
+def test_import_during_a_scan_survives(db, monkeypatch):
+    _save([_plex_server()])
+    mid = _movie("Imported", 2020, tmdb="5")
+    # lands while fetch_server is running; the listing already has it, but it isn't the scan's to clear
+    _scan_returning(monkeypatch, [_row(tmdb="5", title="Imported", year=2020)],
+                    during=lambda: library_presence.mark_imported({"kind": "movie", "item_id": mid}))
+    assert len(_import_rows()) == 1
+
+
+def test_import_mark_not_lost_between_rebuild_read_and_write(db, monkeypatch):
+    mid = _movie("Imported", 2020, tmdb="5")
+    real = vod_db.presence_match_inputs
+    racers = []
+
+    def racing_inputs():                         # an import lands after rebuild_matches read the rows
+        out = real()
+        t = threading.Thread(target=library_presence.mark_imported, args=({"kind": "movie", "item_id": mid},))
+        racers.append(t)
+        t.start()
+        time.sleep(0.2)
+        return out
+
+    monkeypatch.setattr(vod_db, "presence_match_inputs", racing_inputs)
+    library_presence.rebuild_matches()
+    monkeypatch.setattr(vod_db, "presence_match_inputs", real)
+    racers[0].join(5)
+    assert vod_db.presence_labels("movie", [mid]) == {mid: "Radarr: just imported"}
+
+
+def test_scan_error_token_redacted_in_results_and_logs(db, monkeypatch, caplog):
+    _save([_plex_server()])
+
+    async def fake_fetch(server, key):
+        raise RuntimeError("401 for url http://plex:32400/library/sections/1/all?X-Plex-Token=SECRETTOKEN")
+
+    monkeypatch.setattr(library_presence, "fetch_server", fake_fetch)
+    with caplog.at_level(logging.WARNING):
+        out = asyncio.run(library_presence.scan_all())
+    assert "SECRETTOKEN" not in out["servers"][0]["error"] and "X-Plex-Token=" in out["servers"][0]["error"]
+    assert "SECRETTOKEN" not in str(library_presence.status()["last_results"])
+    assert "SECRETTOKEN" not in caplog.text and "scan of" in caplog.text
 
 
 # ── matching ─────────────────────────────────────────────────────────────────
@@ -466,6 +551,28 @@ def test_list_routes_carry_flag_and_filter(db, monkeypatch):
     assert asyncio.run(vod_routes.list_series(in_library="hide"))["total"] == 0
     detail = asyncio.run(vod_routes.get_series(sid))
     assert detail["in_library"] and {e["episode_number"]: e["in_library"] for e in detail["episodes"]} == {1: True, 2: False}
+
+
+def test_list_and_detail_routes_make_no_media_server_calls(db, monkeypatch):
+    def boom(*a, **kw):
+        raise AssertionError("cards must not call the media server")
+
+    for mod, name in ((library_presence, "fetch_server"), (library_presence, "test_server"),
+                      (library_presence, "_client"), (plex_client, "PlexClient"), (emby_vod_client, "EmbyVodClient")):
+        monkeypatch.setattr(mod, name, boom)
+    mid = _movie("Heat", 1995, tmdb="949")
+    sid, eps = _series(tmdb="2316")
+    vod_db.replace_library_presence("s1", "Plex", [
+        _row(tmdb="949"), _row(kind="episode", tmdb="2316", title="The Office", season=1, episode=1)])
+    library_presence.rebuild_matches()
+    asyncio.run(vod_routes.list_movies(in_library="only"))
+    asyncio.run(vod_routes.get_movie(mid))
+    asyncio.run(vod_routes.list_series(in_library="hide"))
+    asyncio.run(vod_routes.list_series_ids(in_library="only"))
+    assert asyncio.run(vod_routes.get_series(sid))["episodes"][0]["in_library"] is True
+    out = asyncio.run(vod_routes.downloads_library_check(vod_routes.DownloadQueueRequest(
+        movie_ids=[mid], series_ids=[sid])))
+    assert out["count"] == 2
 
 
 def test_bad_in_library_filter_rejected(db):

@@ -15431,6 +15431,21 @@ def delete_library_presence(servers_to_keep: list[str] | None = None, server: st
             conn.close()
 
 
+# KNM: prune individual import marks once a server lists them or they age out (2026-10-18)
+def delete_library_presence_ids(ids: list[int]) -> None:
+    if not ids:
+        return
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            for i in range(0, len(ids), 500):
+                chunk = ids[i:i + 500]
+                conn.execute("DELETE FROM library_presence WHERE id IN (" + ",".join("?" for _ in chunk) + ")", chunk)
+            _commit_with_retry(conn)
+        finally:
+            conn.close()
+
+
 def list_library_presence() -> list[dict]:
     conn = _connect()
     try:

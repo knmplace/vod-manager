@@ -18,6 +18,7 @@ different title), and without a year on either side it needs a unique title.
 
 import asyncio
 import logging
+import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -180,6 +181,7 @@ def forget_provider(provider_id: int) -> None:
 async def scan_all() -> dict:
     """Scans every configured server. A server that fails keeps its previous rows."""
     async with _scan_lock:
+        scan_start = time.time()
         servers = await asyncio.to_thread(configured_servers, True)
         results = []
         for server in servers:
@@ -197,11 +199,9 @@ async def scan_all() -> dict:
                     logger.warning("[library_presence] scan of %s failed: %s", server["name"], res["error"])
             results.append(res)
         keep = [s["id"] for s in servers]      # also drops rows of a server no longer configured
-        if results and all(r["ok"] for r in results):
-            # the servers now show what the imports added
-            await asyncio.to_thread(vod_db.delete_library_presence, keep)
-        else:
-            await asyncio.to_thread(vod_db.delete_library_presence, keep + [IMPORT_SERVER])
+        # KNM: import marks are pruned one by one, never mass-cleared on a clean scan (2026-10-18)
+        await asyncio.to_thread(vod_db.delete_library_presence, keep + [IMPORT_SERVER])
+        await asyncio.to_thread(_prune_import_marks, scan_start)
         matched = await asyncio.to_thread(rebuild_matches)
         _last_scan.update(at=time.time(), servers=results)
         return {"servers": results, "matched": matched}
@@ -273,10 +273,12 @@ def _join(labels) -> str:
     return ", ".join(dict.fromkeys(labels))
 
 
-def rebuild_matches() -> dict:
-    """Recomputes library_presence_items from library_presence and the catalog."""
-    rows = vod_db.list_library_presence()
-    catalog = vod_db.presence_match_inputs()
+# KNM: serializes rebuild_matches' read->replace with mark_imported's writes so a mark isn't lost (2026-10-18)
+_match_lock = threading.RLock()
+IMPORT_MARK_TTL = 24 * 3600
+
+
+def _indexes(rows: list[dict]):
     movies, shows, ep_groups = _Index(), _Index(), {}
     for r in rows:
         if r["kind"] == "movie":
@@ -290,6 +292,47 @@ def rebuild_matches() -> dict:
     for g in ep_groups.values():
         r = g["row"]
         episodes_index.add(r["tmdb_id"], r["imdb_id"], r["title"], r["year"], g)
+    return movies, shows, episodes_index
+
+
+def _prune_import_marks(scan_start: float) -> None:
+    """Drops import marks a server row now covers, or older than a day. Marks made during the scan stay."""
+    with _match_lock:
+        rows = vod_db.list_library_presence()
+        marks = [r for r in rows if r["server"] == IMPORT_SERVER]
+        if not marks:
+            return
+        movies, shows, episodes = _indexes([r for r in rows if r["server"] != IMPORT_SERVER])
+        now, drop = time.time(), []
+        for m in marks:
+            try:
+                seen = float(m["seen_at"])
+            except (TypeError, ValueError):
+                seen = 0.0
+            if seen >= scan_start:
+                continue
+            key = (m["tmdb_id"], m["imdb_id"], m["title"], m["year"])
+            if m["kind"] == "movie":
+                covered = bool(movies.find(*key))
+            elif m["kind"] == "show":
+                covered = bool(shows.find(*key))
+            else:
+                covered = any((m["season"], m["episode"]) in g["eps"] for g in episodes.find(*key))
+            if covered or now - seen > IMPORT_MARK_TTL:
+                drop.append(m["id"])
+        vod_db.delete_library_presence_ids(drop)
+
+
+def rebuild_matches() -> dict:
+    """Recomputes library_presence_items from library_presence and the catalog."""
+    with _match_lock:
+        return _rebuild_matches()
+
+
+def _rebuild_matches() -> dict:
+    rows = vod_db.list_library_presence()
+    catalog = vod_db.presence_match_inputs()
+    movies, shows, episodes_index = _indexes(rows)
 
     items: list[tuple[str, int, str]] = []
     for m in catalog["movies"]:
@@ -321,7 +364,12 @@ def rebuild_matches() -> dict:
 # ── after a Radarr/Sonarr import ─────────────────────────────────────────────
 
 def mark_imported(job: dict) -> None:
-    """Marks the item present right away; the next full scan of the servers replaces it."""
+    """Marks the item present right away; kept until a server lists it or it is a day old."""
+    with _match_lock:
+        _mark_imported(job)
+
+
+def _mark_imported(job: dict) -> None:
     if job["kind"] == "movie":
         movie = vod_db.get_movie(job["item_id"])
         if not movie:
