@@ -440,7 +440,7 @@ def get_handoff_settings() -> dict:
     try:
         hours = [float(h) for h in out["stall_hours"]]
         fail = float(out["fail_hours"])
-        if not (hours and all(0 < a < b for a, b in zip([0] + hours, hours + [fail]))):
+        if not (hours and all(a < b for a, b in zip([0] + hours, hours + [fail]))):
             raise ValueError
         out["stall_hours"] = [int(h) if h == int(h) else h for h in hours]
         out["fail_hours"] = int(fail) if fail == int(fail) else fail

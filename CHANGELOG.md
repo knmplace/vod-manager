@@ -31,6 +31,40 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-18 (Radarr/Sonarr library handoff — backend)
+
+- ✅ **Finished downloads can be handed to Radarr/Sonarr, so they land in
+  Plex the normal way.** Off until a Radarr and/or Sonarr URL + API key are
+  saved; nothing changes for existing setups. Backend only in this build (the
+  settings card, import chips and notice bell come next), configured through
+  the new API below.
+  - **When a download is queued**, the movie or show is looked up in
+    Radarr/Sonarr by TMDB id and added if missing, with no search: new movies
+    unmonitored, new shows monitored for future episodes (both configurable).
+    Titles with no match are marked for manual adding and picked up again
+    once you add them yourself.
+  - **When the download finishes**, vod-manager watches the finished folder
+    (an encoder's output such as Tdarr's, or the download folder itself) for
+    the file, which may have a new extension. Once the file has stopped
+    growing for 60 s it asks Radarr (movie folder) or Sonarr (episode file)
+    to import it, then confirms the import took. A rejection shows
+    Radarr/Sonarr's own reason, e.g. a custom-format score.
+  - **Stalled files**: if the file never reaches the finished folder, a notice
+    fires at 4, 8 and 16 h (configurable) and the import is marked failed at
+    24 h with the likely cause: still in the download folder (encoder hasn't
+    finished) or nowhere (encoder failed or moved it). Notices stay until
+    acknowledged and are also emailed when SMTP is set up.
+  - API: `GET/POST /vod/handoff/settings/`, `POST /vod/handoff/test/{radarr|sonarr}`
+    (connection check, returns root folders and quality profiles),
+    `POST /vod/downloads/{id}/retry-import/`, `GET /vod/notices/`,
+    `POST /vod/notices/{id}/ack/`. Download jobs gain `import_status` /
+    `import_note`.
+  - Before: a finished download stopped in the download folder (or the
+    encoder's output folder). Radarr/Sonarr never knew about it, so it had
+    to be moved into the library by hand. After: Radarr/Sonarr import it into
+    their library folders, tell Plex, and keep tracking future episodes of a
+    new show.
+
 ## 2026-10-18 (Download folders without the TMDB id)
 
 - ✅ 🔀 [#58](https://github.com/jstevenscl/vod-manager/pull/58) **Downloads can leave the TMDB id out of folder names.** A new
