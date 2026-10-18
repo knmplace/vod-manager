@@ -33,7 +33,7 @@ instead of opening a duplicate request.
 
 ## 2026-10-18 (Radarr/Sonarr library handoff — screens)
 
-- ✅ **Library handoff settings, import status and a notice bell.**
+- ✅ 🔀 [#59](https://github.com/jstevenscl/vod-manager/pull/59) **Library handoff settings, import status and a notice bell.**
   - **Before:** the handoff could only be set up through the API, the
     download queue showed only download status (`done · 1.2 GB`), and stall
     or failure notices were stored but never shown.
@@ -67,7 +67,7 @@ instead of opening a duplicate request.
 
 ## 2026-10-18 (Radarr/Sonarr library handoff — backend)
 
-- ✅ **Finished downloads can be handed to Radarr/Sonarr, so they land in
+- ✅ 🔀 [#59](https://github.com/jstevenscl/vod-manager/pull/59) **Finished downloads can be handed to Radarr/Sonarr, so they land in
   Plex the normal way.** Off until a Radarr and/or Sonarr URL + API key are
   saved; nothing changes for existing setups. Backend only in this build (the
   settings card, import chips and notice bell come next), configured through
