@@ -694,10 +694,14 @@ that instance's M3U account can see. To give one instance (or one end-user
 IPTV app pointed straight at VOD & DVR Manager, bypassing Dispatcharr entirely) a
 *restricted* catalog — a kids-only view, for example — set that instance's
 *Category access* under *Connected Instances* to a specific set of
-categories instead of leaving it at "— all —". This is enforced everywhere
+categories instead of leaving it at "— all —". (The picker has **Select all**
+and **Select none**, so to hide just a few categories, click Select all and
+untick those.) This is enforced everywhere
 that credential is used (catalog listing, detail lookups, and the actual
 stream), not just hidden from a browse UI — a restricted client can't reach
 disallowed content even with a raw copied stream URL.
+
+![The category access picker with Select all and Select none](docs/screenshots/category-access-select-all.png)
 
 ### Discovering providers automatically
 
@@ -805,6 +809,149 @@ Only one export runs at a time. Tested against Jellyfin 12.1.0; Emby uses the
 same folder naming convention.
 
 ---
+
+### Downloading files into a library folder
+
+The .strm export links to your providers' streams. If you would rather keep real
+files, **Configuration → Downloads** saves movies and episodes to a folder, named
+the way Emby, Jellyfin and Plex expect (`Movies/Title (Year) [tmdbid-N]/Title (Year).mp4`,
+`Shows/Show (Year)/Season 01/Show - S01E01.mp4`).
+
+**It is off by default.** Saving a provider's files is a different act from linking
+to them, so nothing downloads until you turn it on, pick a folder inside the
+container (mount it from the host, for example `- /mnt/media/vod-downloads:/downloads`,
+then use `/downloads`) and confirm that you have the right to keep copies. Keep it a
+different folder from the .strm export so titles do not show up twice.
+
+**Separate folders for movies and TV shows.** By default files go in `Movies/` and
+`Shows/` inside the download folder. If your media server mounts them separately,
+set a **Movies folder** and a **TV shows folder** under *Separate folders (optional)*
+(for example `/downloads/movies` and `/downloads/tv`, each a mount of its own). Movies then
+go straight into the movies folder (`Title (Year)/Title (Year).mp4`) and episodes
+into the TV folder (`Show (Year)/Season 01/…`), and when you set both the shared download
+folder is optional. The two folders must differ from each other and from the .strm
+export, and the app checks each one is writable when you save. Free space is tracked
+per folder.
+
+![The Downloads card: settings, pacing defaults and the queue](docs/screenshots/downloads-card.png)
+
+Once on, a **Download** button appears:
+
+- on a movie (next to *Sources*) and on a series (next to *Episodes*, with a season
+  picker, and a provider preference for series that more than one provider carries),
+- as a small icon on each episode, and on each individual *source*, which downloads
+  exactly that provider's copy (pick the version you want when a title has several),
+- in the selection bar on the Movies and TV Shows pages (**Download selected**).
+
+![A movie's Download control, a per-source download icon and Download selected](docs/screenshots/download-buttons.png)
+
+Downloads wait in a queue, show live progress under **Configuration → Downloads**, and
+can be cancelled or retried. A title already in the folder is never downloaded twice,
+and a download that was interrupted (restart, dropped connection) resumes where it left
+off.
+
+**Re-encoding.** Provider files are often much larger than you want in a library. Pick
+a preset instead of *Original file* to shrink a file while saving it: H.264 or H.265,
+capped at 1080p or 720p. The provider connection is only used while the original is fetched; the encode
+then runs from the local copy, so it never ties up your provider (it does use CPU,
+which is why *At once* defaults to 1).
+
+**Re-encoding on a GPU (optional).** A software re-encode is CPU-heavy: on a modest server a
+long film can take hours. Under *Configuration → Downloads → Re-encoding* you can pick a hardware
+**Encoder** instead of *Software (CPU)*: *VAAPI* (Intel or AMD on Linux), *Intel Quick Sync (QSV)* or
+*NVIDIA NVENC*. *Automatic* uses a GPU when the container has one. A container only sees a GPU if you
+share it, so add to the `vod-manager` service in your `docker-compose.override.yml`:
+
+```yaml
+# Intel / AMD (VAAPI, QSV)
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "video"
+      - "render"          # or the numeric group id from: getent group render
+
+# NVIDIA (needs the NVIDIA Container Toolkit on the host)
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+```
+
+Recreate the container, choose the encoder and press **Test encoder**: it runs a one-second encode on the
+GPU and tells you at once if the device or driver is missing. If a GPU encode fails during a real
+download, that download falls back to the CPU instead of failing (the *Status* note says so). The
+image includes the Intel media driver; AMD GPUs and some older Intel generations may not work out of the
+box. Hardware encodes are quicker but a little larger than software at the same quality setting.
+Without a GPU, **CPU threads** (software encoder) limits (roughly) how many cores one re-encode uses so the
+rest of the server stays responsive. Re-encoding runs at low priority either way.
+
+**Leaving the encoding to Tdarr (or similar).** If you already run a transcoder, keep the preset on
+*Original file* (and the language list blank): files are saved untouched into the library layout above, and
+the processing folder keeps unfinished files out of sight until they are complete and checked. Point the
+transcoder at the library folders, or at a copy of the finished files.
+
+**Your provider's connection limit is respected, and viewers always win.** A download
+takes a connection exactly like playback does, and never takes one a viewer is using: it
+waits (*"in use by playback"*). If somebody starts watching while a download is running
+and the provider has no other free connection, the download pauses by itself, keeps what
+it has already saved, and resumes automatically once the connection is free again. A
+provider with no limit set is treated as having one connection, so set the provider's
+**max streams** if it allows more.
+
+**Getting a file onto your phone or tablet.** A finished download has a *Save* icon in
+the queue: tap it from the browser on that device and the file downloads there (the link
+is private to that one file and expires after 15 minutes). The **H.264 480p (phone-sized)**
+preset makes a small file for exactly this. You can also point a media server's
+library at the folder instead.
+
+**Choosing languages.** Many provider files carry several audio tracks (and sometimes
+subtitles) in one file. Under *Configuration → Downloads → Languages*:
+
+- **Keep audio** takes a list such as `eng` or `eng, jpn` (codes or names). Blank keeps every
+  track as it is. Only the listed audio languages stay in the saved file. A track with no language
+  tag is always kept, because it can't be ruled out, and if nothing at all matches every audio track is
+  kept, so a file is never left silent.
+- **Keep subtitles** keeps the subtitle tracks too, in the same languages when you set a list; off
+  drops them whenever a file is re-encoded or trimmed.
+- **It also works without re-encoding.** With a language list set, an *Original file* download has its
+  other audio tracks removed by copying the streams (no quality loss, quick) and is saved as `.mkv`.
+  With the list blank, an original is saved exactly as the provider sent it, and a file that already has
+  only the languages you asked for is saved untouched.
+- **Per download.** The Download control on a movie or series has an *audio* box next to the preset
+  for "this one in Spanish" (`all` keeps every track for that download; blank follows the setting).
+- If a subtitle track can't be carried over, the download is retried once without subtitles instead
+  of failing. Where a title exists as separate copies per language, you can also pick the copy you
+  want with the per-source download icon.
+
+**Being polite to providers.** Providers differ, so pacing is a default that each
+provider can override (**Providers → Downloads**; blank means "use the default"):
+
+| Setting | What it does |
+|---|---|
+| Speed cap (Mbit/s) | Limits how fast one download pulls. Off by default; some providers flag accounts that pull at full speed, others do not mind. |
+| At once per provider | How many downloads may run on one provider together (needs a matching max streams). |
+| Pause between (seconds) | A rest between two downloads from the same provider. |
+| Only between (hours) | Optionally only *start* downloads in a quiet window, such as 1-7. |
+
+If a provider answers "slow down" (HTTP 429, 458, 509 or 403) the download waits and
+retries with a growing delay on its own, and gives up after several refusals so it
+does not keep knocking. Each finished file is also checked with ffprobe, so a provider
+error page saved as a video is rejected rather than left in your library.
+
+**Nothing unfinished ever reaches your library.** Every download and encode happens in
+a **processing folder**, and a file is moved into the movies / TV shows folder only when it
+is complete and has passed the ffprobe check (an encoded file is checked too). So a media
+server, Sonarr or Tdarr watching the library can never pick up a partial or corrupt file.
+Set the **Processing folder** under *Configuration → Downloads* (ideally a fast local
+disk; if it is on the same disk as the library the final move is an instant rename, across
+disks the file is copied under a hidden temporary name first). Left blank, a hidden
+`.processing` folder inside each library folder is used. A re-encode needs room in the
+processing folder for the original plus the new file at the same time. A failed download's
+partial stays there so *Try again* can resume it; **Clear finished** removes the leftovers.
+
+**Free space.** *Keep free (GB)* stops a download, and prevents new ones, before the
+folder fills up. Nothing in the download folder is ever deleted except the app's own
+half-finished files.
 
 ## 7. DVR recordings
 
@@ -1199,12 +1346,28 @@ each with a **list** or **grid** (poster wall) mode.
   Filter** — open the curation tool modals covered in §11, scoped to
   whichever tab (movies vs. series) you opened them from.
 - **Bulk actions** — check items individually, shift-click to select a range,
-  or **Select all visible** to grab everything on the current page. **Place
+  **Select all visible** to grab everything on the current page, or (TV Shows)
+  **Select all filtered** to grab every series matching the current search,
+  provider, category and No TMDB ID filters across all pages. **Place
   selected**/**Place all filtered** place into a category ("all filtered"
   covers everything matching the current search/filter, not just the current
   page, without paging through results manually); **Archive selected**
   (**Un-archive selected** when viewing the Archived toggle) applies the same
   archive action described below to the whole selection at once.
+- **Removing titles from a category** (without archiving them) — choose the
+  category in the *All categories* dropdown and every row gets a **Remove from
+  category** button (the folder icon), and the selection bar gets **Remove
+  selected from category** and **Remove all filtered from category** (the latter
+  covers everything matching the search/provider/No TMDB ID filters, across all
+  pages). A single title can also be removed with the **X** next to the category
+  in its expanded detail. The title stays in the pool; only that one placement is
+  removed. This is different from **Archive**, which also hides the title and
+  strips it from every category. Removal **sticks**: a Smart category's rule, a
+  list-synced category or an AI evaluation will not put the title back, and the
+  bar shows "N removed title(s) are kept out of this category" with **Allow them
+  again** to undo it. Placing a title in the category by hand also lifts it.
+  Episodes are not placed in categories on their own — a show is placed as a
+  whole, so remove the show.
 - **Rename / fix year** — every item's detail view (click a row, or a tile
   in grid mode) has this. Providers occasionally send a blank, garbled, or
   otherwise wrong title/year with no other way to correct it — this fixes
@@ -1345,10 +1508,33 @@ Episode names you set this way — or by hand with the inline edit — are
 **locked**: a later provider re-sync no longer reverts them. (Apply TMDB Titles
 in the toolbar renames series and movies only, not episodes.)
 
-**For several series at once**, tick them on the TV Shows page and click
+**Automatic TMDB episode titles.** When a provider adds episodes later, they
+usually arrive as "Episode 5" or with the season/episode code in the name.
+**Curation & Maintenance → Automatic TMDB Episode Titles** fills those in for
+you, once an hour (up to 100 series per pass). Choose which series it covers:
+the ones you have already applied TMDB episode titles to (the default), every
+series with a confirmed TMDB ID, or off. It only replaces blank or placeholder
+names, so a real name your provider sent and any name you set or locked is never
+changed, and a series is only sent to TMDB when it actually has a placeholder
+name to fix. **Run now** does one pass immediately.
+
+![Automatic TMDB Episode Titles settings](docs/screenshots/auto-episode-titles.png)
+
+**Finding items with no TMDB ID.** The **No TMDB ID** button next to *Archived*
+on the Movies and TV Shows pages lists only the titles that still have no TMDB
+match. This is wider than **Metadata Review**, which only lists titles with no
+year or an ambiguous auto-match; a title with a year that simply never matched
+shows up only here. Open one to use *Search TMDB*, or run **Match titles without
+a TMDB ID** on the TMDB Library page to have them matched by name and year.
+
+![The No TMDB ID filter with Select all filtered and Remove from category](docs/screenshots/no-tmdb-filter-and-remove.png)
+
+**For several series at once**, tick them on the TV Shows page (or click
+**Select all filtered** to take the whole library, or the whole filtered set, in
+one go) and click
 **TMDB episode titles (N)** in the selection bar. It previews the total ("Would
 rename 412 episode(s) across 7 of 9 series"), lists how many series have no
-confirmed TMDB match (skipped) or failed, and only writes when you click
+confirmed TMDB match (skipped, with a few names so you can find them) or failed, and only writes when you click
 **Apply**. The same **Replace existing names too** option applies.
 
 ![Selecting a series and previewing TMDB episode titles](docs/screenshots/bulk-episode-titles.png)
@@ -1868,6 +2054,18 @@ replaced daily and is also used as a matching index.
   series category — kept separate since Dispatcharr's movie and TV catalogs
   are different endpoints. This is the quick path for "I don't have a
   category for this list yet."
+- **Genre Categories** (Curation & Maintenance) — one click to replace provider
+  categories like "EN - ACTION & WAR" with plain genres. **Load genres** lists
+  the genres in your library (TMDB supplies them, so run enrichment first;
+  providers also write odd spellings, so rare ones are hidden below the "at
+  least N titles" threshold). Tick the ones you want and **Create** makes a smart
+  category for each, named after the genre with the rule *genre contains …* (a
+  title in several genres appears in each). Existing category names are skipped,
+  and the new categories fill in over the next minute. To show only them in
+  Dispatcharr, open the VOD Manager M3U source there and turn off the other
+  groups (and "auto sync new categories") before refreshing.
+
+  ![Genre Categories picker](docs/screenshots/genre-categories.png)
 - **MDBList Lists** (Curation & Maintenance) — the same quick path for an
   [MDBList](https://mdblist.com) list: enter its list ID and a name template
   and it creates a paired movie and series category linked to it (needs your
@@ -1960,7 +2158,16 @@ Manage Categories (global / hourly / every 6h / daily / weekly) that overrides
 the global interval for just that category, so a chart can refresh daily while
 the others stay manual.
 
+> **Want every list to update on a schedule?** Set it once, for all of them:
+> **Configuration → Refresh Schedule → List Sync (hrs)**, for example `24` for
+> daily. Every list-linked category left on **global** in its dropdown then follows
+> that interval; a category with its own hourly / 6h / daily / weekly choice keeps
+> its own. The dropdown itself shows the current global value (for example
+> *global (every 24h)* or *global (off)*), and Manage Categories states it above the list.
+
 ![Manage Categories: a list-sourced category with its own schedule dropdown](docs/screenshots/list-category-schedule.png)
+
+![Configuration → Refresh Schedule with the List Sync (hrs) setting](docs/screenshots/refresh-schedule-list-sync.png)
 
 ---
 
@@ -2002,6 +2209,12 @@ again. Playback returning 401 means the XC user's IP allowlist doesn't include
 the media server, or the base URL points at the wrong address (§6, Emby and
 Jellyfin: the .strm export).
 
+If the export says it wrote files but the folder you mounted is empty, check the
+mount's **container path**: the *Output folder* in the export card is a path
+inside the VOD & DVR Manager container, so it must be the path on the right-hand
+side of your volume mapping (`strm_library:/strm` means Output folder `/strm`, not
+`/app/strm`).
+
 **Locked out of your own login.** Set `VODMANAGER_ADMIN_USER` and
 `VODMANAGER_ADMIN_PASSWORD` as environment variables on the container and
 restart — this overrides the stored login while set, letting you sign in
@@ -2018,6 +2231,31 @@ you gave it during "Connect a new instance" is reachable *from that
 instance's own network position*, not just from your browser — a
 Docker-internal hostname won't resolve from a remote instance, and vice
 versa.
+
+**My list-linked categories never update by themselves.** By default they only
+update when you click **Sync now**. Set **Configuration → Refresh Schedule → List
+Sync (hrs)** (blank = off) to refresh every list-linked category on one schedule, or
+pick hourly / 6h / daily / weekly on an individual category in Manage Categories (§11,
+List Sync).
+
+**A download says "Waiting: … in use by playback" or "at its connection limit".**
+Downloads never take a connection a viewer is using, and a provider with no *max
+streams* set counts as one connection. It starts by itself when the connection frees
+up; set the provider's **max streams** if it really allows more (§6, Downloading
+files). **"… said HTTP 429 (slow down)"** means the provider objected to the pace:
+lower its speed cap or downloads-at-once under **Providers → Downloads**; the download
+retries on its own with a growing delay.
+
+**A download fails with "The provider returned a web page instead of a video file."**
+The provider answered with a page instead of the video. The message now shows the HTTP status and the first
+words of that page, which usually say why: an expired or blocked account, a login page, or an unsupported
+link. (If the page says the connection limit is reached, the download simply waits and tries again.) Check
+the title plays from **Preview** on the VOD page; if it does not, the source is dead or the account has
+expired. With several sources, failover moves on to the next one by itself.
+
+**The progress bar sits at 50% while it is re-encoding.** The first half is the download and the second
+half the re-encode. The bar moves with the encode when the file reports its length; if it does not, the bar
+follows how much of the file ffmpeg has read, and the status line shows how much has been written so far.
 
 **Movies/series show up as duplicates.** Run Duplicate Finder (§11) — most
 duplication is either a punctuation difference between providers (that

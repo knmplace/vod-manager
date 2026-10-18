@@ -2,7 +2,7 @@ import { Fragment, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import Hls from 'hls.js'
-import { Activity, AlertCircle, Archive, ArchiveRestore, ArrowRightLeft, CalendarClock, CalendarDays, CheckCircle2, ChevronDown, ChevronRight, ChevronUp, Copy, Download, Eye, EyeOff, Film, Flag, HardDriveDownload, ImageOff, LayoutGrid, List, Loader2, Mail, Play, Plus, Power, PowerOff, RefreshCw, RotateCcw, Search, Settings, ShieldCheck, Sparkles, Stethoscope, Trash2, Tv, Type, Upload, Users, Wrench, X, Zap } from 'lucide-react'
+import { Activity, AlertCircle, Archive, ArchiveRestore, ArrowRightLeft, CalendarClock, CalendarDays, CheckCircle2, ChevronDown, ChevronRight, ChevronUp, Copy, Download, Eye, EyeOff, Film, Flag, HardDriveDownload, ImageOff, LayoutGrid, List, Loader2, Mail, Play, Plus, Power, PowerOff, RefreshCw, RotateCcw, Search, Settings, ShieldCheck, Sparkles, FolderMinus, Stethoscope, Tag, Trash2, Tv, Type, Upload, Users, Wrench, X, Zap } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Chip, inputCls, KpiTile, QuotaBar, SectionCard, StatusPill } from '@/components/dvr-shared'
 import api from '@/lib/api'
@@ -19,6 +19,9 @@ interface Provider {
   provider_type: 'xc' | 'plex' | 'emby' | 'jellyfin' | 'library' | 'dispatcharr_dvr'
   shared_connection_limit: number | null
   custom_user_agent: string | null
+  download_speed_limit_mbps?: number | null
+  download_max_concurrent?: number | null
+  download_pause_seconds?: number | null
   has_password: boolean
   movie_count: number
   series_count: number
@@ -1360,6 +1363,15 @@ function useBulkAiJob(startEndpoint: string, progressEndpointPrefix: string) {
 function BulkAiJobSummary({ job, labelFor }: { job: BulkAiJobStatus; labelFor: (r: BulkAiJobResult) => string }) {
   const [expanded, setExpanded] = useState(false)
   const results = Array.isArray(job.results) ? job.results : []
+  // Why items were skipped, most common first -- otherwise "N skipped" gives no hint
+  // that e.g. the AI wasn't confident enough (only high-confidence picks are applied).
+  const skipReasons = Object.entries(
+    results.filter((r) => r.status === 'skipped').reduce((acc, r) => {
+      const key = (r.detail || 'no reason given').slice(0, 90)
+      acc[key] = (acc[key] ?? 0) + 1
+      return acc
+    }, {} as Record<string, number>)
+  ).sort((x, y) => y[1] - x[1])
   return (
     <div className="text-xs px-2 py-1.5 rounded border border-primary/30 bg-primary/5 space-y-1">
       <div className="flex items-center gap-2">
@@ -1377,6 +1389,12 @@ function BulkAiJobSummary({ job, labelFor }: { job: BulkAiJobStatus; labelFor: (
           </button>
         )}
       </div>
+      {!job.running && skipReasons.length > 0 && (
+        <p className="text-muted-foreground">
+          Skipped because: {skipReasons.slice(0, 3).map(([why, n]) => `${why} (${n})`).join(' · ')}
+          {skipReasons.length > 3 ? ' · …' : ''}. Only high-confidence AI matches are applied automatically.
+        </p>
+      )}
       {job.error && <p className="text-destructive">{job.error}</p>}
       {expanded && (
         <div className="max-h-48 overflow-y-auto space-y-0.5 pt-1 border-t border-border/50">
@@ -2443,7 +2461,398 @@ function MoveEpisodePicker({ initialSeason, initialEpisode, initialName, onPick,
   )
 }
 
-function MovieRow({ movie, movieCategories, providers, qc, xcCredentials, selected, onToggleSelect, mode = 'list', onToggleArchived }: {
+// ── Opt-in downloads (vod_downloader.py) ─────────────────────────────────────
+interface DownloadJob {
+  id: number; kind: 'movie' | 'episode'; title: string; preset: string
+  status: 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
+  note: string | null; error: string | null; bytes_done: number; total_bytes: number | null; progress: number
+  provider_name: string | null; final_path: string | null; final_size: number | null
+}
+interface DownloadSettings {
+  enabled: boolean; output_dir: string; movies_dir: string; shows_dir: string; work_dir: string; audio_languages: string; keep_subtitles: boolean; default_preset: string; max_concurrent: number; min_free_gb: number
+  encoder: string; hw_device: string; encode_threads: number
+  speed_limit_mbps: number; provider_concurrent: number; pause_seconds: number
+  window_enabled: boolean; window_start: number; window_end: number
+}
+interface DownloadStatus {
+  settings: DownloadSettings; problem: string | null; ffmpeg: boolean; in_window: boolean
+  hardware?: { render_devices: string[]; nvidia: boolean }
+  free: { movies: number | null; shows: number | null; movies_path: string; shows_path: string } | null
+  counts: Record<string, number>; jobs: DownloadJob[]; presets: { id: string; label: string }[]
+}
+
+function dlBytes(n: number | null | undefined): string {
+  if (!n) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let i = 0
+  let v = n
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
+  return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${units[i]}`
+}
+
+function useDownloadStatus(poll = false) {
+  return useQuery<DownloadStatus>({
+    queryKey: ['vod-downloads'],
+    queryFn: () => api.get('/vod/downloads/').then((r) => r.data),
+    staleTime: 30000,
+    refetchInterval: poll ? (q) => ((q.state.data?.counts.running || q.state.data?.counts.queued) ? 2000 : 15000) : false,
+  })
+}
+
+function queueResultText(r: { queued: number; already_queued: number; no_source: number; missing: number; truncated: boolean }): string {
+  const parts: string[] = []
+  if (r.queued) parts.push(`${r.queued} queued`)
+  if (r.already_queued) parts.push(`${r.already_queued} already in the queue`)
+  if (r.no_source) parts.push(`${r.no_source} skipped (no playable source)`)
+  if (r.missing) parts.push(`${r.missing} no longer exist`)
+  if (r.truncated) parts.push('stopped at 2,000 for one request, so narrow the selection and queue the rest')
+  return (parts.join(', ') || 'Nothing to queue') + '. Progress is under Configuration → Downloads.'
+}
+
+function useQueueDownload() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: Record<string, unknown>) => api.post('/vod/downloads/queue/', body).then((r) => r.data),
+    onSuccess: (r) => { qc.invalidateQueries({ queryKey: ['vod-downloads'] }); notify(queueResultText(r)) },
+    onError: (e: any) => notify(e?.response?.data?.detail ?? e?.message ?? 'Could not queue the download.'),
+  })
+}
+
+// One small icon: downloads exactly this movie / episode / source. Hidden while downloads are off.
+function DownloadIconButton({ body, title, size = 12 }: { body: Record<string, unknown>; title: string; size?: number }) {
+  const status = useDownloadStatus()
+  const queue = useQueueDownload()
+  if (!status.data?.settings.enabled) return null
+  return (
+    <button title={title} className="hover:text-foreground disabled:opacity-50" disabled={queue.isPending} onClick={() => queue.mutate(body)}>
+      <Download size={size} />
+    </button>
+  )
+}
+
+// Download a whole movie, or a series (all seasons or one), with a re-encode preset and an optional provider preference.
+function DownloadMenu({ target, label, providers, seasons }: {
+  target: { movie_ids?: number[]; series_ids?: number[] }
+  label: string
+  providers?: { id: number; name: string }[]
+  seasons?: number[]
+}) {
+  const status = useDownloadStatus()
+  const queue = useQueueDownload()
+  const [preset, setPreset] = useState('')
+  const [providerId, setProviderId] = useState('')
+  const [season, setSeason] = useState('')
+  const [langs, setLangs] = useState('')
+  if (!status.data?.settings.enabled) return null
+  const effectivePreset = preset || status.data.settings.default_preset
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1.5 text-[11px] font-normal">
+      <select className={inputCls('text-[11px]')} value={effectivePreset} onChange={(e) => setPreset(e.target.value)} title="Keep the original file, or re-encode it smaller while downloading">
+        {status.data.presets.map((p) => (
+          <option key={p.id} value={p.id} disabled={p.id !== 'original' && !status.data!.ffmpeg}>{p.label}</option>
+        ))}
+      </select>
+      {providers && providers.length > 1 && (
+        <select className={inputCls('text-[11px]')} value={providerId} onChange={(e) => setProviderId(e.target.value)} title="Which provider's copy to prefer. Falls back to the others when it doesn't have a title.">
+          <option value="">Any provider (normal order)</option>
+          {providers.map((p) => <option key={p.id} value={p.id}>Prefer {p.name}</option>)}
+        </select>
+      )}
+      {seasons && seasons.length > 1 && (
+        <select className={inputCls('text-[11px]')} value={season} onChange={(e) => setSeason(e.target.value)}>
+          <option value="">All seasons</option>
+          {seasons.map((n) => <option key={n} value={n}>Season {n}</option>)}
+        </select>
+      )}
+      <input
+        className={inputCls('w-24 text-[11px]')} value={langs} onChange={(e) => setLangs(e.target.value)}
+        placeholder={status.data.settings.audio_languages ? `audio: ${status.data.settings.audio_languages}` : 'audio: all'}
+        title="Audio languages to keep for this download, for example eng or eng, jpn. Blank follows the setting; 'all' keeps every track."
+      />
+      <Button
+        size="sm" variant="outline" disabled={queue.isPending}
+        onClick={() => queue.mutate({
+          ...target, preset: effectivePreset, audio_languages: langs.trim() || undefined,
+          prefer_provider_id: providerId ? Number(providerId) : undefined,
+          season: season ? Number(season) : undefined,
+        })}
+      >
+        {queue.isPending ? <Loader2 size={12} className="animate-spin mr-1" /> : <Download size={12} className="mr-1" />}{label}
+      </Button>
+    </span>
+  )
+}
+
+// Configuration -> Downloads: settings, the legal note, and the live queue.
+function DownloadsCard() {
+  const qc = useQueryClient()
+  const status = useDownloadStatus(true)
+  const [draft, setDraft] = useState<DownloadSettings | null>(null)
+  const [ack, setAck] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [encTest, setEncTest] = useState<{ ok: boolean; message: string } | null>(null)
+  useEffect(() => { if (status.data && !draft) setDraft(status.data.settings) }, [status.data, draft])
+  const errText = (e: any) => e?.response?.data?.detail ?? e?.message ?? 'Request failed.'
+  const refresh = () => qc.invalidateQueries({ queryKey: ['vod-downloads'] })
+  const save = useMutation({
+    mutationFn: (d: DownloadSettings) => api.post('/vod/downloads/settings/', d),
+    onSuccess: () => { setError(null); refresh() },
+    onError: (e: any) => setError(errText(e)),
+  })
+  const testEncoder = useMutation({
+    mutationFn: (d: DownloadSettings) => api.post('/vod/downloads/test-encoder/', { encoder: d.encoder, hw_device: d.hw_device }).then((r) => r.data as { ok: boolean; message: string }),
+    onMutate: () => setEncTest(null),
+    onSuccess: (r) => setEncTest(r),
+    onError: (e: any) => setEncTest({ ok: false, message: errText(e) }),
+  })
+  const cancelJobs = useMutation({ mutationFn: (ids: number[] | null) => api.post('/vod/downloads/cancel/', { job_ids: ids }), onSuccess: refresh })
+  const retryJob = useMutation({ mutationFn: (id: number) => api.post(`/vod/downloads/${id}/retry/`), onSuccess: refresh })
+  const clearJobs = useMutation({ mutationFn: () => api.post('/vod/downloads/clear/'), onSuccess: refresh })
+  // hands the finished file to the browser you are using (a phone, say) through a short-lived link
+  const saveToDevice = useMutation({
+    mutationFn: (id: number) => api.post(`/vod/downloads/${id}/link/`).then((r) => r.data.url as string),
+    onSuccess: (url) => { window.location.assign(url) },
+    onError: (e: any) => notify(errText(e)),
+  })
+
+  const data = status.data
+  const wasEnabled = !!data?.settings.enabled
+  const needsAck = !!draft?.enabled && !wasEnabled && !ack
+  const counts = data?.counts ?? {}
+  const active = (counts.running ?? 0) + (counts.queued ?? 0)
+  const statusColor: Record<string, string> = { running: 'text-primary', queued: 'text-muted-foreground', done: 'text-emerald-500', failed: 'text-destructive', cancelled: 'text-muted-foreground' }
+
+  return (
+    <SectionCard title="Downloads (save files to your library)" icon={<Download size={14} />}>
+      <p className="text-xs text-muted-foreground">
+        Off by default. Turn this on to save movies and episodes from your providers as real files in a folder, named the way
+        Emby, Jellyfin and Plex expect (<code>Movies/Title (Year) [tmdbid-N]/…</code>, <code>Shows/Show (Year)/Season NN/…</code>).
+        You pick the source (or let failover choose) and can re-encode to a smaller file while downloading. Downloads respect each
+        provider's connection limit and wait their turn behind live viewers.
+      </p>
+      <p className="text-xs text-muted-foreground">
+        Only keep copies of content you have the right to keep. Your provider's terms, and the law where you live, may limit
+        saving streams, and that is your responsibility. This feature never runs unless you turn it on here.
+      </p>
+      {draft && (
+        <div className="space-y-2 text-xs">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+            <label className="flex items-center gap-1 font-medium">
+              <input type="checkbox" checked={draft.enabled} onChange={(e) => setDraft({ ...draft, enabled: e.target.checked })} />
+              Enable downloads
+            </label>
+            <input className={inputCls('w-72')} placeholder="Download folder inside this container, e.g. /downloads" title="Files go in Movies/ and Shows/ inside this folder, unless you set separate folders below." value={draft.output_dir} onChange={(e) => setDraft({ ...draft, output_dir: e.target.value })} />
+            <label className="flex items-center gap-1">Default
+              <select className={inputCls()} value={draft.default_preset} onChange={(e) => setDraft({ ...draft, default_preset: e.target.value })}>
+                {(data?.presets ?? []).map((p) => <option key={p.id} value={p.id} disabled={p.id !== 'original' && !data?.ffmpeg}>{p.label}</option>)}
+              </select>
+            </label>
+            <label className="flex items-center gap-1" title="How many downloads run at once. Each provider still only gets one at a time, and re-encoding uses a lot of CPU.">
+              At once
+              <input className={inputCls('w-12')} type="number" min={1} max={4} value={draft.max_concurrent} onChange={(e) => setDraft({ ...draft, max_concurrent: Math.min(4, Math.max(1, Number(e.target.value) || 1)) })} />
+            </label>
+            <label className="flex items-center gap-1" title="A download stops, and none start, when the folder would drop below this much free space.">
+              Keep free
+              <input className={inputCls('w-14')} type="number" min={0} value={draft.min_free_gb} onChange={(e) => setDraft({ ...draft, min_free_gb: Math.max(0, Number(e.target.value) || 0) })} />
+              GB
+            </label>
+          </div>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+            <span className="font-medium">Separate folders (optional)</span>
+            <input className={inputCls('w-60')} placeholder="Movies folder, e.g. /downloads/movies" title="Movies are saved straight into this folder (Title (Year)/Title (Year).ext), instead of the download folder's Movies subfolder." value={draft.movies_dir} onChange={(e) => setDraft({ ...draft, movies_dir: e.target.value })} />
+            <input className={inputCls('w-60')} placeholder="TV shows folder, e.g. /downloads/tv" title="Episodes are saved straight into this folder (Show (Year)/Season NN/…), instead of the download folder's Shows subfolder." value={draft.shows_dir} onChange={(e) => setDraft({ ...draft, shows_dir: e.target.value })} />
+            <span className="basis-full text-muted-foreground">Leave these blank to use <code>Movies/</code> and <code>Shows/</code> inside the download folder. Set both and the download folder becomes optional.</span>
+          </div>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+            <span className="font-medium">Processing folder (optional)</span>
+            <input className={inputCls('w-72')} placeholder="e.g. /downloads/processing (a fast local disk is best)" title="Downloads and re-encodes happen here; only the finished, checked file is moved into the library." value={draft.work_dir} onChange={(e) => setDraft({ ...draft, work_dir: e.target.value })} />
+            <span className="basis-full text-muted-foreground">Unfinished files live here and move into the library only when complete and verified, so a media server or Tdarr never sees a partial file. Blank = a hidden <code>.processing</code> folder inside each library folder. A re-encode needs room here for the original plus the new file.</span>
+          </div>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+            <span className="font-medium">Languages</span>
+            <label className="flex items-center gap-1" title="Audio languages to keep, e.g. eng or eng, jpn. Blank keeps every track as it is. Tracks with no language tag are always kept, and if nothing matches all audio is kept so a file is never silent.">
+              Keep audio
+              <input className={inputCls('w-40')} placeholder="all (or eng, jpn)" value={draft.audio_languages} onChange={(e) => setDraft({ ...draft, audio_languages: e.target.value })} />
+            </label>
+            <label className="flex items-center gap-1" title="Keep subtitles (in the same languages when a language is set). Off drops them whenever a file is re-encoded or trimmed.">
+              <input type="checkbox" checked={draft.keep_subtitles} onChange={(e) => setDraft({ ...draft, keep_subtitles: e.target.checked })} />
+              Keep subtitles
+            </label>
+            <span className="basis-full text-muted-foreground">A language list also trims <b>Original file</b> downloads (other audio tracks are removed without re-encoding; the file is saved as .mkv). With the list blank, originals are saved untouched. Each download can override it.</span>
+          </div>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+            <span className="font-medium">Re-encoding</span>
+            <label className="flex items-center gap-1" title="Software uses the CPU and works everywhere. The GPU options need the GPU shared with the container (see the User Guide). If a GPU encode fails the download falls back to the CPU.">
+              Encoder
+              <select className={inputCls('w-56')} value={draft.encoder} onChange={(e) => { setDraft({ ...draft, encoder: e.target.value }); setEncTest(null) }}>
+                <option value="software">Software (CPU)</option>
+                <option value="auto">Automatic (GPU if present)</option>
+                <option value="vaapi">VAAPI (Intel / AMD GPU)</option>
+                <option value="qsv">Intel Quick Sync (QSV)</option>
+                <option value="nvenc">NVIDIA NVENC</option>
+              </select>
+            </label>
+            {(draft.encoder === 'vaapi' || draft.encoder === 'qsv' || draft.encoder === 'auto') && (
+              <label className="flex items-center gap-1" title="The GPU's render device inside the container. Blank = the first /dev/dri/renderD* found.">
+                GPU device
+                <input className={inputCls('w-48')} placeholder="/dev/dri/renderD128 (auto)" value={draft.hw_device} onChange={(e) => setDraft({ ...draft, hw_device: e.target.value })} />
+              </label>
+            )}
+            {draft.encoder === 'software' && (
+              <label className="flex items-center gap-1" title="Limit how many CPU threads one re-encode may use so the rest of the server stays responsive. 0 = let ffmpeg decide.">
+                CPU threads
+                <input className={inputCls('w-14')} type="number" min={0} max={64} value={draft.encode_threads} onChange={(e) => setDraft({ ...draft, encode_threads: Math.max(0, Number(e.target.value) || 0) })} />
+                (0 = all)
+              </label>
+            )}
+            {draft.encoder !== 'software' && (
+              <button className="px-2 py-0.5 rounded border border-border hover:bg-accent disabled:opacity-50" disabled={testEncoder.isPending} onClick={() => testEncoder.mutate(draft)}>
+                {testEncoder.isPending ? 'Testing…' : 'Test encoder'}
+              </button>
+            )}
+            {encTest && <span className={encTest.ok ? 'text-emerald-500' : 'text-destructive'}>{encTest.message}</span>}
+            <span className="basis-full text-muted-foreground">
+              {data?.hardware && (data.hardware.render_devices.length || data.hardware.nvidia)
+                ? `GPU access found in this container: ${[...data.hardware.render_devices, ...(data.hardware.nvidia ? ['NVIDIA'] : [])].join(', ')}. `
+                : 'No GPU is shared with this container, so re-encoding uses the CPU. '}
+              The test uses what you chose above; remember to save.
+            </span>
+          </div>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 border-t border-border/50 pt-2">
+            <span className="font-medium">Pacing defaults</span>
+            <label className="flex items-center gap-1" title="Caps how fast one download pulls from a provider. 0 = no cap. Some providers flag accounts that pull at full speed; others don't mind.">
+              Speed cap
+              <input className={inputCls('w-14')} type="number" min={0} value={draft.speed_limit_mbps} onChange={(e) => setDraft({ ...draft, speed_limit_mbps: Math.max(0, Number(e.target.value) || 0) })} />
+              Mbit/s (0 = none)
+            </label>
+            <label className="flex items-center gap-1" title="How many downloads may run at once from the same provider. Needs the provider's own connection limit to allow it.">
+              At once per provider
+              <input className={inputCls('w-12')} type="number" min={1} max={4} value={draft.provider_concurrent} onChange={(e) => setDraft({ ...draft, provider_concurrent: Math.min(4, Math.max(1, Number(e.target.value) || 1)) })} />
+            </label>
+            <label className="flex items-center gap-1" title="Rest between two downloads from the same provider.">
+              Pause between
+              <input className={inputCls('w-14')} type="number" min={0} value={draft.pause_seconds} onChange={(e) => setDraft({ ...draft, pause_seconds: Math.max(0, Number(e.target.value) || 0) })} />
+              sec
+            </label>
+            <label className="flex items-center gap-1" title="Only START downloads inside this window (this server's local time). Running ones finish.">
+              <input type="checkbox" checked={draft.window_enabled} onChange={(e) => setDraft({ ...draft, window_enabled: e.target.checked })} />
+              Only between
+              <input className={inputCls('w-12')} type="number" min={0} max={23} disabled={!draft.window_enabled} value={draft.window_start} onChange={(e) => setDraft({ ...draft, window_start: Math.min(23, Math.max(0, Number(e.target.value) || 0)) })} />
+              and
+              <input className={inputCls('w-12')} type="number" min={0} max={23} disabled={!draft.window_enabled} value={draft.window_end} onChange={(e) => setDraft({ ...draft, window_end: Math.min(23, Math.max(0, Number(e.target.value) || 0)) })} />
+              o'clock
+            </label>
+            <span className="basis-full text-muted-foreground">
+              Each provider can override these (Providers → Downloads). If a provider answers "slow down" (HTTP 429, 458, 509, 403) the download waits and retries with a growing delay on its own.
+            </span>
+          </div>
+          {draft.enabled && !wasEnabled && (
+            <label className="flex items-start gap-1.5 text-muted-foreground">
+              <input type="checkbox" className="mt-0.5" checked={ack} onChange={(e) => setAck(e.target.checked)} />
+              I understand I'm responsible for having the right to keep copies of what I download.
+            </label>
+          )}
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Button size="sm" disabled={save.isPending || needsAck} onClick={() => save.mutate(draft)}>
+              {save.isPending ? <Loader2 size={12} className="animate-spin" /> : 'Save settings'}
+            </Button>
+            {data?.free && (data.free.movies_path === data.free.shows_path || data.free.movies === data.free.shows
+              ? <span className="text-muted-foreground">{dlBytes(data.free.movies)} free</span>
+              : <span className="text-muted-foreground">{dlBytes(data.free.movies)} free for movies, {dlBytes(data.free.shows)} free for TV shows</span>)}
+            {data && !data.ffmpeg && <span className="text-destructive">ffmpeg isn't available here, so only "Original file" downloads work.</span>}
+          </div>
+          {error && <p className="text-destructive">{error}</p>}
+          {!error && data?.problem && <p className="text-destructive">{data.problem}</p>}
+        </div>
+      )}
+
+      {wasEnabled && data && (
+        <div className="space-y-1.5 text-xs">
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            <p className="font-medium">Queue</p>
+            <span className="text-muted-foreground">
+              {counts.running ?? 0} running, {counts.queued ?? 0} waiting, {counts.done ?? 0} done{counts.failed ? `, ${counts.failed} failed` : ''}
+            </span>
+            {active > 0 && <Button size="sm" variant="outline" disabled={cancelJobs.isPending} onClick={() => askConfirm(`Cancel all ${active} queued and running downloads? Partial files are removed.`, () => cancelJobs.mutate(null))}>Cancel all</Button>}
+            {data.jobs.some((j) => ['done', 'failed', 'cancelled'].includes(j.status)) && <Button size="sm" variant="outline" disabled={clearJobs.isPending} onClick={() => clearJobs.mutate()}>Clear finished</Button>}
+          </div>
+          {!data.in_window && <p className="text-muted-foreground">Outside the download window: queued items start at {data.settings.window_start}:00.</p>}
+          {data.jobs.length === 0 && <p className="text-muted-foreground">Nothing queued yet. Use the download button on a movie, an episode, or a source, or select titles and choose Download selected.</p>}
+          {data.jobs.length > 0 && (
+            <table className="w-full">
+              <tbody>
+                {data.jobs.map((j) => (
+                  <tr key={j.id} className="border-t border-border/50 align-top">
+                    <td className="py-1 pr-2">
+                      <div className="break-words">{j.title}</div>
+                      {(j.error || j.note) && <div className={j.error ? 'text-destructive text-[11px]' : 'text-muted-foreground text-[11px]'}>{j.error ?? j.note}</div>}
+                    </td>
+                    <td className="py-1 pr-2 whitespace-nowrap text-muted-foreground">{j.preset === 'original' ? 'original' : j.preset.replace('_', ' ')}</td>
+                    <td className="py-1 pr-2 w-36">
+                      {j.status === 'running' && (
+                        <div className="h-1.5 rounded bg-border overflow-hidden"><div className="h-full bg-primary" style={{ width: `${Math.round(j.progress * 100)}%` }} /></div>
+                      )}
+                      <span className={statusColor[j.status]}>
+                        {j.status === 'running' ? `${Math.round(j.progress * 100)}% · ${dlBytes(j.bytes_done)}${j.provider_name ? ` · ${j.provider_name}` : ''}` : j.status === 'done' ? `done · ${dlBytes(j.final_size)}` : j.status}
+                      </span>
+                    </td>
+                    <td className="py-1 whitespace-nowrap text-right">
+                      {(j.status === 'queued' || j.status === 'running') && <button className="text-muted-foreground hover:text-destructive" title="Cancel" onClick={() => cancelJobs.mutate([j.id])}><X size={12} /></button>}
+                      {j.status === 'done' && <button className="text-muted-foreground hover:text-foreground disabled:opacity-50" title="Save this file to the device you are using" disabled={saveToDevice.isPending} onClick={() => saveToDevice.mutate(j.id)}><Download size={12} /></button>}
+                      {(j.status === 'failed' || j.status === 'cancelled') && <button className="text-muted-foreground hover:text-foreground" title="Try again" onClick={() => retryJob.mutate(j.id)}><RotateCcw size={12} /></button>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          <p className="text-muted-foreground">
+            Mount the download folder(s) into this container and into your media server, then add the movies and TV shows folders as
+            libraries. Use a different folder from the .strm export so titles don't appear twice.
+          </p>
+        </div>
+      )}
+    </SectionCard>
+  )
+}
+
+// Per-provider download pacing. Blank = follow the global default; 0 speed = explicitly no cap for this provider.
+function ProviderDownloadLimits({ provider }: { provider: Provider }) {
+  const qc = useQueryClient()
+  const status = useDownloadStatus()
+  const [speed, setSpeed] = useState(provider.download_speed_limit_mbps == null ? '' : String(provider.download_speed_limit_mbps))
+  const [conc, setConc] = useState(provider.download_max_concurrent == null ? '' : String(provider.download_max_concurrent))
+  const [pause, setPause] = useState(provider.download_pause_seconds == null ? '' : String(provider.download_pause_seconds))
+  const save = useMutation({
+    mutationFn: () => api.post(`/vod/providers/${provider.id}/download-limits/`, {
+      speed_limit_mbps: speed === '' ? null : Number(speed),
+      max_concurrent: conc === '' ? null : Number(conc),
+      pause_seconds: pause === '' ? null : Number(pause),
+    }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vod-providers'] }),
+  })
+  const g = status.data?.settings
+  if (!g?.enabled || ['library', 'dispatcharr_dvr'].includes(provider.provider_type)) return null
+  const field = (label: string, value: string, set: (v: string) => void, placeholder: string, title: string) => (
+    <label className="flex items-center gap-1" title={title}>
+      {label}
+      <input className={inputCls('w-16 text-[11px]')} type="number" min={0} value={value} placeholder={placeholder}
+        onChange={(e) => set(e.target.value)} onBlur={() => save.mutate()} />
+    </label>
+  )
+  return (
+    <div className="mt-1 text-[11px] text-muted-foreground space-y-0.5">
+      <p className="font-medium">Downloads (blank = global default)</p>
+      <div className="flex flex-wrap gap-x-2 gap-y-0.5">
+        {field('Mbit/s', speed, setSpeed, g.speed_limit_mbps ? String(g.speed_limit_mbps) : 'none', 'Speed cap for downloads from this provider. 0 = no cap even if the global default has one.')}
+        {field('at once', conc, setConc, String(g.provider_concurrent), 'Downloads at once from this provider. Above 1 only works if the provider\'s max streams allows it.')}
+        {field('pause s', pause, setPause, String(g.pause_seconds), 'Rest between downloads from this provider.')}
+      </div>
+    </div>
+  )
+}
+
+function MovieRow({ movie, movieCategories, providers, qc, xcCredentials, selected, onToggleSelect, mode = 'list', onToggleArchived, onRemoveFromCategory }: {
   movie: Movie
   movieCategories: Category[]
   providers: Provider[]
@@ -2453,6 +2862,8 @@ function MovieRow({ movie, movieCategories, providers, qc, xcCredentials, select
   onToggleSelect: (shiftKey: boolean) => void
   mode?: 'list' | 'grid'
   onToggleArchived: () => void
+  // set only while a category filter is on: takes this title out of that one category (stays in the pool)
+  onRemoveFromCategory?: () => void
 }) {
   const [open, setOpen] = useState(false)
   const [sourceForm, setSourceForm] = useState({ provider_id: '', provider_stream_id: '', container_extension: 'mp4' })
@@ -2675,12 +3086,16 @@ function MovieRow({ movie, movieCategories, providers, qc, xcCredentials, select
       {movie.description && <p className="text-muted-foreground">{movie.description}</p>}
 
       <div>
-        <p className="font-medium mb-1">Sources</p>
+        <div className="flex flex-wrap items-center gap-2 mb-1">
+          <p className="font-medium">Sources</p>
+          <DownloadMenu target={{ movie_ids: [movie.id] }} label="Download" providers={movie.sources.map((s) => ({ id: s.provider_id, name: s.provider_name }))} />
+        </div>
         {movie.sources.map((s) => (
           <div key={s.id} className="text-muted-foreground">
             <div className="flex items-center justify-between">
               <span>{s.provider_name} → {s.provider_stream_id} ({s.container_extension}){s.provider_category_name ? ` · ${s.provider_category_name}` : ''}</span>
               <span className="flex items-center gap-1.5">
+                <DownloadIconButton body={{ movie_ids: [movie.id], source_id: s.id }} title={`Download this copy (${s.provider_name})`} />
                 <PlayButton
                   url={buildPreviewSourceUrl('movie', s.id, s.container_extension, xcCredentials)}
                   transcodedUrl={buildTranscodedPreviewSourceUrl('movie', s.id, xcCredentials)}
@@ -2798,6 +3213,15 @@ function MovieRow({ movie, movieCategories, providers, qc, xcCredentials, select
         >
           {movie.review_excluded ? <ArchiveRestore size={12} /> : <Archive size={12} />}
         </button>
+        {onRemoveFromCategory && (
+          <button
+            title="Remove from the selected category (keeps it in the pool)"
+            className="absolute top-1.5 left-12 z-10 bg-background/85 rounded p-0.5 text-muted-foreground hover:text-foreground"
+            onClick={(e) => { e.stopPropagation(); onRemoveFromCategory() }}
+          >
+            <FolderMinus size={12} />
+          </button>
+        )}
         <button className="block w-full text-left relative" onClick={() => setOpen(true)}>
           <PosterThumb
             url={movie.poster_url}
@@ -2886,6 +3310,15 @@ function MovieRow({ movie, movieCategories, providers, qc, xcCredentials, select
           >
             18+
           </button>
+          {onRemoveFromCategory && (
+            <button
+              title="Remove from the selected category (keeps it in the pool)"
+              className="text-muted-foreground hover:text-foreground"
+              onClick={onRemoveFromCategory}
+            >
+              <FolderMinus size={12} />
+            </button>
+          )}
           <button
             title={movie.review_excluded ? 'Restore from archive' : 'Archive (removes from every category and hides from the pool)'}
             className="text-muted-foreground hover:text-foreground"
@@ -2926,7 +3359,7 @@ function MovieRow({ movie, movieCategories, providers, qc, xcCredentials, select
   )
 }
 
-function SeriesRow({ series, seriesCategories, qc, xcCredentials, selected, onToggleSelect, mode = 'list', onToggleArchived }: {
+function SeriesRow({ series, seriesCategories, qc, xcCredentials, selected, onToggleSelect, mode = 'list', onToggleArchived, onRemoveFromCategory }: {
   series: Series
   seriesCategories: Category[]
   qc: ReturnType<typeof useQueryClient>
@@ -2935,6 +3368,8 @@ function SeriesRow({ series, seriesCategories, qc, xcCredentials, selected, onTo
   onToggleSelect: (shiftKey: boolean) => void
   mode?: 'list' | 'grid'
   onToggleArchived: () => void
+  // set only while a category filter is on: takes this title out of that one category (stays in the pool)
+  onRemoveFromCategory?: () => void
 }) {
   const [open, setOpen] = useState(false)
   const [categoryPick, setCategoryPick] = useState('')
@@ -3285,7 +3720,16 @@ function SeriesRow({ series, seriesCategories, qc, xcCredentials, selected, onTo
       })()}
 
       <div>
-        <p className="font-medium mb-1">Episodes</p>
+        <div className="flex flex-wrap items-center gap-2 mb-1">
+          <p className="font-medium">Episodes</p>
+          {series.episodes.length > 0 && (
+            <DownloadMenu
+              target={{ series_ids: [series.id] }} label="Download episodes"
+              providers={[...new Map(series.episodes.flatMap((e) => e.sources).map((s) => [s.provider_id, { id: s.provider_id, name: s.provider_name }])).values()]}
+              seasons={[...new Set(series.episodes.map((e) => e.season_number))].sort((a, b) => a - b)}
+            />
+          )}
+        </div>
         {enrich.isPending && (
           <p className="text-muted-foreground flex items-center gap-1.5 mb-1">
             <Loader2 size={12} className="animate-spin" /> Checking providers for missing episodes...
@@ -3336,6 +3780,7 @@ function SeriesRow({ series, seriesCategories, qc, xcCredentials, selected, onTo
                     title={`${series.name} S${e.season_number}E${e.episode_number} — ${e.name}`}
                   />
                   <CopyUrlButton url={buildStreamUrl('series', e.export_episode_id, 'mp4', xcCredentials)} />
+                  <DownloadIconButton body={{ episode_ids: [e.id] }} title="Download this episode" />
                 </span>
               </div>
             )}
@@ -3351,6 +3796,7 @@ function SeriesRow({ series, seriesCategories, qc, xcCredentials, selected, onTo
                   )}
                 </span>
                 <span className="flex items-center gap-1">
+                  <DownloadIconButton size={11} body={{ episode_ids: [e.id], source_id: s.id }} title={`Download this copy (${s.provider_name})`} />
                   <FlagMismatchControl
                     isFlagged={!!s.flagged_mismatch}
                     reason={s.flagged_reason}
@@ -3437,6 +3883,15 @@ function SeriesRow({ series, seriesCategories, qc, xcCredentials, selected, onTo
         >
           {series.review_excluded ? <ArchiveRestore size={12} /> : <Archive size={12} />}
         </button>
+        {onRemoveFromCategory && (
+          <button
+            title="Remove from the selected category (keeps it in the pool)"
+            className="absolute top-1.5 left-12 z-10 bg-background/85 rounded p-0.5 text-muted-foreground hover:text-foreground"
+            onClick={(e) => { e.stopPropagation(); onRemoveFromCategory() }}
+          >
+            <FolderMinus size={12} />
+          </button>
+        )}
         <button className="block w-full text-left relative" onClick={() => setOpen(true)}>
           <PosterThumb
             url={series.poster_url}
@@ -3499,6 +3954,15 @@ function SeriesRow({ series, seriesCategories, qc, xcCredentials, selected, onTo
           >
             18+
           </button>
+          {onRemoveFromCategory && (
+            <button
+              title="Remove from the selected category (keeps it in the pool)"
+              className="text-muted-foreground hover:text-foreground"
+              onClick={onRemoveFromCategory}
+            >
+              <FolderMinus size={12} />
+            </button>
+          )}
           <button
             title={series.review_excluded ? 'Restore from archive' : 'Archive (removes from every category and hides from the pool)'}
             className="text-muted-foreground hover:text-foreground"
@@ -3565,6 +4029,15 @@ function CategoriesModal({ contentType, categories, qc, onView, onClose }: {
     name: '', is_smart: false,
     rule_field: 'genre' as typeof RULE_FIELDS[number], rule_op: 'contains' as typeof RULE_OPS[number], rule_value: '',
   })
+  // The global List Sync interval lives in Configuration -> Refresh Schedule; show its current value here so
+  // "global" on a category's schedule dropdown isn't a mystery.
+  const refreshSettings = useQuery<RefreshSettings>({
+    queryKey: ['vod-refresh-settings'],
+    queryFn: () => api.get('/vod/refresh-settings/').then((r) => r.data),
+    staleTime: 30000,
+  })
+  const globalSyncSecs = refreshSettings.data?.tmdb_sync_interval_seconds ?? null
+  const globalSyncText = globalSyncSecs ? `every ${+(globalSyncSecs / 3600).toFixed(1)}h` : 'off'
   const addCategory = useMutation({
     mutationFn: () => api.post('/vod/categories/', {
       name: categoryForm.name,
@@ -3806,6 +4279,12 @@ function CategoriesModal({ contentType, categories, qc, onView, onClose }: {
         <span className="text-sm font-medium">{contentType === 'movie' ? 'Movie Categories' : 'TV Show Categories'}</span>
       </div>
       <div className="p-4 text-xs space-y-3 overflow-y-auto">
+        {categories.some((c) => !c.is_smart && !!(c.sync_source || c.sync_sources)) && (
+          <p className="text-muted-foreground">
+            List-linked categories only update when you click Sync now, unless they have a schedule. The dropdown on each one picks hourly
+            to weekly; <b>global</b> follows <b>List Sync (hrs)</b> under <b>Configuration → Refresh Schedule</b>, which is currently <b>{globalSyncText}</b>.
+          </p>
+        )}
         {categories.length > 1 && (
           <>
             <div className="flex items-center gap-1.5">
@@ -3905,15 +4384,15 @@ function CategoriesModal({ contentType, categories, qc, onView, onClose }: {
                 />
                 {!c.is_smart && !!(c.sync_source || c.sync_sources) && (
                   <select
-                    className={inputCls('w-20 text-[10px]')}
-                    title="How often this category re-syncs from its list. Without its own schedule it follows the global List Sync (hrs) setting, which is off by default."
+                    className={inputCls('w-28 text-[10px]')}
+                    title={`How often this category re-syncs from its list. "global" follows List Sync (hrs) under Configuration → Refresh Schedule (currently ${globalSyncText}; off by default, which means only Sync now updates it).`}
                     value={c.schedule_interval_seconds ? String(c.schedule_interval_seconds) : ''}
                     onChange={(e) => {
                       const v = e.target.value
                       setCategoryEvalSchedule.mutate({ id: c.id, schedule_interval_seconds: v ? Number(v) : null, use_ai_evaluation: false })
                     }}
                   >
-                    <option value="">global / manual</option>
+                    <option value="">{globalSyncSecs ? `global (${globalSyncText})` : 'global (off)'}</option>
                     <option value="3600">hourly</option>
                     <option value="21600">every 6h</option>
                     <option value="86400">daily</option>
@@ -4903,6 +5382,10 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
     },
     onError: (e: any) => { setStrmPreview(null); setStrmError(strmErrorText(e)) },
   })
+
+  const downloadStatus = useDownloadStatus()
+  const queueDownload = useQueueDownload()
+  const downloadsEnabled = !!downloadStatus.data?.settings.enabled
 
   // ── Connected Instances (per-instance XC credentials) ──
   const xcClientsQuery = useQuery<XcClient[]>({
@@ -6596,6 +7079,49 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
     mutationFn: (mode: string) => api.post('/vod/stream-priority-mode/', { mode }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vod-stream-priority-mode'] }),
   })
+  // ── Genre categories (one smart category per TMDB genre) ──
+  type GenreCounts = { movie: { genre: string; count: number }[]; series: { genre: string; count: number }[] }
+  const [genreCounts, setGenreCounts] = useState<GenreCounts | null>(null)
+  const [genrePicked, setGenrePicked] = useState<Set<string>>(new Set())
+  const [genreTypes, setGenreTypes] = useState<{ movie: boolean; series: boolean }>({ movie: true, series: true })
+  const [genreResult, setGenreResult] = useState<string | null>(null)
+  const [genreMinItems, setGenreMinItems] = useState(25)
+  const loadGenres = useMutation({
+    mutationFn: () => api.get('/vod/categories/genres/', { params: { min_items: genreMinItems } }).then((r) => r.data as GenreCounts),
+    onSuccess: (r) => { setGenreCounts(r); setGenrePicked(new Set()); setGenreResult(null) },
+    onError: (e: any) => setGenreResult(`Failed: ${e?.response?.data?.detail ?? e.message}`),
+  })
+  const createGenreCategories = useMutation({
+    mutationFn: () => api.post('/vod/categories/from-genres/', {
+      genres: Array.from(genrePicked),
+      content_types: [genreTypes.movie ? 'movie' : null, genreTypes.series ? 'series' : null].filter(Boolean),
+    }).then((r) => r.data as { created: { name: string }[]; skipped: { name: string; content_type: string; reason: string }[] }),
+    onSuccess: (r) => {
+      setGenreResult(`Created ${r.created.length} categor${r.created.length === 1 ? 'y' : 'ies'}${r.skipped.length ? ` · skipped ${r.skipped.length} (${r.skipped.slice(0, 3).map((x) => `${x.name}: ${x.reason}`).join('; ')}${r.skipped.length > 3 ? '; …' : ''})` : ''}. They fill in over the next minute.`)
+      qc.invalidateQueries({ queryKey: ['vod-categories'] })
+    },
+    onError: (e: any) => setGenreResult(`Failed: ${e?.response?.data?.detail ?? e.message}`),
+  })
+  // ── Automatic TMDB episode titles ──
+  type AutoEpisodeTitles = { mode: string; status: { running: boolean; last_run_at: number | null; last_result: { series_checked: number; series_changed: number; episodes_renamed: number; failed: number } | null } }
+  const autoEpisodeTitlesQuery = useQuery<AutoEpisodeTitles>({
+    queryKey: ['vod-auto-episode-titles'],
+    queryFn:  () => api.get('/vod/auto-episode-titles/').then((r) => r.data),
+  })
+  const setAutoEpisodeTitles = useMutation({
+    mutationFn: (mode: string) => api.post('/vod/auto-episode-titles/', { mode }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vod-auto-episode-titles'] }),
+  })
+  const [autoEpisodeTitlesRunMsg, setAutoEpisodeTitlesRunMsg] = useState<string | null>(null)
+  const runAutoEpisodeTitles = useMutation({
+    mutationFn: () => api.post('/vod/auto-episode-titles/run/').then((r) => r.data as { series_checked: number; series_changed: number; episodes_renamed: number; failed: number }),
+    onSuccess: (r) => {
+      setAutoEpisodeTitlesRunMsg(`Checked ${r.series_checked} series · renamed ${r.episodes_renamed} episode(s) in ${r.series_changed}${r.failed ? ` · ${r.failed} failed` : ''}`)
+      qc.invalidateQueries({ queryKey: ['vod-auto-episode-titles'] })
+      qc.invalidateQueries({ queryKey: ['vod-series'] })
+    },
+    onError: (e: any) => setAutoEpisodeTitlesRunMsg(`Failed: ${e?.response?.data?.detail ?? e.message}`),
+  })
   // ── XC title display format (GH issue #1) ──
   const xcTitleIncludeYearQuery = useQuery<{ enabled: boolean }>({
     queryKey: ['vod-xc-title-include-year'],
@@ -6964,6 +7490,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
   const [movieCategoryFilter, setMovieCategoryFilter] = useState<number | null>(null)
   const [movieProviderFilter, setMovieProviderFilter] = useState<number | null>(null)
   const [movieShowArchived, setMovieShowArchived] = useState(false)
+  const [movieNoTmdb, setMovieNoTmdb] = useState(false)
   const [MOVIE_LIMIT, setMovieLimitState] = useState(
     () => Number(localStorage.getItem('vodmanager-movies-limit')) || 25
   )
@@ -6973,8 +7500,8 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
     setMovieOffset(0)
   }
   const moviesQuery = useQuery<Page<Movie>>({
-    queryKey: ['vod-movies', movieSearch, movieOffset, movieCategoryFilter, movieProviderFilter, movieShowArchived, MOVIE_LIMIT],
-    queryFn:  () => api.get('/vod/movies/', { params: { search: movieSearch || undefined, limit: MOVIE_LIMIT, offset: movieOffset, category_id: movieCategoryFilter ?? undefined, provider_id: movieProviderFilter ?? undefined, archived: movieShowArchived } }).then((r) => r.data),
+    queryKey: ['vod-movies', movieSearch, movieOffset, movieCategoryFilter, movieProviderFilter, movieShowArchived, movieNoTmdb, MOVIE_LIMIT],
+    queryFn:  () => api.get('/vod/movies/', { params: { search: movieSearch || undefined, limit: MOVIE_LIMIT, offset: movieOffset, category_id: movieCategoryFilter ?? undefined, provider_id: movieProviderFilter ?? undefined, archived: movieShowArchived, no_tmdb: movieNoTmdb || undefined } }).then((r) => r.data),
   })
   const toggleMovieArchived = useMutation({
     mutationFn: ({ id, archived }: { id: number; archived: boolean }) => api.post(`/vod/movies/${id}/archive/`, null, { params: { archived } }),
@@ -7010,7 +7537,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
   const [bulkMovieTargetCategory, setBulkMovieTargetCategory] = useState('')
   const [bulkMovieResult, setBulkMovieResult] = useState<string | null>(null)
   const bulkPlaceMovies = useMutation({
-    mutationFn: (body: { category_id: number; ids?: number[]; search?: string; source_category_id?: number; source_provider_id?: number }) =>
+    mutationFn: (body: { category_id: number; ids?: number[]; search?: string; source_category_id?: number; source_provider_id?: number; no_tmdb?: boolean }) =>
       api.post('/vod/movies/bulk-place/', body),
     onSuccess: (r) => {
       setBulkMovieResult(`Matched ${r.data.matched} · newly placed ${r.data.newly_placed}.`)
@@ -7018,6 +7545,34 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
       setSelectedMovieIds(new Set())
     },
     onError: (e: any) => setBulkMovieResult(`Failed: ${e?.response?.data?.detail ?? e.message}`),
+  })
+  // Take titles out of the category currently being filtered on (they stay in the pool).
+  const movieCategoryExclusionsQuery = useQuery<{ movie: number; series: number }>({
+    queryKey: ['vod-category-exclusions', movieCategoryFilter],
+    queryFn:  () => api.get(`/vod/categories/${movieCategoryFilter}/exclusions/`).then((r) => r.data),
+    enabled:  movieCategoryFilter != null,
+  })
+  const unplaceMovie = useMutation({
+    mutationFn: (body: { ids?: number[] }) => api.post('/vod/movies/bulk-unplace/', {
+      category_id: movieCategoryFilter, ids: body.ids,
+      search: body.ids ? undefined : (movieSearch || undefined),
+      source_provider_id: body.ids ? undefined : (movieProviderFilter ?? undefined),
+      no_tmdb: body.ids ? undefined : (movieNoTmdb || undefined),
+    }),
+    onSuccess: (r) => {
+      setBulkMovieResult(`Removed ${r.data.removed} from the category (they stay in the pool).`)
+      qc.invalidateQueries({ queryKey: ['vod-movies'] })
+      qc.invalidateQueries({ queryKey: ['vod-category-exclusions'] })
+      setSelectedMovieIds(new Set())
+    },
+    onError: (e: any) => setBulkMovieResult(`Failed: ${e?.response?.data?.detail ?? e.message}`),
+  })
+  const allowRemovedMovie = useMutation({
+    mutationFn: () => api.post(`/vod/categories/${movieCategoryFilter}/exclusions/clear/`),
+    onSuccess: (r) => {
+      setBulkMovieResult(`${r.data.cleared} removed title(s) can be added by the category rule again.`)
+      qc.invalidateQueries({ queryKey: ['vod-category-exclusions'] })
+    },
   })
   const bulkArchiveMovies = useMutation({
     mutationFn: (body: { ids: number[]; archived: boolean }) => api.post('/vod/bulk-archive/', { content_type: 'movie', ...body }),
@@ -7036,6 +7591,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
   const [seriesCategoryFilter, setSeriesCategoryFilter] = useState<number | null>(null)
   const [seriesProviderFilter, setSeriesProviderFilter] = useState<number | null>(null)
   const [seriesShowArchived, setSeriesShowArchived] = useState(false)
+  const [seriesNoTmdb, setSeriesNoTmdb] = useState(false)
   const [SERIES_LIMIT, setSeriesLimitState] = useState(
     () => Number(localStorage.getItem('vodmanager-series-limit')) || 25
   )
@@ -7045,8 +7601,8 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
     setSeriesOffset(0)
   }
   const seriesQuery = useQuery<Page<Series>>({
-    queryKey: ['vod-series', seriesSearch, seriesOffset, seriesCategoryFilter, seriesProviderFilter, seriesShowArchived, SERIES_LIMIT],
-    queryFn:  () => api.get('/vod/series/', { params: { search: seriesSearch || undefined, limit: SERIES_LIMIT, offset: seriesOffset, category_id: seriesCategoryFilter ?? undefined, provider_id: seriesProviderFilter ?? undefined, archived: seriesShowArchived } }).then((r) => r.data),
+    queryKey: ['vod-series', seriesSearch, seriesOffset, seriesCategoryFilter, seriesProviderFilter, seriesShowArchived, seriesNoTmdb, SERIES_LIMIT],
+    queryFn:  () => api.get('/vod/series/', { params: { search: seriesSearch || undefined, limit: SERIES_LIMIT, offset: seriesOffset, category_id: seriesCategoryFilter ?? undefined, provider_id: seriesProviderFilter ?? undefined, archived: seriesShowArchived, no_tmdb: seriesNoTmdb || undefined } }).then((r) => r.data),
   })
   const toggleSeriesArchived = useMutation({
     mutationFn: ({ id, archived }: { id: number; archived: boolean }) => api.post(`/vod/series/${id}/archive/`, null, { params: { archived } }),
@@ -7082,7 +7638,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
   const [bulkSeriesTargetCategory, setBulkSeriesTargetCategory] = useState('')
   const [bulkSeriesResult, setBulkSeriesResult] = useState<string | null>(null)
   const bulkPlaceSeries = useMutation({
-    mutationFn: (body: { category_id: number; ids?: number[]; search?: string; source_category_id?: number; source_provider_id?: number }) =>
+    mutationFn: (body: { category_id: number; ids?: number[]; search?: string; source_category_id?: number; source_provider_id?: number; no_tmdb?: boolean }) =>
       api.post('/vod/series/bulk-place/', body),
     onSuccess: (r) => {
       setBulkSeriesResult(`Matched ${r.data.matched} · newly placed ${r.data.newly_placed}.`)
@@ -7090,6 +7646,34 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
       setSelectedSeriesIds(new Set())
     },
     onError: (e: any) => setBulkSeriesResult(`Failed: ${e?.response?.data?.detail ?? e.message}`),
+  })
+  // Take titles out of the category currently being filtered on (they stay in the pool).
+  const seriesCategoryExclusionsQuery = useQuery<{ movie: number; series: number }>({
+    queryKey: ['vod-category-exclusions', seriesCategoryFilter],
+    queryFn:  () => api.get(`/vod/categories/${seriesCategoryFilter}/exclusions/`).then((r) => r.data),
+    enabled:  seriesCategoryFilter != null,
+  })
+  const unplaceSeries = useMutation({
+    mutationFn: (body: { ids?: number[] }) => api.post('/vod/series/bulk-unplace/', {
+      category_id: seriesCategoryFilter, ids: body.ids,
+      search: body.ids ? undefined : (seriesSearch || undefined),
+      source_provider_id: body.ids ? undefined : (seriesProviderFilter ?? undefined),
+      no_tmdb: body.ids ? undefined : (seriesNoTmdb || undefined),
+    }),
+    onSuccess: (r) => {
+      setBulkSeriesResult(`Removed ${r.data.removed} from the category (they stay in the pool).`)
+      qc.invalidateQueries({ queryKey: ['vod-series'] })
+      qc.invalidateQueries({ queryKey: ['vod-category-exclusions'] })
+      setSelectedSeriesIds(new Set())
+    },
+    onError: (e: any) => setBulkSeriesResult(`Failed: ${e?.response?.data?.detail ?? e.message}`),
+  })
+  const allowRemovedSeries = useMutation({
+    mutationFn: () => api.post(`/vod/categories/${seriesCategoryFilter}/exclusions/clear/`),
+    onSuccess: (r) => {
+      setBulkSeriesResult(`${r.data.cleared} removed title(s) can be added by the category rule again.`)
+      qc.invalidateQueries({ queryKey: ['vod-category-exclusions'] })
+    },
   })
   const bulkArchiveSeries = useMutation({
     mutationFn: (body: { ids: number[]; archived: boolean }) => api.post('/vod/bulk-archive/', { content_type: 'series', ...body }),
@@ -7104,18 +7688,27 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
 
   // Fill (or replace) the episode names of every selected series from TMDB.
   // Always previews first; chunks the selection to the API's 50-per-call limit.
-  type EpisodeTitlesBulk = { series_checked: number; series_changed: number; episodes_renamed: number; series_without_tmdb: number; series_failed: number; failures: string[]; dry_run: boolean }
+  type EpisodeTitlesBulk = { series_checked: number; series_changed: number; episodes_renamed: number; series_without_tmdb: number; series_failed: number; failures: string[]; without_tmdb_examples?: string[]; dry_run: boolean }
   const [bulkEpisodeTitles, setBulkEpisodeTitles] = useState<EpisodeTitlesBulk | null>(null)
   const [bulkEpisodeTitlesReplace, setBulkEpisodeTitlesReplace] = useState(false)
+  const selectAllFilteredSeries = useMutation({
+    mutationFn: async () => (await api.get('/vod/series/ids/', { params: {
+      search: seriesSearch || undefined, category_id: seriesCategoryFilter ?? undefined, provider_id: seriesProviderFilter ?? undefined,
+      archived: seriesShowArchived, no_tmdb: seriesNoTmdb || undefined,
+    } })).data as { ids: number[]; total: number },
+    onSuccess: (r) => { setSelectedSeriesIds(new Set(r.ids)); setBulkEpisodeTitles(null) },
+    onError: (e: any) => setBulkSeriesResult(`Failed: ${e?.response?.data?.detail ?? e.message}`),
+  })
   const runBulkEpisodeTitles = useMutation({
     mutationFn: async (dry_run: boolean) => {
       const ids = Array.from(selectedSeriesIds)
-      const total: EpisodeTitlesBulk = { series_checked: 0, series_changed: 0, episodes_renamed: 0, series_without_tmdb: 0, series_failed: 0, failures: [], dry_run }
+      const total: EpisodeTitlesBulk = { series_checked: 0, series_changed: 0, episodes_renamed: 0, series_without_tmdb: 0, series_failed: 0, failures: [], without_tmdb_examples: [], dry_run }
       for (let i = 0; i < ids.length; i += 50) {
         const r = (await api.post('/vod/series/tmdb-episode-titles/bulk/', { ids: ids.slice(i, i + 50), mode: bulkEpisodeTitlesReplace ? 'replace' : 'fill', dry_run })).data as EpisodeTitlesBulk
         total.series_checked += r.series_checked; total.series_changed += r.series_changed; total.episodes_renamed += r.episodes_renamed
         total.series_without_tmdb += r.series_without_tmdb; total.series_failed += r.series_failed
         total.failures = [...total.failures, ...r.failures].slice(0, 5)
+        total.without_tmdb_examples = [...(total.without_tmdb_examples ?? []), ...(r.without_tmdb_examples ?? [])].slice(0, 5)
       }
       return total
     },
@@ -7791,6 +8384,18 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
                 <td className="py-1 pr-2 text-muted-foreground align-top">
                   {expandedCategoryAccessClientId === c.id ? (
                     <div className="p-1.5 border border-border rounded space-y-1.5 w-56">
+                      <div className="flex items-center gap-2 text-[10px]">
+                        <button
+                          className="text-primary hover:underline"
+                          onClick={() => setCategoryAccessForm(new Set([...movieCategories, ...seriesCategories].map((cat) => cat.id)))}
+                        >
+                          Select all
+                        </button>
+                        <button className="text-primary hover:underline" onClick={() => setCategoryAccessForm(new Set())}>
+                          Select none
+                        </button>
+                        <span className="text-muted-foreground ml-auto">{categoryAccessForm?.size ?? 0} selected</span>
+                      </div>
                       <div className="max-h-40 overflow-y-auto space-y-0.5">
                         <p className="text-[10px] uppercase text-muted-foreground">Movies</p>
                         {movieCategories.map((cat) => (
@@ -7961,6 +8566,8 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
           </div>
         )}
       </SectionCard>
+
+      <DownloadsCard />
 
       <SectionCard title="Dispatcharr Connections" icon={<Zap size={14} />}>
         <p className="text-xs text-muted-foreground">
@@ -9093,6 +9700,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
                       if (v !== (p.custom_user_agent ?? '')) setProviderUserAgent.mutate({ id: p.id, custom_user_agent: v })
                     }}
                   />
+                  <ProviderDownloadLimits key={`${p.id}-${p.download_speed_limit_mbps}-${p.download_max_concurrent}-${p.download_pause_seconds}`} provider={p} />
                 </td>
                 <td className="py-1 flex items-center gap-1.5">
                   {p.provider_type !== 'library' && (
@@ -11019,6 +11627,108 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
         </select>
       </SectionCard>
 
+      <SectionCard title="Genre Categories" icon={<Tag size={14} />}>
+        <p className="text-xs text-muted-foreground">
+          Replace provider categories like "EN - ACTION &amp; WAR" with plain genres. Pick genres from your library and
+          this creates one smart category for each (named after the genre, rule "genre contains …", so a title in
+          several genres appears in each). Names you already have are left alone. TMDB supplies the genres, so run
+          enrichment first. To show only these in Dispatcharr, turn off the other groups for the VOD Manager source
+          there.
+        </p>
+        <div className="flex items-center gap-2 flex-wrap">
+          <Button size="sm" variant="outline" disabled={loadGenres.isPending} onClick={() => loadGenres.mutate()}>
+            {loadGenres.isPending ? <Loader2 size={12} className="animate-spin mr-1" /> : null}
+            {genreCounts ? 'Reload genres' : 'Load genres'}
+          </Button>
+          <label className="flex items-center gap-1 text-xs text-muted-foreground" title="Providers write many odd genre spellings; hiding the rare ones keeps the list usable">
+            only genres with at least
+            <input className={inputCls('w-16')} type="number" min={1} value={genreMinItems} onChange={(e) => setGenreMinItems(Math.max(1, Number(e.target.value) || 1))} />
+            titles
+          </label>
+          {genreCounts && (
+            <>
+              <label className="flex items-center gap-1 text-xs"><input type="checkbox" checked={genreTypes.movie} onChange={(e) => setGenreTypes({ ...genreTypes, movie: e.target.checked })} /> Movies</label>
+              <label className="flex items-center gap-1 text-xs"><input type="checkbox" checked={genreTypes.series} onChange={(e) => setGenreTypes({ ...genreTypes, series: e.target.checked })} /> TV Shows</label>
+            </>
+          )}
+        </div>
+        {genreCounts && (() => {
+          const names = Array.from(new Set([...genreCounts.movie, ...genreCounts.series].map((g) => g.genre))).sort((a, b) => a.localeCompare(b))
+          const countOf = (list: { genre: string; count: number }[], g: string) => list.find((x) => x.genre === g)?.count ?? 0
+          return names.length === 0 ? (
+            <p className="text-xs text-muted-foreground">No genres found yet — run TMDB enrichment first.</p>
+          ) : (
+            <>
+              <div className="flex items-center gap-3 text-xs">
+                <button className="text-primary hover:underline" onClick={() => setGenrePicked(new Set(names))}>Select all</button>
+                <button className="text-primary hover:underline" onClick={() => setGenrePicked(new Set())}>Select none</button>
+                <span className="text-muted-foreground">{genrePicked.size} of {names.length} selected</span>
+              </div>
+              <div className="max-h-56 overflow-y-auto grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-4 gap-y-0.5 text-xs">
+                {names.map((g) => (
+                  <label key={g} className="flex items-center gap-1.5">
+                    <input
+                      type="checkbox"
+                      checked={genrePicked.has(g)}
+                      onChange={(e) => { const next = new Set(genrePicked); if (e.target.checked) next.add(g); else next.delete(g); setGenrePicked(next) }}
+                    />
+                    <span className="truncate">{g}</span>
+                    <span className="text-muted-foreground ml-auto">{countOf(genreCounts.movie, g)} movies · {countOf(genreCounts.series, g)} shows</span>
+                  </label>
+                ))}
+              </div>
+              <Button
+                size="sm"
+                disabled={genrePicked.size === 0 || (!genreTypes.movie && !genreTypes.series) || createGenreCategories.isPending}
+                onClick={() => { setGenreResult(null); createGenreCategories.mutate() }}
+              >
+                {createGenreCategories.isPending ? <Loader2 size={12} className="animate-spin mr-1" /> : null}
+                Create {genrePicked.size} genre categor{genrePicked.size === 1 ? 'y' : 'ies'}
+              </Button>
+            </>
+          )
+        })()}
+        {genreResult && <p className="text-xs text-muted-foreground">{genreResult}</p>}
+      </SectionCard>
+
+      <SectionCard title="Automatic TMDB Episode Titles" icon={<Sparkles size={14} />}>
+        <p className="text-xs text-muted-foreground">
+          When a provider adds episodes later, their names often arrive as "Episode 5" or with the season/episode code
+          in them. This fills those in from TMDB on its own (hourly, up to 100 series per pass) instead of you
+          re-running "Use TMDB episode titles". It only replaces blank or placeholder names — a name your provider
+          sent, or one you set or locked, is never changed.
+        </p>
+        <select
+          className={inputCls()}
+          style={{ width: '27rem', maxWidth: '100%' }}
+          value={autoEpisodeTitlesQuery.data?.mode ?? 'applied'}
+          disabled={autoEpisodeTitlesQuery.isLoading || setAutoEpisodeTitles.isPending}
+          onChange={(e) => setAutoEpisodeTitles.mutate(e.target.value)}
+        >
+          <option value="applied">Series I have applied TMDB episode titles to (default)</option>
+          <option value="all">Every series with a confirmed TMDB ID</option>
+          <option value="off">Off</option>
+        </select>
+        <div className="flex items-center gap-2 flex-wrap">
+          <Button
+            size="sm" variant="outline"
+            disabled={autoEpisodeTitlesQuery.data?.mode === 'off' || runAutoEpisodeTitles.isPending}
+            title="Runs one pass now with the mode above"
+            onClick={() => { setAutoEpisodeTitlesRunMsg(null); runAutoEpisodeTitles.mutate() }}
+          >
+            {runAutoEpisodeTitles.isPending ? <Loader2 size={12} className="animate-spin mr-1" /> : null}
+            Run now
+          </Button>
+          {autoEpisodeTitlesRunMsg && <span className="text-xs text-muted-foreground">{autoEpisodeTitlesRunMsg}</span>}
+          {!autoEpisodeTitlesRunMsg && autoEpisodeTitlesQuery.data?.status.last_result && (
+            <span className="text-xs text-muted-foreground">
+              Last pass {autoEpisodeTitlesQuery.data.status.last_run_at ? new Date(autoEpisodeTitlesQuery.data.status.last_run_at * 1000).toLocaleString() : ''}:
+              checked {autoEpisodeTitlesQuery.data.status.last_result.series_checked}, renamed {autoEpisodeTitlesQuery.data.status.last_result.episodes_renamed} episode(s)
+            </span>
+          )}
+        </div>
+      </SectionCard>
+
       <SectionCard title="Client Title Format" icon={<Type size={14} />}>
         <p className="text-xs text-muted-foreground">
           Controls only what VOD clients (Dispatcharr, TiviMate, etc.) see in the title text — the pool's own name/
@@ -11337,6 +12047,14 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
           >
             <Archive size={12} className="mr-1" />Archived
           </Button>
+          <Button
+            size="sm"
+            variant={movieNoTmdb ? 'default' : 'outline'}
+            onClick={() => { setMovieNoTmdb((v) => !v); setMovieOffset(0) }}
+            title={movieNoTmdb ? 'Showing only movies with no TMDB ID — click to show everything' : 'Show only movies that have no TMDB ID yet (including ones Metadata Review does not list)'}
+          >
+            No TMDB ID
+          </Button>
           <select
             className={inputCls()}
             title="Show only the movies placed in a category"
@@ -11436,11 +12154,51 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
               search: movieSearch || undefined,
               source_category_id: movieCategoryFilter ?? undefined,
               source_provider_id: movieProviderFilter ?? undefined,
+              no_tmdb: movieNoTmdb || undefined,
             })}
             title="Places every movie matching the current search/category filter, not just this page"
           >
             Place all filtered ({moviesQuery.data?.total ?? 0})
           </Button>
+          {movieCategoryFilter != null && (
+            <>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={selectedMovieIds.size === 0 || unplaceMovie.isPending}
+                title="Takes the selected titles out of the category you are filtering on. They stay in the pool; a smart rule will not put them back."
+                onClick={() => askConfirm(`Remove ${selectedMovieIds.size} selected from this category? They stay in the pool.`, () => unplaceMovie.mutate({ ids: Array.from(selectedMovieIds) }))}
+              >
+                <FolderMinus size={12} className="mr-1" />Remove selected from category ({selectedMovieIds.size})
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={!moviesQuery.data?.total || unplaceMovie.isPending}
+                title="Takes every title matching the current filters out of this category, across all pages"
+                onClick={() => askConfirm(`Remove all ${moviesQuery.data?.total ?? 0} filtered titles from this category? They stay in the pool.`, () => unplaceMovie.mutate({}))}
+              >
+                Remove all filtered from category ({moviesQuery.data?.total ?? 0})
+              </Button>
+              {((movieCategoryExclusionsQuery.data?.movie ?? 0) > 0) && (
+                <span className="text-xs text-muted-foreground">
+                  {movieCategoryExclusionsQuery.data?.movie} removed title(s) are kept out of this category.{' '}
+                  <button className="underline decoration-dotted hover:text-foreground" onClick={() => allowRemovedMovie.mutate()}>Allow them again</button>
+                </span>
+              )}
+            </>
+          )}
+          {downloadsEnabled && (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={selectedMovieIds.size === 0 || queueDownload.isPending}
+              title="Saves the selected movies as files in your download folder (uses the default preset from Configuration → Downloads)"
+              onClick={() => queueDownload.mutate({ movie_ids: Array.from(selectedMovieIds) })}
+            >
+              <Download size={12} className="mr-1" />Download selected ({selectedMovieIds.size})
+            </Button>
+          )}
           <Button
             size="sm"
             variant="outline"
@@ -11465,6 +12223,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
               onToggleSelect={(shiftKey) => toggleMovieSelected(m.id, i, shiftKey)}
               mode={movieViewMode}
               onToggleArchived={() => toggleMovieArchived.mutate({ id: m.id, archived: !m.review_excluded })}
+              onRemoveFromCategory={movieCategoryFilter != null ? () => unplaceMovie.mutate({ ids: [m.id] }) : undefined}
             />
           ))}
         </div>
@@ -11519,6 +12278,14 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
             title={seriesShowArchived ? 'Showing archived series — click to return to the active pool' : 'Show only archived series'}
           >
             <Archive size={12} className="mr-1" />Archived
+          </Button>
+          <Button
+            size="sm"
+            variant={seriesNoTmdb ? 'default' : 'outline'}
+            onClick={() => { setSeriesNoTmdb((v) => !v); setSeriesOffset(0) }}
+            title={seriesNoTmdb ? 'Showing only series with no TMDB ID — click to show everything' : 'Show only series that have no TMDB ID yet (including ones Metadata Review does not list)'}
+          >
+            No TMDB ID
           </Button>
           <select
             className={inputCls()}
@@ -11593,6 +12360,14 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
             Select all visible ({seriesQuery.data?.items.length ?? 0})
           </button>
           <button
+            className="text-xs text-muted-foreground hover:text-foreground underline decoration-dotted disabled:opacity-50"
+            disabled={!seriesQuery.data?.total || selectAllFilteredSeries.isPending}
+            title="Selects every series matching the current search, provider, category and No TMDB ID filters, across all pages"
+            onClick={() => selectAllFilteredSeries.mutate()}
+          >
+            {selectAllFilteredSeries.isPending ? 'Selecting…' : `Select all filtered (${seriesQuery.data?.total ?? 0})`}
+          </button>
+          <button
             className="text-xs text-muted-foreground hover:text-foreground underline decoration-dotted"
             onClick={() => setSelectedSeriesIds(new Set())}
           >
@@ -11619,11 +12394,51 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
               search: seriesSearch || undefined,
               source_category_id: seriesCategoryFilter ?? undefined,
               source_provider_id: seriesProviderFilter ?? undefined,
+              no_tmdb: seriesNoTmdb || undefined,
             })}
             title="Places every series matching the current search/category filter, not just this page"
           >
             Place all filtered ({seriesQuery.data?.total ?? 0})
           </Button>
+          {seriesCategoryFilter != null && (
+            <>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={selectedSeriesIds.size === 0 || unplaceSeries.isPending}
+                title="Takes the selected titles out of the category you are filtering on. They stay in the pool; a smart rule will not put them back."
+                onClick={() => askConfirm(`Remove ${selectedSeriesIds.size} selected from this category? They stay in the pool.`, () => unplaceSeries.mutate({ ids: Array.from(selectedSeriesIds) }))}
+              >
+                <FolderMinus size={12} className="mr-1" />Remove selected from category ({selectedSeriesIds.size})
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={!seriesQuery.data?.total || unplaceSeries.isPending}
+                title="Takes every title matching the current filters out of this category, across all pages"
+                onClick={() => askConfirm(`Remove all ${seriesQuery.data?.total ?? 0} filtered titles from this category? They stay in the pool.`, () => unplaceSeries.mutate({}))}
+              >
+                Remove all filtered from category ({seriesQuery.data?.total ?? 0})
+              </Button>
+              {((seriesCategoryExclusionsQuery.data?.series ?? 0) > 0) && (
+                <span className="text-xs text-muted-foreground">
+                  {seriesCategoryExclusionsQuery.data?.series} removed title(s) are kept out of this category.{' '}
+                  <button className="underline decoration-dotted hover:text-foreground" onClick={() => allowRemovedSeries.mutate()}>Allow them again</button>
+                </span>
+              )}
+            </>
+          )}
+          {downloadsEnabled && (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={selectedSeriesIds.size === 0 || queueDownload.isPending}
+              title="Saves the selected shows (every episode) as files in your download folder (uses the default preset from Configuration → Downloads)"
+              onClick={() => queueDownload.mutate({ series_ids: Array.from(selectedSeriesIds) })}
+            >
+              <Download size={12} className="mr-1" />Download selected ({selectedSeriesIds.size})
+            </Button>
+          )}
           <Button
             size="sm"
             variant="outline"
@@ -11647,7 +12462,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
             <div className="w-full flex items-center gap-2 flex-wrap rounded border border-border px-2 py-1.5 text-xs">
               <span>
                 {bulkEpisodeTitles.dry_run ? 'Would rename' : 'Renamed'} {bulkEpisodeTitles.episodes_renamed} episode(s) across {bulkEpisodeTitles.series_changed} of {bulkEpisodeTitles.series_checked} series
-                {bulkEpisodeTitles.series_without_tmdb ? ` · ${bulkEpisodeTitles.series_without_tmdb} without a TMDB match` : ''}
+                {bulkEpisodeTitles.series_without_tmdb ? ` · ${bulkEpisodeTitles.series_without_tmdb} without a TMDB match${bulkEpisodeTitles.without_tmdb_examples?.length ? ` (e.g. ${bulkEpisodeTitles.without_tmdb_examples.join(', ')} — use the No TMDB ID filter to find them)` : ''}` : ''}
                 {bulkEpisodeTitles.series_failed ? ` · ${bulkEpisodeTitles.series_failed} failed` : ''}
                 {bulkEpisodeTitles.failures.length ? ` (${bulkEpisodeTitles.failures.join('; ')})` : ''}
               </span>
@@ -11677,6 +12492,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
               onToggleSelect={(shiftKey) => toggleSeriesSelected(s.id, i, shiftKey)}
               mode={seriesViewMode}
               onToggleArchived={() => toggleSeriesArchived.mutate({ id: s.id, archived: !s.review_excluded })}
+              onRemoveFromCategory={seriesCategoryFilter != null ? () => unplaceSeries.mutate({ ids: [s.id] }) : undefined}
             />
           ))}
         </div>

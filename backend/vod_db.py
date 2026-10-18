@@ -1101,6 +1101,41 @@ def _migrate_encrypt_plaintext_credentials(conn: sqlite3.Connection) -> None:
 def _migrate(conn: sqlite3.Connection) -> None:
     """Add columns to pre-existing tables that predate them. CREATE TABLE IF
     NOT EXISTS above only helps fresh databases."""
+    # An item the user removed from a category stays out of it even when a smart
+    # rule / list sync would place it again; placing it by hand clears the entry.
+    conn.execute("""CREATE TABLE IF NOT EXISTS category_exclusions (
+        category_id  INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+        content_type TEXT NOT NULL,
+        item_id      INTEGER NOT NULL,
+        created_at   TEXT,
+        PRIMARY KEY (category_id, content_type, item_id)
+    )""")
+    # Opt-in file downloads (see vod_downloader.py): one row per movie/episode
+    # queued for download into the library folder.
+    conn.execute("""CREATE TABLE IF NOT EXISTS download_jobs (
+        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind               TEXT NOT NULL,           -- 'movie' | 'episode'
+        item_id            INTEGER NOT NULL,
+        source_id          INTEGER,                 -- exactly this source, or NULL = normal failover order
+        prefer_provider_id INTEGER,                 -- try this provider first when source_id is NULL
+        title              TEXT NOT NULL,
+        preset             TEXT NOT NULL DEFAULT 'original',
+        audio_languages    TEXT,                    -- NULL = follow the setting; 'all' or e.g. 'eng,jpn' overrides it
+        status             TEXT NOT NULL DEFAULT 'queued',  -- queued|running|done|failed|cancelled
+        note               TEXT,
+        error              TEXT,
+        bytes_done         INTEGER NOT NULL DEFAULT 0,
+        total_bytes        INTEGER,
+        progress           REAL NOT NULL DEFAULT 0,
+        provider_name      TEXT,
+        final_path         TEXT,
+        final_size         INTEGER,
+        next_try_at        REAL NOT NULL DEFAULT 0,
+        created_at         TEXT NOT NULL,
+        started_at         TEXT,
+        finished_at        TEXT
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_download_jobs_status ON download_jobs(status)")
     migrations = [
         ("movies", "last_enriched_at", "TEXT"),
         # 1 = the name was set deliberately (manual edit or "Use TMDB episode
@@ -1112,6 +1147,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("movies", "trailer_attempts", "INTEGER NOT NULL DEFAULT 0"),
         ("movies", "trailer_checked_at", "TEXT"),
         ("movies", "trailer_last_error", "TEXT"),
+        # auto_episode_titles: the user applied TMDB episode titles to this
+        # series, so new placeholder-named episodes are filled in automatically.
+        # episode_titles_checked_at: last automatic pass (epoch seconds).
+        ("series", "auto_episode_titles", "INTEGER NOT NULL DEFAULT 0"),
+        ("series", "episode_titles_checked_at", "REAL"),
         ("movies", "cast_list", "TEXT"),
         ("movies", "director", "TEXT"),
         ("movies", "country", "TEXT"),
@@ -1145,6 +1185,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("movies", "needs_year_review", "INTEGER NOT NULL DEFAULT 0"),
         ("series", "needs_year_review", "INTEGER NOT NULL DEFAULT 0"),
         ("providers", "custom_user_agent", "TEXT"),
+        # per-provider download pacing; NULL = use the global default (see vod_downloader.provider_policy)
+        ("download_jobs", "audio_languages", "TEXT"),
+        ("providers", "download_speed_limit_mbps", "INTEGER"),
+        ("providers", "download_max_concurrent", "INTEGER"),
+        ("providers", "download_pause_seconds", "INTEGER"),
         ("providers", "last_catalog_refresh_at", "TEXT"),
         ("xc_clients", "category_allowlist", "TEXT"),
         ("categories", "ai_description", "TEXT"),
@@ -3891,6 +3936,20 @@ def set_provider_max_streams(provider_id: int, max_streams: int) -> None:
             conn.execute("UPDATE providers SET max_streams=?, updated_at=? WHERE id=?", (max_streams, _now(), provider_id))
             _commit_with_retry(conn)
             conn.close()
+        finally:
+            conn.close()
+
+
+def set_provider_download_limits(provider_id: int, speed_limit_mbps: int | None, max_concurrent: int | None,
+                                 pause_seconds: int | None) -> None:
+    """None = follow the global download default for that setting."""
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            conn.execute(
+                "UPDATE providers SET download_speed_limit_mbps=?, download_max_concurrent=?, download_pause_seconds=?, updated_at=? WHERE id=?",
+                (speed_limit_mbps, max_concurrent, pause_seconds, _now(), provider_id))
+            _commit_with_retry(conn)
         finally:
             conn.close()
 
@@ -6839,7 +6898,7 @@ def upsert_movie(name: str, year: int | None = None, **fields) -> int:
 
 
 def _movie_filter_clause(
-    search: str | None, category_id: int | None, provider_id: int | None = None, archived: bool = False,
+    search: str | None, category_id: int | None, provider_id: int | None = None, archived: bool = False, no_tmdb: bool = False,
 ) -> tuple[str, list]:
     where = ["m.review_excluded = ?"]
     params: list = [1 if archived else 0]
@@ -6860,17 +6919,19 @@ def _movie_filter_clause(
     if provider_id is not None:
         where.append("m.id IN (SELECT movie_id FROM movie_sources WHERE provider_id=?)")
         params.append(provider_id)
+    if no_tmdb:
+        where.append("m.tmdb_id IS NULL")
     clause = f"WHERE {' AND '.join(where)}" if where else ""
     return clause, params
 
 
 def list_movies(
     limit: int = 50, offset: int = 0, search: str | None = None, category_id: int | None = None,
-    provider_id: int | None = None, archived: bool = False,
+    provider_id: int | None = None, archived: bool = False, no_tmdb: bool = False,
 ) -> list[dict]:
     conn = _connect()
     try:
-        clause, params = _movie_filter_clause(search, category_id, provider_id, archived)
+        clause, params = _movie_filter_clause(search, category_id, provider_id, archived, no_tmdb)
         rows = conn.execute(
             f"SELECT m.* FROM movies m {clause} ORDER BY m.name LIMIT ? OFFSET ?",
             (*params, limit, offset),
@@ -6882,11 +6943,11 @@ def list_movies(
 
 
 def count_movies(
-    search: str | None = None, category_id: int | None = None, provider_id: int | None = None, archived: bool = False,
+    search: str | None = None, category_id: int | None = None, provider_id: int | None = None, archived: bool = False, no_tmdb: bool = False,
 ) -> int:
     conn = _connect()
     try:
-        clause, params = _movie_filter_clause(search, category_id, provider_id, archived)
+        clause, params = _movie_filter_clause(search, category_id, provider_id, archived, no_tmdb)
         n = conn.execute(f"SELECT COUNT(*) c FROM movies m {clause}", params).fetchone()["c"]
         conn.close()
         return n
@@ -6895,11 +6956,11 @@ def count_movies(
 
 
 def list_all_movie_ids(
-    search: str | None = None, category_id: int | None = None, provider_id: int | None = None, archived: bool = False,
+    search: str | None = None, category_id: int | None = None, provider_id: int | None = None, archived: bool = False, no_tmdb: bool = False,
 ) -> list[int]:
     conn = _connect()
     try:
-        clause, params = _movie_filter_clause(search, category_id, provider_id, archived)
+        clause, params = _movie_filter_clause(search, category_id, provider_id, archived, no_tmdb)
         rows = conn.execute(f"SELECT m.id FROM movies m {clause}", params).fetchall()
         conn.close()
         return [r["id"] for r in rows]
@@ -7642,17 +7703,79 @@ def list_movie_placements_for_category(category_id: int) -> list[dict]:
 
 
 def remove_movie_from_category(movie_id: int, category_id: int) -> None:
+    remove_items_from_category("movie", [movie_id], category_id)
+
+
+def _excluded_ids(conn, content_type: str, category_id: int, ids: list[int]) -> set[int]:
+    out: set[int] = set()
+    for chunk in _chunked(ids):
+        placeholders = ",".join("?" for _ in chunk)
+        out.update(r["item_id"] for r in conn.execute(
+            f"SELECT item_id FROM category_exclusions WHERE category_id=? AND content_type=? AND item_id IN ({placeholders})",
+            (category_id, content_type, *chunk),
+        ).fetchall())
+    return out
+
+
+def remove_items_from_category(content_type: str, item_ids: list[int], category_id: int) -> int:
+    """Takes movies/series out of one category (they stay in the pool) and records
+    that they were removed on purpose, so a smart rule or list sync won't put them
+    straight back. Placing one by hand again lifts the exclusion. Returns how many
+    were actually placed there."""
+    if content_type not in ("movie", "series"):
+        raise ValueError("content_type must be 'movie' or 'series'")
+    table, col = ("movie_category_placements", "movie_id") if content_type == "movie" else ("series_category_placements", "series_id")
+    removed = 0
     with _WRITE_LOCK:
         conn = _connect()
         try:
-            conn.execute(
-                "DELETE FROM movie_category_placements WHERE movie_id=? AND category_id=?",
-                (movie_id, category_id),
-            )
+            for chunk in _chunked(list(item_ids)):
+                placeholders = ",".join("?" for _ in chunk)
+                removed += conn.execute(
+                    f"DELETE FROM {table} WHERE category_id=? AND {col} IN ({placeholders})", (category_id, *chunk)).rowcount
+                conn.executemany(
+                    "INSERT OR IGNORE INTO category_exclusions (category_id, content_type, item_id, created_at) VALUES (?,?,?,?)",
+                    [(category_id, content_type, i, _now()) for i in chunk],
+                )
             _commit_with_retry(conn)
-            conn.close()
+            return removed
         finally:
             conn.close()
+
+
+def clear_category_exclusions(category_id: int, content_type: str | None = None, item_ids: list[int] | None = None) -> int:
+    """Lets removed items be placed by rules again (all of a category's, or just these ids)."""
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            if item_ids is None:
+                sql, params = "DELETE FROM category_exclusions WHERE category_id=?", [category_id]
+                if content_type:
+                    sql += " AND content_type=?"
+                    params.append(content_type)
+                n = conn.execute(sql, params).rowcount
+            else:
+                n = 0
+                for chunk in _chunked(list(item_ids)):
+                    placeholders = ",".join("?" for _ in chunk)
+                    n += conn.execute(
+                        f"DELETE FROM category_exclusions WHERE category_id=? AND content_type=? AND item_id IN ({placeholders})",
+                        (category_id, content_type, *chunk),
+                    ).rowcount
+            _commit_with_retry(conn)
+            return n
+        finally:
+            conn.close()
+
+
+def count_category_exclusions(category_id: int) -> dict:
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT content_type, COUNT(*) c FROM category_exclusions WHERE category_id=? GROUP BY content_type", (category_id,)).fetchall()
+        return {r["content_type"]: r["c"] for r in rows}
+    finally:
+        conn.close()
 
 
 def remove_movie_from_all_categories(movie_id: int) -> None:
@@ -7673,6 +7796,11 @@ def remove_movie_from_all_categories(movie_id: int) -> None:
 
 
 def place_movie_in_category(movie_id: int, category_id: int) -> int:
+    clear_category_exclusions(category_id, "movie", [movie_id])
+    return _place_movie_in_category(movie_id, category_id)
+
+
+def _place_movie_in_category(movie_id: int, category_id: int) -> int:
     """Assign a movie to a category, returning the export_stream_id to use in the XC feed.
 
     The first placement for a given movie uses the clean name; subsequent
@@ -7763,7 +7891,7 @@ def _chunked(ids: list[int], size: int = 900) -> list[list[int]]:
     return [ids[i:i + size] for i in range(0, len(ids), size)]
 
 
-def bulk_place_movies_in_category(movie_ids: list[int], category_id: int) -> int:
+def bulk_place_movies_in_category(movie_ids: list[int], category_id: int, respect_exclusions: bool = False) -> int:
     """Batch equivalent of place_movie_in_category — one connection/transaction
     for the whole list instead of one round-trip per movie. Needed because
     smart-category evaluation (e.g. a catch-all rule matching the entire
@@ -7808,6 +7936,8 @@ def bulk_place_movies_in_category(movie_ids: list[int], category_id: int) -> int
                 ).fetchall())
             if flagged:
                 logger.info("[vod_db] skipping %d movie(s) still needing year review for category=%s", len(flagged), category_id)
+            if respect_exclusions:
+                already |= _excluded_ids(conn, "movie", category_id, movie_ids)
             to_place = [mid for mid in movie_ids if mid not in already and mid not in flagged]
             # A smart-category result can contain a card merged away after rule
             # evaluation. Skip vanished ids instead of leaving a failed FK insert's
@@ -8051,7 +8181,7 @@ def upsert_series(name: str, year: int | None = None, **fields) -> int:
 
 
 def _series_filter_clause(
-    search: str | None, category_id: int | None, provider_id: int | None = None, archived: bool = False,
+    search: str | None, category_id: int | None, provider_id: int | None = None, archived: bool = False, no_tmdb: bool = False,
 ) -> tuple[str, list]:
     where = ["s.review_excluded = ?"]
     params: list = [1 if archived else 0]
@@ -8075,17 +8205,19 @@ def _series_filter_clause(
         # ones that haven't been detail-enriched yet.
         where.append("s.id IN (SELECT series_id FROM series_sources WHERE provider_id=?)")
         params.append(provider_id)
+    if no_tmdb:
+        where.append("s.tmdb_id IS NULL")
     clause = f"WHERE {' AND '.join(where)}" if where else ""
     return clause, params
 
 
 def list_series(
     limit: int = 50, offset: int = 0, search: str | None = None, category_id: int | None = None,
-    provider_id: int | None = None, archived: bool = False,
+    provider_id: int | None = None, archived: bool = False, no_tmdb: bool = False,
 ) -> list[dict]:
     conn = _connect()
     try:
-        clause, params = _series_filter_clause(search, category_id, provider_id, archived)
+        clause, params = _series_filter_clause(search, category_id, provider_id, archived, no_tmdb)
         rows = conn.execute(
             f"""SELECT s.*, p.name AS import_provider_name FROM series s
                 LEFT JOIN providers p ON p.id = s.import_provider_id
@@ -8099,11 +8231,11 @@ def list_series(
 
 
 def count_series(
-    search: str | None = None, category_id: int | None = None, provider_id: int | None = None, archived: bool = False,
+    search: str | None = None, category_id: int | None = None, provider_id: int | None = None, archived: bool = False, no_tmdb: bool = False,
 ) -> int:
     conn = _connect()
     try:
-        clause, params = _series_filter_clause(search, category_id, provider_id, archived)
+        clause, params = _series_filter_clause(search, category_id, provider_id, archived, no_tmdb)
         n = conn.execute(f"SELECT COUNT(*) c FROM series s {clause}", params).fetchone()["c"]
         conn.close()
         return n
@@ -8112,11 +8244,11 @@ def count_series(
 
 
 def list_all_series_ids(
-    search: str | None = None, category_id: int | None = None, provider_id: int | None = None, archived: bool = False,
+    search: str | None = None, category_id: int | None = None, provider_id: int | None = None, archived: bool = False, no_tmdb: bool = False,
 ) -> list[int]:
     conn = _connect()
     try:
-        clause, params = _series_filter_clause(search, category_id, provider_id, archived)
+        clause, params = _series_filter_clause(search, category_id, provider_id, archived, no_tmdb)
         rows = conn.execute(f"SELECT s.id FROM series s {clause}", params).fetchall()
         conn.close()
         return [r["id"] for r in rows]
@@ -9005,17 +9137,7 @@ def list_series_placements_for_category(category_id: int) -> list[dict]:
 
 
 def remove_series_from_category(series_id: int, category_id: int) -> None:
-    with _WRITE_LOCK:
-        conn = _connect()
-        try:
-            conn.execute(
-                "DELETE FROM series_category_placements WHERE series_id=? AND category_id=?",
-                (series_id, category_id),
-            )
-            _commit_with_retry(conn)
-            conn.close()
-        finally:
-            conn.close()
+    remove_items_from_category("series", [series_id], category_id)
 
 
 def remove_series_from_all_categories(series_id: int) -> None:
@@ -9031,6 +9153,11 @@ def remove_series_from_all_categories(series_id: int) -> None:
 
 
 def place_series_in_category(series_id: int, category_id: int) -> int:
+    clear_category_exclusions(category_id, "series", [series_id])
+    return _place_series_in_category(series_id, category_id)
+
+
+def _place_series_in_category(series_id: int, category_id: int) -> int:
     """Same virtual-file mechanism as place_movie_in_category, scoped to series."""
     with _WRITE_LOCK:
         conn = _connect()
@@ -9081,7 +9208,7 @@ def place_series_in_category(series_id: int, category_id: int) -> int:
             conn.close()
 
 
-def bulk_place_series_in_category(series_ids: list[int], category_id: int) -> int:
+def bulk_place_series_in_category(series_ids: list[int], category_id: int, respect_exclusions: bool = False) -> int:
     """Batch equivalent of place_series_in_category — see bulk_place_movies_in_category
     (including the _chunked rationale and why this holds _WRITE_LOCK for the
     whole call)."""
@@ -9105,6 +9232,8 @@ def bulk_place_series_in_category(series_ids: list[int], category_id: int) -> in
                 ).fetchall())
             if flagged:
                 logger.info("[vod_db] skipping %d series still needing year review for category=%s", len(flagged), category_id)
+            if respect_exclusions:
+                already |= _excluded_ids(conn, "series", category_id, series_ids)
             to_place = [sid for sid in series_ids if sid not in already and sid not in flagged]
             existing: set[int] = set()
             for chunk in _chunked(to_place):
@@ -14384,6 +14513,109 @@ def apply_tmdb_episode_titles(series_id: int, names: dict[tuple[int, int], str],
             conn.close()
 
 
+def list_genre_counts(min_items: int = 1) -> dict[str, list[dict]]:
+    """Distinct genres across the active (non-archived) pool with how many movies /
+    series carry each. Providers write several genres into one string, separated by
+    commas, slashes or pipes ("Action, Comedy", "Comedia / Drama"). Genres on fewer
+    than `min_items` titles are left out."""
+    import html
+    import re
+    conn = _connect()
+    try:
+        out: dict[str, list[dict]] = {}
+        for key, table in (("movie", "movies"), ("series", "series")):
+            counts: dict[str, int] = {}
+            display: dict[str, str] = {}
+            for r in conn.execute(f"SELECT genre FROM {table} WHERE review_excluded=0 AND genre IS NOT NULL AND genre != ''"):
+                for g in {x.strip() for x in re.split(r"[,/|]", html.unescape(r["genre"])) if x.strip()}:
+                    low = g.lower()
+                    counts[low] = counts.get(low, 0) + 1
+                    display.setdefault(low, g)
+            out[key] = sorted(({"genre": display[k], "count": n} for k, n in counts.items() if n >= min_items), key=lambda x: (-x["count"], x["genre"]))
+        return out
+    finally:
+        conn.close()
+
+
+def create_genre_categories(genres: list[str], content_types: list[str], min_items: int = 1) -> dict:
+    """One smart category per (content type, genre), named after the genre, with a
+    'genre contains <genre>' rule. A category that already has that name is left
+    alone and reported as skipped; genres with fewer than `min_items` titles are
+    not created. Returns {"created": [{id, name, content_type}], "skipped": [...]}."""
+    import json
+    counts = list_genre_counts()
+    created: list[dict] = []
+    skipped: list[dict] = []
+    for ctype in content_types:
+        have = {g["genre"].lower(): g["count"] for g in counts.get(ctype, [])}
+        existing = {c["name"].lower() for c in list_categories(ctype)}
+        for genre in genres:
+            name = genre.strip()
+            if not name or have.get(name.lower(), 0) < min_items:
+                skipped.append({"name": name, "content_type": ctype, "reason": "no titles with this genre"})
+            elif name.lower() in existing:
+                skipped.append({"name": name, "content_type": ctype, "reason": "a category with this name already exists"})
+            else:
+                rule = json.dumps({"match": "all", "conditions": [{"field": "genre", "op": "contains", "value": name}]})
+                cid = upsert_category(name, ctype, True, 0, rule)
+                existing.add(name.lower())
+                created.append({"id": cid, "name": name, "content_type": ctype})
+    return {"created": created, "skipped": skipped}
+
+
+def mark_series_auto_episode_titles(series_ids: list[int]) -> None:
+    """Opt these series in to automatic TMDB episode titles (the user applied them)."""
+    if not series_ids:
+        return
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            conn.executemany(
+                "UPDATE series SET auto_episode_titles=1, episode_titles_checked_at=NULL WHERE id=?", [(i,) for i in series_ids])
+            _commit_with_retry(conn)
+        finally:
+            conn.close()
+
+
+def mark_series_episode_titles_checked(series_id: int, when: float) -> None:
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            conn.execute("UPDATE series SET episode_titles_checked_at=? WHERE id=?", (when, series_id))
+            _commit_with_retry(conn)
+        finally:
+            conn.close()
+
+
+def list_series_due_for_auto_episode_titles(applied_only: bool, checked_before: float, limit: int) -> list[dict]:
+    """Series with a TMDB id that have at least one unlocked placeholder-named
+    episode and were not checked since `checked_before`. Placeholder detection is
+    the same rule the manual fill uses, so a series is only sent to TMDB when a
+    fill could actually change something."""
+    conn = _connect()
+    try:
+        flag = "AND s.auto_episode_titles=1" if applied_only else ""
+        rows = conn.execute(
+            f"""SELECT s.id, s.name, s.tmdb_id, e.name AS ep_name FROM series s
+                JOIN episodes e ON e.series_id = s.id AND e.name_locked = 0
+                WHERE s.tmdb_id IS NOT NULL AND s.review_excluded = 0 {flag}
+                  AND (s.episode_titles_checked_at IS NULL OR s.episode_titles_checked_at < ?)
+                ORDER BY COALESCE(s.episode_titles_checked_at, 0), s.id""",
+            (checked_before,),
+        ).fetchall()
+        out: dict[int, dict] = {}
+        for r in rows:
+            if r["id"] in out:
+                continue
+            if _is_placeholder_episode_name(r["ep_name"], r["name"]):
+                out[r["id"]] = {"id": r["id"], "name": r["name"], "tmdb_id": r["tmdb_id"]}
+                if len(out) >= limit:
+                    break
+        return list(out.values())
+    finally:
+        conn.close()
+
+
 def rename_item(content_type: str, item_id: int, name: str, year: int | None) -> dict:
     """Manually corrects a movie/series' own name/year -- the general
     escape hatch for whatever a provider's own catalog data got wrong (most
@@ -14585,6 +14817,9 @@ def _condition_matches(row: dict, cond: dict) -> bool:
     if field not in _SMART_CATEGORY_FIELDS:
         return False
     actual = row.get(_FIELD_ALIASES.get(field, field))
+    if field == "genre" and isinstance(actual, str) and "&" in actual:
+        import html
+        actual = html.unescape(actual)  # some providers store "Action &amp; Adventure"
 
     if op == "contains":
         return str(value or "").strip().lower() in str(actual or "").lower()
@@ -14767,9 +15002,9 @@ def evaluate_smart_category(category_id: int, item_ids: list[int] | set[int] | N
 
         matched_ids = [row["id"] for row in rows if _rule_matches(row, rule)]
         if category["content_type"] == "movie":
-            newly_placed = bulk_place_movies_in_category(matched_ids, category_id)
+            newly_placed = bulk_place_movies_in_category(matched_ids, category_id, respect_exclusions=True)
         else:
-            newly_placed = bulk_place_series_in_category(matched_ids, category_id)
+            newly_placed = bulk_place_series_in_category(matched_ids, category_id, respect_exclusions=True)
         mark_category_evaluated(category_id)
 
         return {"evaluated": len(rows), "matched": len(matched_ids), "newly_placed": newly_placed}
@@ -14926,3 +15161,157 @@ def list_watch_sessions(
         return [dict(r) for r in rows]
     finally:
         conn.close()
+
+
+# ── Opt-in downloads (vod_downloader.py) ─────────────────────────────────────
+
+def enqueue_download(kind: str, item_id: int, title: str, preset: str, source_id: int | None = None,
+                     prefer_provider_id: int | None = None, audio_languages: str | None = None) -> int | None:
+    """Queues one movie/episode. Returns the new job id, or None when the same
+    item is already queued or running (so a double click never downloads twice)."""
+    if kind not in ("movie", "episode"):
+        raise ValueError("kind must be 'movie' or 'episode'")
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            if conn.execute("SELECT 1 FROM download_jobs WHERE kind=? AND item_id=? AND status IN ('queued','running')",
+                            (kind, item_id)).fetchone():
+                return None
+            cur = conn.execute(
+                "INSERT INTO download_jobs (kind, item_id, source_id, prefer_provider_id, title, preset, audio_languages, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (kind, item_id, source_id, prefer_provider_id, title, preset, audio_languages, _now()))
+            _commit_with_retry(conn)
+            return cur.lastrowid
+        finally:
+            conn.close()
+
+
+def get_download_job(job_id: int) -> dict | None:
+    conn = _connect()
+    try:
+        row = conn.execute("SELECT * FROM download_jobs WHERE id=?", (job_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def list_download_jobs(limit: int = 300) -> list[dict]:
+    """Active work first (running, then queued in order), then the most recent finished."""
+    conn = _connect()
+    try:
+        rows = conn.execute("""
+            SELECT * FROM download_jobs
+            ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,
+                     CASE WHEN status IN ('running','queued') THEN id END ASC,
+                     id DESC
+            LIMIT ?""", (limit,)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def download_job_counts() -> dict:
+    conn = _connect()
+    try:
+        return {r["status"]: r["c"] for r in conn.execute("SELECT status, COUNT(*) c FROM download_jobs GROUP BY status")}
+    finally:
+        conn.close()
+
+
+def next_download_jobs(limit: int, now: float, exclude_ids: set[int] | None = None) -> list[dict]:
+    exclude_ids = exclude_ids or set()
+    conn = _connect()
+    try:
+        rows = conn.execute("SELECT * FROM download_jobs WHERE status='queued' AND next_try_at<=? ORDER BY id LIMIT ?",
+                            (now, limit + len(exclude_ids))).fetchall()
+        return [dict(r) for r in rows if r["id"] not in exclude_ids][:limit]
+    finally:
+        conn.close()
+
+
+_DOWNLOAD_FIELDS = {"status", "note", "error", "bytes_done", "total_bytes", "progress", "provider_name",
+                    "final_path", "final_size", "next_try_at", "started_at", "finished_at"}
+
+
+def update_download_job(job_id: int, only_if_status: tuple[str, ...] | None = None, **fields) -> bool:
+    """Updates a job. only_if_status guards against overwriting a cancel that
+    arrived while the worker was mid-write."""
+    bad = set(fields) - _DOWNLOAD_FIELDS
+    if bad:
+        raise ValueError(f"unknown download field(s): {sorted(bad)}")
+    if not fields:
+        return False
+    sql = "UPDATE download_jobs SET " + ", ".join(f"{k}=?" for k in fields) + " WHERE id=?"
+    params = [*fields.values(), job_id]
+    if only_if_status:
+        sql += " AND status IN (" + ",".join("?" for _ in only_if_status) + ")"
+        params += list(only_if_status)
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            n = conn.execute(sql, params).rowcount
+            _commit_with_retry(conn)
+            return n > 0
+        finally:
+            conn.close()
+
+
+def requeue_interrupted_downloads() -> int:
+    """After a restart a 'running' job has no worker; put it back in the queue
+    (a partial file is resumed where the source allows)."""
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            n = conn.execute("UPDATE download_jobs SET status='queued', note='Resuming after restart' WHERE status='running'").rowcount
+            _commit_with_retry(conn)
+            return n
+        finally:
+            conn.close()
+
+
+def retry_download_job(job_id: int) -> bool:
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            n = conn.execute(
+                "UPDATE download_jobs SET status='queued', error=NULL, note=NULL, next_try_at=0, finished_at=NULL "
+                "WHERE id=? AND status IN ('failed','cancelled')", (job_id,)).rowcount
+            _commit_with_retry(conn)
+            return n > 0
+        finally:
+            conn.close()
+
+
+def cancel_download_jobs(job_ids: list[int] | None = None) -> list[int]:
+    """Cancels queued/running jobs (all of them when job_ids is None). Returns the ids changed."""
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            if job_ids is None:
+                ids = [r["id"] for r in conn.execute("SELECT id FROM download_jobs WHERE status IN ('queued','running')")]
+            else:
+                ids = []
+                for chunk in _chunked(list(job_ids)):
+                    ph = ",".join("?" for _ in chunk)
+                    ids += [r["id"] for r in conn.execute(
+                        f"SELECT id FROM download_jobs WHERE status IN ('queued','running') AND id IN ({ph})", chunk)]
+            for chunk in _chunked(ids):
+                ph = ",".join("?" for _ in chunk)
+                conn.execute(f"UPDATE download_jobs SET status='cancelled', note=NULL, finished_at=? WHERE id IN ({ph})", (_now(), *chunk))
+            _commit_with_retry(conn)
+            return ids
+        finally:
+            conn.close()
+
+
+def clear_finished_downloads() -> int:
+    """Removes finished/failed/cancelled rows from the list (never touches files)."""
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            n = conn.execute("DELETE FROM download_jobs WHERE status IN ('done','failed','cancelled')").rowcount
+            _commit_with_retry(conn)
+            return n
+        finally:
+            conn.close()

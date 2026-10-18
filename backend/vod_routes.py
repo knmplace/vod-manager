@@ -3,15 +3,21 @@ import hashlib
 import json
 import logging
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from auth import verify_session
 from config import (
     get_strm_export_settings,
     save_strm_export_settings as _save_strm_export_settings,
+    get_download_settings,
+    save_download_settings as _save_download_settings,
+    get_auto_episode_titles_mode,
+    save_auto_episode_titles_mode,
     get_ai_model,
     get_ai_provider,
     get_anthropic_api_key,
@@ -55,6 +61,7 @@ from routes import require_auth
 from secrets_util import hash_password, looks_like_fernet_token
 import ai_assist
 import apply_exclusions_job
+import auto_episode_titles
 import dispatcharr_dvr_client
 import dispatcharr_dvr_importer
 import duplicate_confirm
@@ -66,6 +73,7 @@ import plex_client
 import plex_importer
 import portal_auth
 import strm_export
+import vod_downloader
 import tmdb_sync
 import vod_bulk_ai_service
 import vod_db
@@ -554,6 +562,7 @@ class BulkPlaceRequest(BaseModel):
     search: Optional[str] = None
     source_category_id: Optional[int] = None
     source_provider_id: Optional[int] = None
+    no_tmdb: bool = False
 
 
 class BulkArchiveRequest(BaseModel):
@@ -1201,9 +1210,9 @@ async def ai_evaluate_category(category_id: int, body: AiEvaluateCategoryRequest
         raise HTTPException(502, detail=f"AI request failed: {exc}")
 
     if category["content_type"] == "movie":
-        newly_placed = vod_db.bulk_place_movies_in_category(matched_ids, category_id)
+        newly_placed = vod_db.bulk_place_movies_in_category(matched_ids, category_id, respect_exclusions=True)
     else:
-        newly_placed = vod_db.bulk_place_series_in_category(matched_ids, category_id)
+        newly_placed = vod_db.bulk_place_series_in_category(matched_ids, category_id, respect_exclusions=True)
     vod_db.set_category_ai_description(category_id, body.description)
     vod_db.mark_category_evaluated(category_id)
 
@@ -2843,6 +2852,44 @@ async def upsert_category(body: CategoryRequest):
     return {"id": category_id}
 
 
+@router.get("/categories/genres/", dependencies=_GUARDS)
+async def list_category_genres(min_items: int = 1):
+    """Genres present in the library with title counts, for the one-click genre categories."""
+    return await asyncio.to_thread(vod_db.list_genre_counts, max(1, min_items))
+
+
+class GenreCategoriesRequest(BaseModel):
+    genres: list[str]
+    content_types: list[str] = ["movie", "series"]
+    min_items: int = 1
+
+
+@router.post("/categories/from-genres/", dependencies=_GUARDS)
+async def create_genre_categories(body: GenreCategoriesRequest):
+    """Creates a smart category named after each chosen genre ('genre contains X'),
+    evaluates it, and skips names that already exist."""
+    if not body.genres:
+        raise HTTPException(400, detail="pick at least one genre")
+    if len(body.genres) > 100:
+        raise HTTPException(400, detail="at most 100 genres per request")
+    if not body.content_types or any(c not in ("movie", "series") for c in body.content_types):
+        raise HTTPException(400, detail="content_types must be 'movie' and/or 'series'")
+    result = await asyncio.to_thread(vod_db.create_genre_categories, body.genres, body.content_types, max(1, body.min_items))
+    if result["created"]:
+        asyncio.create_task(_evaluate_categories_in_background([c["id"] for c in result["created"]]))
+    return result
+
+
+async def _evaluate_categories_in_background(category_ids: list[int]) -> None:
+    """Each evaluation scans the whole pool, so a batch of new categories fills in
+    one after another instead of holding the request open for minutes."""
+    for category_id in category_ids:
+        try:
+            await asyncio.to_thread(vod_db.evaluate_smart_category, category_id)
+        except Exception as exc:
+            logger.warning("[vod_routes] genre category=%s evaluation failed: %s", category_id, exc)
+
+
 @router.delete("/categories/{category_id}/", dependencies=_GUARDS)
 async def delete_category(category_id: int):
     if not vod_db.get_category(category_id):
@@ -3576,9 +3623,9 @@ async def bulk_resolve_missing_artwork_progress(job_id: str):
 @router.get("/movies/", dependencies=_GUARDS)
 async def list_movies(
     limit: int = 50, offset: int = 0, search: Optional[str] = None, category_id: Optional[int] = None,
-    provider_id: Optional[int] = None, archived: bool = False,
+    provider_id: Optional[int] = None, archived: bool = False, no_tmdb: bool = False,
 ):
-    movies = vod_db.list_movies(limit=limit, offset=offset, search=search, category_id=category_id, provider_id=provider_id, archived=archived)
+    movies = vod_db.list_movies(limit=limit, offset=offset, search=search, category_id=category_id, provider_id=provider_id, archived=archived, no_tmdb=no_tmdb)
     ids = [m["id"] for m in movies]
     sources_by_id    = vod_db.list_movie_sources_for_ids(ids)
     placements_by_id = vod_db.list_movie_placements_for_ids(ids)
@@ -3587,7 +3634,7 @@ async def list_movies(
         m["placements"] = placements_by_id.get(m["id"], [])
     return {
         "items": movies,
-        "total": vod_db.count_movies(search=search, category_id=category_id, provider_id=provider_id, archived=archived),
+        "total": vod_db.count_movies(search=search, category_id=category_id, provider_id=provider_id, archived=archived, no_tmdb=no_tmdb),
         "limit": limit,
         "offset": offset,
     }
@@ -3601,11 +3648,62 @@ async def set_movie_archived(movie_id: int, archived: bool):
     return {"ok": True}
 
 
+class BulkUnplaceRequest(BaseModel):
+    category_id: int                      # the category to take items OUT of
+    ids: Optional[list[int]] = None       # explicit ids, or every item in the category matching the filters below
+    search: Optional[str] = None
+    source_provider_id: Optional[int] = None
+    no_tmdb: bool = False
+
+
+@router.post("/movies/bulk-unplace/", dependencies=_GUARDS)
+async def bulk_unplace_movies(body: BulkUnplaceRequest):
+    """Removes movies from one category without archiving them. Recorded as an
+    exclusion so a smart rule or list sync does not put them straight back."""
+    if not vod_db.get_category(body.category_id):
+        raise HTTPException(404, detail="category not found")
+    ids = body.ids if body.ids is not None else await asyncio.to_thread(
+        vod_db.list_all_movie_ids, search=body.search, category_id=body.category_id,
+        provider_id=body.source_provider_id, no_tmdb=body.no_tmdb)
+    removed = await asyncio.to_thread(vod_db.remove_items_from_category, "movie", ids, body.category_id)
+    return {"matched": len(ids), "removed": removed}
+
+
+@router.post("/series/bulk-unplace/", dependencies=_GUARDS)
+async def bulk_unplace_series(body: BulkUnplaceRequest):
+    """See bulk_unplace_movies."""
+    if not vod_db.get_category(body.category_id):
+        raise HTTPException(404, detail="category not found")
+    ids = body.ids if body.ids is not None else await asyncio.to_thread(
+        vod_db.list_all_series_ids, search=body.search, category_id=body.category_id,
+        provider_id=body.source_provider_id, no_tmdb=body.no_tmdb)
+    removed = await asyncio.to_thread(vod_db.remove_items_from_category, "series", ids, body.category_id)
+    return {"matched": len(ids), "removed": removed}
+
+
+@router.get("/categories/{category_id}/exclusions/", dependencies=_GUARDS)
+async def get_category_exclusions(category_id: int):
+    """How many titles were removed from this category by hand and are kept out of it."""
+    if not vod_db.get_category(category_id):
+        raise HTTPException(404, detail="category not found")
+    counts = await asyncio.to_thread(vod_db.count_category_exclusions, category_id)
+    return {"movie": counts.get("movie", 0), "series": counts.get("series", 0)}
+
+
+@router.post("/categories/{category_id}/exclusions/clear/", dependencies=_GUARDS)
+async def clear_category_exclusions(category_id: int):
+    """Lets the category's rule or list place the removed titles again (on its next evaluation)."""
+    if not vod_db.get_category(category_id):
+        raise HTTPException(404, detail="category not found")
+    return {"cleared": await asyncio.to_thread(vod_db.clear_category_exclusions, category_id)}
+
+
 @router.post("/movies/bulk-place/", dependencies=_GUARDS)
 async def bulk_place_movies(body: BulkPlaceRequest):
     if not vod_db.get_category(body.category_id):
         raise HTTPException(404, detail="category not found")
-    ids = body.ids if body.ids is not None else vod_db.list_all_movie_ids(search=body.search, category_id=body.source_category_id, provider_id=body.source_provider_id)
+    ids = body.ids if body.ids is not None else vod_db.list_all_movie_ids(search=body.search, category_id=body.source_category_id, provider_id=body.source_provider_id, no_tmdb=body.no_tmdb)
+    await asyncio.to_thread(vod_db.clear_category_exclusions, body.category_id, "movie", ids)
     newly_placed = vod_db.bulk_place_movies_in_category(ids, body.category_id)
     return {"matched": len(ids), "newly_placed": newly_placed}
 
@@ -3833,9 +3931,9 @@ async def enrich_movie(movie_id: int, force: bool = False):
 @router.get("/series/", dependencies=_GUARDS)
 async def list_series(
     limit: int = 50, offset: int = 0, search: Optional[str] = None, category_id: Optional[int] = None,
-    provider_id: Optional[int] = None, archived: bool = False,
+    provider_id: Optional[int] = None, archived: bool = False, no_tmdb: bool = False,
 ):
-    series = vod_db.list_series(limit=limit, offset=offset, search=search, category_id=category_id, provider_id=provider_id, archived=archived)
+    series = vod_db.list_series(limit=limit, offset=offset, search=search, category_id=category_id, provider_id=provider_id, archived=archived, no_tmdb=no_tmdb)
     ids = [s["id"] for s in series]
     episodes_by_id   = vod_db.list_episodes_for_series_ids(ids)
     placements_by_id = vod_db.list_series_placements_for_ids(ids)
@@ -3848,10 +3946,51 @@ async def list_series(
         s["placements"] = placements_by_id.get(s["id"], [])
     return {
         "items": series,
-        "total": vod_db.count_series(search=search, category_id=category_id, provider_id=provider_id, archived=archived),
+        "total": vod_db.count_series(search=search, category_id=category_id, provider_id=provider_id, archived=archived, no_tmdb=no_tmdb),
         "limit": limit,
         "offset": offset,
     }
+
+
+class AutoEpisodeTitlesRequest(BaseModel):
+    mode: str
+
+
+@router.get("/auto-episode-titles/", dependencies=_GUARDS)
+async def get_auto_episode_titles():
+    return {"mode": get_auto_episode_titles_mode(), "status": auto_episode_titles.get_status()}
+
+
+@router.post("/auto-episode-titles/", dependencies=_GUARDS)
+async def set_auto_episode_titles(body: AutoEpisodeTitlesRequest):
+    try:
+        save_auto_episode_titles_mode(body.mode)
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc))
+    return {"mode": get_auto_episode_titles_mode()}
+
+
+@router.post("/auto-episode-titles/run/", dependencies=_GUARDS)
+async def run_auto_episode_titles():
+    """One pass now, using the saved mode (a manual run with mode 'off' does nothing)."""
+    try:
+        return await auto_episode_titles.run_once()
+    except RuntimeError as exc:
+        raise HTTPException(409, detail=str(exc))
+
+
+@router.get("/series/ids/", dependencies=_GUARDS)
+async def list_series_ids(
+    search: Optional[str] = None, category_id: Optional[int] = None, provider_id: Optional[int] = None,
+    archived: bool = False, no_tmdb: bool = False,
+):
+    """Every series id matching the Series page's current filters (not just the
+    visible page), so a bulk action can be applied to the whole filtered set."""
+    ids = await asyncio.to_thread(
+        vod_db.list_all_series_ids, search=search, category_id=category_id, provider_id=provider_id,
+        archived=archived, no_tmdb=no_tmdb,
+    )
+    return {"ids": ids, "total": len(ids)}
 
 
 @router.post("/series/{series_id}/archive/", dependencies=_GUARDS)
@@ -3866,7 +4005,8 @@ async def set_series_archived(series_id: int, archived: bool):
 async def bulk_place_series(body: BulkPlaceRequest):
     if not vod_db.get_category(body.category_id):
         raise HTTPException(404, detail="category not found")
-    ids = body.ids if body.ids is not None else vod_db.list_all_series_ids(search=body.search, category_id=body.source_category_id, provider_id=body.source_provider_id)
+    ids = body.ids if body.ids is not None else vod_db.list_all_series_ids(search=body.search, category_id=body.source_category_id, provider_id=body.source_provider_id, no_tmdb=body.no_tmdb)
+    await asyncio.to_thread(vod_db.clear_category_exclusions, body.category_id, "series", ids)
     newly_placed = vod_db.bulk_place_series_in_category(ids, body.category_id)
     return {"matched": len(ids), "newly_placed": newly_placed}
 
@@ -4064,6 +4204,175 @@ async def run_strm_export(dry_run: bool = False):
         raise HTTPException(500, detail=f"Couldn't write to the output folder: {exc}")
 
 
+class DownloadSettingsRequest(BaseModel):
+    enabled: bool = False
+    output_dir: str = ""
+    movies_dir: str = ""
+    shows_dir: str = ""
+    work_dir: str = ""
+    audio_languages: str = ""
+    keep_subtitles: bool = True
+    default_preset: str = "original"
+    max_concurrent: int = 1
+    min_free_gb: int = 5
+    encoder: str = "software"
+    hw_device: str = ""
+    encode_threads: int = 0
+    speed_limit_mbps: int = 0
+    provider_concurrent: int = 1
+    pause_seconds: int = 0
+    window_enabled: bool = False
+    window_start: int = 1
+    window_end: int = 7
+
+
+class TestEncoderRequest(BaseModel):
+    encoder: str = "auto"
+    hw_device: str = ""
+
+
+class ProviderDownloadLimits(BaseModel):
+    """None for a field = follow the global default from Configuration -> Downloads."""
+    speed_limit_mbps: Optional[int] = None
+    max_concurrent: Optional[int] = None
+    pause_seconds: Optional[int] = None
+
+
+class DownloadQueueRequest(BaseModel):
+    movie_ids: list[int] = []
+    series_ids: list[int] = []
+    episode_ids: list[int] = []
+    source_id: Optional[int] = None            # one exact source (single movie / episode only)
+    prefer_provider_id: Optional[int] = None   # otherwise: try this provider's copy first
+    preset: Optional[str] = None               # default: the preset saved in the settings
+    season: Optional[int] = None               # with series_ids: only this season
+    audio_languages: Optional[str] = None      # 'all' or e.g. 'eng,jpn'; None = follow the setting
+
+
+class DownloadCancelRequest(BaseModel):
+    job_ids: Optional[list[int]] = None        # None = every queued / running download
+
+
+@router.get("/downloads/", dependencies=_GUARDS)
+async def get_downloads():
+    return await asyncio.to_thread(vod_downloader.get_status)
+
+
+@router.post("/downloads/settings/", dependencies=_GUARDS)
+async def save_download_settings(body: DownloadSettingsRequest):
+    settings = body.model_dump()
+    for key in ("output_dir", "movies_dir", "shows_dir", "work_dir"):
+        settings[key] = settings[key].strip()
+    settings["max_concurrent"] = min(4, max(1, settings["max_concurrent"]))
+    settings["min_free_gb"] = max(0, settings["min_free_gb"])
+    settings["hw_device"] = settings["hw_device"].strip()
+    settings["encode_threads"] = min(64, max(0, settings["encode_threads"]))
+    if settings["encoder"] not in vod_downloader.ENCODERS:
+        raise HTTPException(400, detail="Unknown encoder. Choose one of: " + ", ".join(vod_downloader.ENCODERS))
+    if settings["hw_device"] and not settings["hw_device"].startswith("/dev/"):
+        raise HTTPException(400, detail="The GPU device must be a path under /dev/ (for example /dev/dri/renderD128).")
+    if settings["enabled"] or vod_downloader.configured_dirs(settings):
+        problem = vod_downloader.validate_settings(settings)
+        if problem:
+            raise HTTPException(400, detail=problem)
+    if settings["enabled"]:
+        # prove the folder is usable now, not on the first download
+        roots = vod_downloader.roots_for(settings)
+        folders = [("movies", roots["movie"]), ("TV shows", roots["episode"])]
+        if settings["work_dir"]:
+            folders.append(("processing", Path(settings["work_dir"])))
+        for label, folder in folders:
+            try:
+                await asyncio.to_thread(folder.mkdir, parents=True, exist_ok=True)
+                probe = folder / ".vod-manager-write-test"
+                await asyncio.to_thread(probe.write_text, "ok")
+                await asyncio.to_thread(probe.unlink)
+            except OSError as exc:
+                raise HTTPException(400, detail=f"Can't write to the {label} folder ({folder}): {exc}")
+    try:
+        _save_download_settings(settings)
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc))
+    return await asyncio.to_thread(vod_downloader.get_status)
+
+
+@router.post("/downloads/test-encoder/", dependencies=_GUARDS)
+async def test_download_encoder(body: TestEncoderRequest):
+    """Runs a one-second hardware encode so a missing GPU device / driver shows up now, not as a failed download."""
+    if body.encoder not in vod_downloader.ENCODERS:
+        raise HTTPException(400, detail="Unknown encoder.")
+    if body.hw_device.strip() and not body.hw_device.strip().startswith("/dev/"):
+        raise HTTPException(400, detail="The GPU device must be a path under /dev/.")
+    return await vod_downloader.test_encoder(body.encoder, body.hw_device.strip())
+
+
+@router.post("/providers/{provider_id}/download-limits/", dependencies=_GUARDS)
+async def set_provider_download_limits(provider_id: int, body: ProviderDownloadLimits):
+    if not vod_db.get_provider(provider_id):
+        raise HTTPException(404, detail="provider not found")
+    clamp = lambda v, lo, hi: None if v is None else min(hi, max(lo, v))  # noqa: E731
+    await asyncio.to_thread(
+        vod_db.set_provider_download_limits, provider_id,
+        clamp(body.speed_limit_mbps, 0, 100000), clamp(body.max_concurrent, 1, 4), clamp(body.pause_seconds, 0, 86400))
+    return {"ok": True}
+
+
+@router.post("/downloads/queue/", dependencies=_GUARDS)
+async def queue_downloads(body: DownloadQueueRequest):
+    settings = get_download_settings()
+    if not settings["enabled"]:
+        raise HTTPException(400, detail="Downloads are turned off. Turn them on under Configuration -> Downloads first.")
+    problem = vod_downloader.validate_settings(settings)
+    if problem:
+        raise HTTPException(400, detail=problem)
+    try:
+        return await asyncio.to_thread(
+            vod_downloader.enqueue, body.movie_ids, body.series_ids, body.episode_ids,
+            body.source_id, body.prefer_provider_id, body.preset, body.season, body.audio_languages)
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc))
+
+
+@router.post("/downloads/cancel/", dependencies=_GUARDS)
+async def cancel_downloads(body: DownloadCancelRequest):
+    ids = await asyncio.to_thread(vod_downloader.cancel, body.job_ids)
+    return {"cancelled": len(ids)}
+
+
+@router.post("/downloads/{job_id}/link/", dependencies=_GUARDS)
+async def download_file_link(job_id: int):
+    """A short-lived link (15 min) to save one finished download to the device you are using."""
+    token = await asyncio.to_thread(vod_downloader.issue_file_link, job_id)
+    if not token:
+        raise HTTPException(404, detail="That download isn't finished, or its file is gone.")
+    return {"url": f"/api/vod/downloads/file/{token}/"}
+
+
+@router.get("/downloads/file/{token}/")
+async def download_file(token: str):
+    # no session guard on purpose: the unguessable, expiring token IS the credential for this one file
+    path = await asyncio.to_thread(vod_downloader.resolve_file_link, token)
+    if path is None:
+        raise HTTPException(404, detail="This link expired. Ask for a new one.")
+    return FileResponse(path, filename=path.name)
+
+
+@router.post("/downloads/{job_id}/retry/", dependencies=_GUARDS)
+async def retry_download(job_id: int):
+    if not await asyncio.to_thread(vod_db.retry_download_job, job_id):
+        raise HTTPException(404, detail="Only a failed or cancelled download can be retried.")
+    vod_downloader._cancel_ids.discard(job_id)
+    return {"ok": True}
+
+
+@router.post("/downloads/clear/", dependencies=_GUARDS)
+async def clear_downloads():
+    finished = [j["id"] for j in await asyncio.to_thread(vod_db.list_download_jobs, 100000)
+                if j["status"] in ("done", "failed", "cancelled")]
+    await asyncio.to_thread(vod_downloader.purge_work, finished)   # drop their unfinished leftovers too
+    return {"cleared": await asyncio.to_thread(vod_db.clear_finished_downloads)}
+
+
 @router.post("/series/{series_id}/tmdb-episode-titles/", dependencies=_GUARDS)
 async def apply_tmdb_episode_titles(series_id: int, mode: str = "fill", dry_run: bool = False):
     """Sets this one series' episode names from TMDB (matched on season +
@@ -4079,15 +4388,20 @@ async def apply_tmdb_episode_titles(series_id: int, mode: str = "fill", dry_run:
         episodes = await tmdb_sync.get_series_episode_list_cached(str(series["tmdb_id"]))
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc))
+    except tmdb_sync.TmdbNotFoundError:
+        raise HTTPException(404, detail="TMDB has no entry for this series' TMDB id (it may have been removed or merged)")
     except RuntimeError as exc:
         raise HTTPException(502, detail=str(exc))
     names = {(e["season_number"], e["episode_number"]): e["name"] for e in episodes if e.get("name")}
     if not names:
         raise HTTPException(502, detail="TMDB returned no episode names for this series")
     try:
-        return await asyncio.to_thread(vod_db.apply_tmdb_episode_titles, series_id, names, mode, dry_run)
+        result = await asyncio.to_thread(vod_db.apply_tmdb_episode_titles, series_id, names, mode, dry_run)
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc))
+    if not dry_run:
+        await asyncio.to_thread(vod_db.mark_series_auto_episode_titles, [series_id])
+    return result
 
 
 class BulkEpisodeTitlesRequest(BaseModel):
@@ -4108,7 +4422,7 @@ async def bulk_apply_tmdb_episode_titles(body: BulkEpisodeTitlesRequest):
     if len(body.ids) > 50:
         raise HTTPException(400, detail="at most 50 series per request")
     totals = {"series_checked": 0, "series_changed": 0, "episodes_renamed": 0, "series_without_tmdb": 0,
-              "series_failed": 0, "failures": [], "dry_run": body.dry_run}
+              "series_failed": 0, "failures": [], "without_tmdb_examples": [], "dry_run": body.dry_run}
     for series_id in body.ids:
         series = await asyncio.to_thread(vod_db.get_series, series_id)
         if not series:
@@ -4116,6 +4430,8 @@ async def bulk_apply_tmdb_episode_titles(body: BulkEpisodeTitlesRequest):
         totals["series_checked"] += 1
         if not series.get("tmdb_id"):
             totals["series_without_tmdb"] += 1
+            if len(totals["without_tmdb_examples"]) < 5:
+                totals["without_tmdb_examples"].append(series.get("name"))
             continue
         try:
             episodes = await tmdb_sync.get_series_episode_list_cached(str(series["tmdb_id"]))
@@ -4123,6 +4439,14 @@ async def bulk_apply_tmdb_episode_titles(body: BulkEpisodeTitlesRequest):
             if not names:
                 raise RuntimeError("TMDB returned no episode names")
             result = await asyncio.to_thread(vod_db.apply_tmdb_episode_titles, series_id, names, body.mode, body.dry_run)
+            if not body.dry_run:
+                await asyncio.to_thread(vod_db.mark_series_auto_episode_titles, [series_id])
+        except tmdb_sync.TmdbNotFoundError:
+            # a stale/removed TMDB id on one series must not abort the batch
+            totals["series_failed"] += 1
+            if len(totals["failures"]) < 5:
+                totals["failures"].append(f"{series.get('name')}: TMDB has no entry for id {series['tmdb_id']}")
+            continue
         except (ValueError, RuntimeError) as exc:
             totals["series_failed"] += 1
             if len(totals["failures"]) < 5:

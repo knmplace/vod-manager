@@ -115,6 +115,23 @@ on a schedule. Preview first, export when ready.
 See the [User Guide](USERGUIDE.md#emby-and-jellyfin-the-strm-export) for the
 shared-folder compose setup.
 
+## Downloading files into your library
+
+Prefer real files over streams? **Configuration → Downloads** (off by default)
+saves movies and episodes into a folder (or separate Movies and TV shows folders) named for Emby, Jellyfin and Plex. Pick the
+source when a title has several, or let failover choose; optionally re-encode to a
+smaller H.264/H.265 file (1080p, 720p or phone-sized 480p) while saving (on the CPU, or an Intel / AMD / NVIDIA GPU), and choose which audio
+languages and subtitles to keep (even without re-encoding). Downloads respect each
+provider's connection limit (a download waits for a free connection and pauses itself,
+then resumes, when a viewer needs it), can be paced per provider
+(speed cap, downloads at once, pause between, an allowed time window), back off by
+themselves when a provider says "slow down", resume after an interruption, and verify
+each file with ffprobe. Unfinished files live in a separate processing folder and move into the
+library only when complete, so nothing partial is ever picked up. See the
+[User Guide](USERGUIDE.md#downloading-files-into-a-library-folder).
+
+![The Downloads card](docs/screenshots/downloads-card.png)
+
 ## Connecting Dispatcharr instances
 
 VOD & DVR Manager distinguishes two separate relationships with Dispatcharr:
@@ -167,7 +184,10 @@ pool, matching every existing credential's behavior today. Restricting it
 is enforced everywhere that credential is used — catalog listing, info
 lookups, and the actual stream — not just hidden from the browse UI, so a
 restricted client can't reach disallowed content even with a direct/copied
-stream URL.
+stream URL. The picker has **Select all** / **Select none**, so hiding just a few
+categories is "select all, untick those".
+
+![The category access picker with Select all and Select none](docs/screenshots/category-access-select-all.png)
 
 ## In-app test player
 
@@ -437,6 +457,38 @@ instead of one item at a time. **Client Title Format** (Curation &
 Maintenance) is a separate, ongoing setting to have VOD clients see a
 "(Year)" suffix on every title, independent of the pool's own stored data.
 
+**Finding and bulk-fixing titles.** The **No TMDB ID** button on the Movies and
+TV Shows pages lists every title that still has no TMDB match, including
+year-bearing ones the Metadata Review queue doesn't show. **Select all
+filtered** selects everything matching the current filters across all pages, so
+**TMDB episode titles** (preview first, then Apply) can run over a whole library
+or a filtered slice, and the result names the series that had no TMDB match.
+
+![No TMDB ID filter, Select all filtered and Remove from category](docs/screenshots/no-tmdb-filter-and-remove.png)
+
+![Bulk TMDB episode titles preview naming the series with no TMDB match](docs/screenshots/bulk-episode-titles.png)
+
+**Automatic TMDB Episode Titles** (Curation & Maintenance) keeps episode names
+filled in as a provider adds episodes: hourly, it replaces blank or placeholder
+names from TMDB for the series you've already applied titles to (or every
+series with a TMDB id, or off). A real provider name, or one you set or locked,
+is never changed.
+
+![Automatic TMDB Episode Titles settings](docs/screenshots/auto-episode-titles.png)
+
+**Genre Categories** (Curation & Maintenance) replaces provider categories like
+"EN - ACTION & WAR" with plain genres in one click: pick genres from your
+library and it creates a smart category for each (rule: *genre contains …*, so a
+title in several genres appears in each).
+
+![Genre Categories picker](docs/screenshots/genre-categories.png)
+
+**Removing titles from a category** without archiving them: with a category
+chosen in the dropdown, use the per-row **Remove from category** button, **Remove
+selected from category**, or **Remove all filtered from category**. The title
+stays in the pool, and the removal sticks — a smart rule, list sync or AI
+evaluation won't put it back (use **Allow them again** to undo).
+
 **Flag as wrong content** (the flag icon on any movie, series, episode, or
 individual source) reports "this isn't actually what its label says" —
 Curation & Maintenance's **Flagged Content** queue lists everything flagged
@@ -456,7 +508,8 @@ category an exact reflection of its source(s) (e.g. a "Top 100" list that
 cycles over time) — skipped for that pass if any linked source's fetch
 fails, so a transient error never looks like "everything's gone." Lists of
 any length are fetched in full. A category only re-syncs on its own once you set
-Configuration → Refresh Schedule → **List Sync (hrs)** (blank = off, the default;
+Configuration → Refresh Schedule → **List Sync (hrs)**, the one setting that schedules every
+list-linked category at once (blank = off, the default;
 otherwise use **Sync now**), and titles that drop off a list or chart are only
 removed in **Mirror** mode.
 
