@@ -31,6 +31,18 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-18 (Library handoff — folder help)
+
+- ✅ **Clearer handoff folder settings.**
+  - **Before:** the second folder row read "Same folders in Radarr/Sonarr",
+    which looked like it wanted the Radarr/Sonarr library folders. Entering
+    those made Radarr/Sonarr import from an empty folder, and the only
+    message was "Radarr/Sonarr didn't import the file".
+  - **After:** the row is called **Finished folders as Radarr/Sonarr see
+    them**, both rows have an info icon with hover help and an example, and
+    the boxes say *blank = same as above*. **Save handoff** refuses a value
+    that matches the chosen Radarr/Sonarr root folder and says why.
+
 ## 2026-10-18 (Radarr/Sonarr library handoff — screens)
 
 - ✅ 🔀 [#59](https://github.com/jstevenscl/vod-manager/pull/59) **Library handoff settings, import status and a notice bell.**
