@@ -15283,6 +15283,19 @@ def update_import(job_id: int, **fields) -> bool:
     return update_download_job(job_id, **fields)
 
 
+def mark_import_waiting(job_id: int) -> None:
+    """A finished download being handed to Radarr/Sonarr now waits for its file in the
+    finished folder; starts the stall clock. No-op for jobs without the handoff."""
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            conn.execute("UPDATE download_jobs SET import_status='waiting', import_stage=0, import_since=? "
+                         "WHERE id=? AND import_status IN ('add','ready','needs_manual')", (time.time(), job_id))
+            _commit_with_retry(conn)
+        finally:
+            conn.close()
+
+
 def list_import_jobs(statuses: tuple[str, ...]) -> list[dict]:
     conn = _connect()
     try:

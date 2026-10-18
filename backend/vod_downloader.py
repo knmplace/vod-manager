@@ -1127,6 +1127,7 @@ async def run_job(job_id: int) -> None:
         if found:
             vod_db.update_download_job(job_id, ("running",), status="done", progress=1.0, final_path=str(found.relative_to(out_root)),
                                        final_size=found.stat().st_size, note="Already in the library", finished_at=vod_db._now())
+            vod_db.mark_import_waiting(job_id)  # KNM: 2026-10-18 hand the file to Radarr/Sonarr
             shutil.rmtree(work, ignore_errors=True)
             return
         sources = await asyncio.to_thread(_ordered_sources, job)
@@ -1205,6 +1206,7 @@ async def run_job(job_id: int) -> None:
             vod_db.update_download_job(job_id, ("running",), status="done", progress=1.0, bytes_done=size, total_bytes=size,
                                        final_path=str(final.relative_to(out_root)), final_size=size, note=None, error=None,
                                        finished_at=vod_db._now())
+            vod_db.mark_import_waiting(job_id)  # KNM: 2026-10-18 hand the file to Radarr/Sonarr
             shutil.rmtree(work, ignore_errors=True)
             logger.info("[download] job=%s done: %s (%d bytes, preset=%s)", job_id, final.relative_to(out_root), size, preset)
             return
