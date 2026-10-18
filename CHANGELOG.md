@@ -31,6 +31,15 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-18 (Download folders without the TMDB id)
+
+- ✅ **Downloads can leave the TMDB id out of folder names.** A new
+  **TMDB id in folder names** checkbox in Configuration → Downloads (on by
+  default, so nothing changes unless you turn it off). Off saves to
+  `Title (Year)/Title (Year).mp4` and `Show (Year)/Season NN/…` instead of
+  `Title (Year) [tmdbid-N]/…`. File names never included the id. The .strm
+  export keeps its own naming.
+
 ## 2026-10-18 (Synced with upstream v0.3.03)
 
 - 🔼 **Upstream v0.3.01 – v0.3.03 merged; the fork now reports version 0.3.03.**
