@@ -44,7 +44,7 @@ instead of opening a duplicate request.
   never land in the library. The image now includes `vainfo` and the Intel
   media driver. Our open upstream PRs (#53–#56) are not part of these releases
   and stay in the fork as before.
-- ✅ **Automatic episode titles use the local TMDB library first.** Each pass
+- ✅ 🔀 [#57](https://github.com/jstevenscl/vod-manager/pull/57) **Automatic episode titles use the local TMDB library first.** Each pass
   fills placeholder episode names from the local TMDB library, and asks TMDB
   only for names still missing after that. A series the library already covers
   costs no TMDB request, not even the daily refresh of the newest season.
