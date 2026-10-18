@@ -33,7 +33,7 @@ instead of opening a duplicate request.
 
 ## 2026-10-18 (Download folders without the TMDB id)
 
-- ✅ **Downloads can leave the TMDB id out of folder names.** A new
+- ✅ 🔀 [#58](https://github.com/jstevenscl/vod-manager/pull/58) **Downloads can leave the TMDB id out of folder names.** A new
   **TMDB id in folder names** checkbox in Configuration → Downloads (on by
   default, so nothing changes unless you turn it off). Off saves to
   `Title (Year)/Title (Year).mp4` and `Show (Year)/Season NN/…` instead of
