@@ -96,20 +96,105 @@ def test_removing_a_server_drops_its_rows(db):
     assert vod_db.list_library_presence() == []
 
 
-def test_copy_from_provider_copies_values(db):
-    pid = vod_db.upsert_provider("PLEX", "http://plex:32400/", "", "PTOKEN", provider_type="plex")
-    out = asyncio.run(vod_routes.copy_library_server_from_provider(pid))
-    [srv] = out["servers"]
-    assert (srv["type"], srv["name"], srv["url"], srv["has_key"]) == ("plex", "PLEX", "http://plex:32400", True)
-    vod_db.delete_provider(pid)                 # copied, not linked
-    assert config.get_library_server_key(srv["id"]) == "PTOKEN"
+def _plex_provider(name="PLEX", url="http://plex:32400/", token="PTOKEN", ptype="plex"):
+    return vod_db.upsert_provider(name, url, "", token, provider_type=ptype)
 
 
-def test_copy_from_non_media_provider_rejected(db):
-    pid = vod_db.upsert_provider("xc", "http://xc", "u", "pw")
+def _linked(pid, libraries=None):
+    return {"source": "provider", "provider_id": pid,
+            "libraries": libraries if libraries is not None else [{"key": "1", "title": "Movies", "kind": "movie"}]}
+
+
+def test_provider_linked_server_stores_only_a_reference(db):
+    pid = _plex_provider()
+    _save([_linked(pid)])
+    raw = config._read_raw()["library_presence"]["servers"]
+    assert raw == [{"id": f"provider:{pid}", "source": "provider", "provider_id": pid,
+                    "libraries": [{"key": "1", "title": "Movies", "kind": "movie"}]}]
+    [srv] = library_presence.configured_servers()
+    assert (srv["id"], srv["source"], srv["type"], srv["name"], srv["url"], srv["has_key"]) == (
+        f"provider:{pid}", "provider", "plex", "PLEX", "http://plex:32400", True)
+    assert "PTOKEN" not in str(asyncio.run(vod_routes.get_library_presence_settings_route()))
+
+
+def test_provider_linked_server_reads_token_from_provider_at_scan(db, monkeypatch):
+    pid = _plex_provider()
+    _save([_linked(pid)])
+    assert _plex_provider(url="http://newplex:32400", token="NEWTOKEN") == pid      # edited on the Providers page
+    seen = []
+
+    async def fake_fetch(server, key):
+        seen.append((server["type"], server["url"], key))
+        return [_row(tmdb="949")]
+
+    monkeypatch.setattr(library_presence, "fetch_server", fake_fetch)
+    out = asyncio.run(library_presence.scan_all())
+    assert seen == [("plex", "http://newplex:32400", "NEWTOKEN")]
+    assert out["servers"][0]["ok"] and {r["server"] for r in vod_db.list_library_presence()} == {f"provider:{pid}"}
+
+
+def test_test_route_with_provider_id_uses_provider_values(db, monkeypatch):
+    pid = _plex_provider()
+    seen = []
+
+    async def fake_test(server_type, url, key):
+        seen.append((server_type, url, key))
+        return {"version": "1", "libraries": []}
+
+    monkeypatch.setattr(library_presence, "test_server", fake_test)
+    out = asyncio.run(vod_routes.test_library_server(vod_routes.LibraryServerTestRequest(provider_id=pid)))
+    assert out["ok"] and seen == [("plex", "http://plex:32400", "PTOKEN")]
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(vod_routes.copy_library_server_from_provider(pid))
-    assert exc.value.status_code == 400
+        asyncio.run(vod_routes.test_library_server(vod_routes.LibraryServerTestRequest(provider_id=9999)))
+    assert exc.value.status_code == 404
+
+
+def test_deleted_provider_drops_the_server_and_its_rows(db, monkeypatch):
+    pid = _plex_provider()
+    _save([_linked(pid)])
+    mid = _movie(tmdb="949")
+    vod_db.replace_library_presence(f"provider:{pid}", "PLEX", [_row(tmdb="949")])
+    library_presence.rebuild_matches()
+    assert vod_db.presence_labels("movie", [mid]) == {mid: "PLEX: Movies"}
+    monkeypatch.setattr(vod_routes.vod_importer, "evict_provider_client", _async_noop)
+    monkeypatch.setattr(vod_routes.rclone_client, "stop_daemon", _async_noop)
+    asyncio.run(vod_routes.delete_provider(pid))
+    assert library_presence.configured_servers() == []
+    assert asyncio.run(vod_routes.get_library_presence_settings_route())["servers"] == []
+    assert vod_db.list_library_presence() == []
+    assert vod_db.presence_labels("movie", [mid]) == {}
+
+
+async def _async_noop(*a, **kw):
+    return None
+
+
+def test_non_media_or_missing_provider_rejected_on_save(db):
+    xc = vod_db.upsert_provider("xc", "http://xc", "u", "pw")
+    for pid in (xc, 9999):
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(vod_routes.save_library_presence_settings(vod_routes.LibraryPresenceSettingsRequest(
+                servers=[vod_routes.LibraryServerModel(**_linked(pid))])))
+        assert exc.value.status_code == 400
+
+
+def test_manual_and_provider_servers_side_by_side_and_legacy_entries(db):
+    pid = _plex_provider()
+    s = _save([_linked(pid), {**_plex_server(name="Friend"), "source": "manual"}])
+    assert [(x["source"], x["name"]) for x in library_presence.configured_servers()] == [
+        ("provider", "PLEX"), ("manual", "Friend")]
+    manual = s["servers"][1]
+    assert config.get_library_server_key(manual["id"]) == "PLEXTOKEN"
+    # an entry saved before servers had a source counts as manual
+    config._update_raw(lambda d: d["library_presence"]["servers"].append(
+        {"id": "old1", "type": "emby", "name": "Old", "url": "http://e", "libraries": []}))
+    assert [x["source"] for x in config.get_library_presence_settings()["servers"]] == ["provider", "manual", "manual"]
+
+
+def test_copy_route_is_gone():
+    paths = {getattr(r, "path", "") for r in vod_routes.router.routes}
+    assert not any("copy-from-provider" in p for p in paths)
+    assert not hasattr(vod_routes, "copy_library_server_from_provider")
 
 
 def test_test_route_uses_saved_key_and_reports_errors(db, monkeypatch):

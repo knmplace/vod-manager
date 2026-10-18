@@ -1,10 +1,12 @@
 """In Library badge: which titles the user's own media servers (Plex, Jellyfin,
 Emby) already hold.
 
-The servers are entered in their own settings card (config.get_library_presence_
-settings), not taken from providers. Media servers are called only by the Test
-button, the library listing and a scan; cards, episode lists and the queue check
-read the local tables:
+A server is either one of the Plex / Jellyfin / Emby providers, linked by id (its
+URL and token are read from the provider each time, so a token changed on the
+Providers page applies here too, and deleting the provider drops the server), or
+one typed into the In Library card for a server that isn't a provider. Media
+servers are called only by the Test button, the library listing and a scan;
+cards, episode lists and the queue check read the local tables:
 
   library_presence        what each server holds, replaced per server on each scan
   library_presence_items  which movies / series / episodes matched, rebuilt locally
@@ -38,10 +40,11 @@ _last_scan: dict = {"at": None, "servers": []}
 
 # ── media-server calls (Test, library listing, scan) ─────────────────────────
 
-def _client(server_type: str, url: str, key: str):
+def _client(server_type: str, url: str, key: str, native_api_paths: bool = False):
     if server_type == "plex":
         return plex_client.PlexClient({"base_url": url, "password": key})
-    return emby_vod_client.EmbyVodClient({"base_url": url, "password": key, "provider_type": server_type})
+    return emby_vod_client.EmbyVodClient({"base_url": url, "password": key, "provider_type": server_type,
+                                          "native_api_paths": native_api_paths})
 
 
 def _redact(server_type: str, exc: Exception) -> str:
@@ -90,7 +93,7 @@ async def fetch_server(server: dict, key: str) -> list[dict]:
     """One listing per chosen library (paged), with external ids. Episode rows carry
     their show's ids, title and year."""
     rows: list[dict] = []
-    async with _client(server["type"], server["url"], key) as client:
+    async with _client(server["type"], server["url"], key, bool(server.get("native_api_paths"))) as client:
         for lib in server.get("libraries") or []:
             if server["type"] == "plex":
                 rows.extend(await _plex_library(client, lib))
@@ -143,13 +146,44 @@ async def _emby_library(client, lib: dict) -> list[dict]:
     return rows
 
 
+def configured_servers(with_keys: bool = False) -> list[dict]:
+    """The saved servers with each provider link filled in from its provider row
+    ({id, source, provider_id, type, name, url, has_key, libraries}, plus "key" when
+    with_keys). A link whose provider was deleted, or is no longer Plex / Jellyfin /
+    Emby, is left out."""
+    out = []
+    for srv in config.get_library_presence_settings()["servers"]:
+        if srv["source"] == "provider":
+            provider = vod_db.get_provider(srv["provider_id"])
+            ptype = ((provider or {}).get("provider_type") or "").lower()
+            if ptype not in config.LIBRARY_SERVER_TYPES:
+                continue
+            key = provider.get("password") or ""
+            srv = {**srv, "type": ptype, "name": provider.get("name") or ptype.title(),
+                   "url": (provider.get("base_url") or "").rstrip("/"), "has_key": bool(key),
+                   "native_api_paths": bool(provider.get("native_api_paths"))}
+        else:
+            srv = {**srv, "provider_id": None}
+            key = (config.get_library_server_key(srv["id"]) or "") if with_keys else ""
+        if with_keys:
+            srv["key"] = key
+        out.append(srv)
+    return out
+
+
+def forget_provider(provider_id: int) -> None:
+    """A deleted provider's titles stop counting right away."""
+    vod_db.delete_library_presence(server=f"provider:{provider_id}")
+    rebuild_matches()
+
+
 async def scan_all() -> dict:
     """Scans every configured server. A server that fails keeps its previous rows."""
     async with _scan_lock:
-        settings = await asyncio.to_thread(config.get_library_presence_settings)
+        servers = await asyncio.to_thread(configured_servers, True)
         results = []
-        for server in settings["servers"]:
-            key = await asyncio.to_thread(config.get_library_server_key, server["id"])
+        for server in servers:
+            key = server["key"]
             res = {"id": server["id"], "name": server["name"], "ok": False, "count": 0, "error": None}
             if not (server["url"] and key and server["libraries"]):
                 res["error"] = "Not set up: needs a URL, a token / API key and at least one library."
@@ -162,7 +196,7 @@ async def scan_all() -> dict:
                     res["error"] = _redact(server["type"], exc)
                     logger.warning("[library_presence] scan of %s failed: %s", server["name"], res["error"])
             results.append(res)
-        keep = [s["id"] for s in settings["servers"]]
+        keep = [s["id"] for s in servers]      # also drops rows of a server no longer configured
         if results and all(r["ok"] for r in results):
             # the servers now show what the imports added
             await asyncio.to_thread(vod_db.delete_library_presence, keep)
@@ -372,7 +406,7 @@ async def scan_loop() -> None:
         try:
             settings = await asyncio.to_thread(config.get_library_presence_settings)
             last = await asyncio.to_thread(_last_scan_epoch)
-            if settings["servers"] and (last is None or time.time() - last >= settings["scan_hours"] * 3600):
+            if await asyncio.to_thread(configured_servers) and (last is None or time.time() - last >= settings["scan_hours"] * 3600):
                 await scan_all()
             current = await asyncio.to_thread(vod_db.presence_catalog_fingerprint)
             if current != fingerprint:

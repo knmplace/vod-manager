@@ -38,10 +38,15 @@ instead of opening a duplicate request.
     in your own Plex, Jellyfin or Emby library, so it was easy to download
     something you already had.
   - **After:** Settings → **In Library (your Plex / Jellyfin / Emby)**, next
-    to Library handoff, takes one or more servers (type, URL, token / API
-    key; **Copy from provider** copies an existing Plex/Jellyfin/Emby
-    provider). **Test** checks the connection and lists the server's movie
-    and TV libraries; only the ticked ones count. The ticked libraries are
+    to Library handoff, lists your Plex, Jellyfin and Emby providers: tick
+    the ones that are your own library. Their URL and token are read from
+    the provider each time, so a token changed on the Providers page applies
+    here too, and deleting the provider removes it here. A server that isn't
+    a provider (adding it as one would import its titles into the catalog)
+    can be typed in with **Add a server that isn't a provider**; that form
+    opens by itself when there's no such provider. **Test** checks the
+    connection and lists the server's movie and TV libraries; only the
+    ticked ones count. The ticked libraries are
     read every 6 hours by default (changeable), on **Scan now**, and right
     after Radarr/Sonarr import a download. Titles are matched by TMDB id,
     then IMDb id, then title + year (±1).

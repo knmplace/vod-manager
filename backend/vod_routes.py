@@ -1809,6 +1809,8 @@ async def delete_provider(provider_id: int):
     # indexes -- off the event loop so it doesn't stall every other request
     # (including the Activity poll) while it runs.
     await asyncio.to_thread(vod_db.delete_provider, provider_id)
+    # KNM: an In Library server linked to this provider goes with it (2026-10-18)
+    await asyncio.to_thread(library_presence.forget_provider, provider_id)
     await vod_importer.evict_provider_client(provider_id)
     await rclone_client.stop_daemon(provider_id)
     return {"ok": True}
@@ -4474,8 +4476,10 @@ async def test_handoff(kind: str, body: HandoffTestRequest):
 # other route here reads the local library_presence tables.
 
 class LibraryServerModel(BaseModel):
-    id: Optional[str] = None                   # None = a new server
-    type: str
+    id: Optional[str] = None                   # None = a new manual server
+    source: str = "manual"                     # "provider": linked to provider_id, nothing else stored
+    provider_id: Optional[int] = None
+    type: str = ""
     name: str = ""
     url: str = ""
     api_key: str = ""                          # blank keeps the saved key, '-' clears it
@@ -4488,14 +4492,23 @@ class LibraryPresenceSettingsRequest(BaseModel):
 
 
 class LibraryServerTestRequest(BaseModel):
-    id: Optional[str] = None                   # with a blank api_key: use this server's saved key
-    type: str
+    provider_id: Optional[int] = None          # test a provider with its own URL and token
+    id: Optional[str] = None                   # with a blank api_key: use this manual server's saved key
+    type: str = ""
     url: str = ""
     api_key: str = ""
 
 
+def _media_provider(provider_id: int) -> dict | None:
+    provider = vod_db.get_provider(provider_id)
+    if provider and (provider.get("provider_type") or "").lower() in config.LIBRARY_SERVER_TYPES:
+        return provider
+    return None
+
+
 async def _presence_settings_out() -> dict:
     out = await asyncio.to_thread(config.get_library_presence_settings)
+    out["servers"] = await asyncio.to_thread(library_presence.configured_servers)
     out["status"] = await asyncio.to_thread(library_presence.status)
     return out
 
@@ -4507,45 +4520,37 @@ async def get_library_presence_settings_route():
 
 @router.post("/library-presence/settings/", dependencies=_GUARDS)
 async def save_library_presence_settings(body: LibraryPresenceSettingsRequest):
+    for srv in body.servers:
+        if srv.source == "provider" and not (srv.provider_id and await asyncio.to_thread(_media_provider, srv.provider_id)):
+            raise HTTPException(400, detail="Pick a Plex, Jellyfin or Emby provider.")
     try:
         await asyncio.to_thread(config.save_library_presence_settings, body.model_dump())
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc))
-    kept = [srv["id"] for srv in (await asyncio.to_thread(config.get_library_presence_settings))["servers"]]
+    kept = [srv["id"] for srv in await asyncio.to_thread(library_presence.configured_servers)]
     # a removed server's titles stop counting right away
     await asyncio.to_thread(vod_db.delete_library_presence, kept + [library_presence.IMPORT_SERVER])
     await asyncio.to_thread(library_presence.rebuild_matches)
     return await _presence_settings_out()
 
 
-@router.post("/library-presence/copy-from-provider/{provider_id}", dependencies=_GUARDS)
-async def copy_library_server_from_provider(provider_id: int):
-    """Adds a server with this provider's URL and token (a copy, not a link)."""
-    provider = await asyncio.to_thread(vod_db.get_provider, provider_id)
-    if not provider:
-        raise HTTPException(404, detail="provider not found")
-    ptype = (provider.get("provider_type") or "").lower()
-    if ptype not in config.LIBRARY_SERVER_TYPES:
-        raise HTTPException(400, detail="Only a Plex, Jellyfin or Emby provider can be copied.")
-    current = await asyncio.to_thread(config.get_library_presence_settings)
-    servers = [{**srv, "api_key": ""} for srv in current["servers"]]   # blank keeps each saved key
-    servers.append({"type": ptype, "name": provider.get("name") or "", "url": (provider.get("base_url") or "").rstrip("/"),
-                    "api_key": provider.get("password") or "", "libraries": []})
-    await asyncio.to_thread(config.save_library_presence_settings,
-                            {"servers": servers, "scan_hours": current["scan_hours"]})
-    return await _presence_settings_out()
-
-
 @router.post("/library-presence/test/", dependencies=_GUARDS)
 async def test_library_server(body: LibraryServerTestRequest):
     """Checks the connection and lists the server's movie and TV libraries to pick from."""
-    stype = body.type.strip().lower()
-    if stype not in config.LIBRARY_SERVER_TYPES:
-        raise HTTPException(400, detail="Server type must be Plex, Jellyfin or Emby.")
-    url = body.url.strip().rstrip("/")
-    key = body.api_key.strip()
-    if not key and body.id:
-        key = await asyncio.to_thread(config.get_library_server_key, body.id) or ""
+    if body.provider_id is not None:
+        provider = await asyncio.to_thread(_media_provider, body.provider_id)
+        if not provider:
+            raise HTTPException(404, detail="Plex / Jellyfin / Emby provider not found")
+        stype = provider["provider_type"].lower()
+        url, key = (provider.get("base_url") or "").rstrip("/"), provider.get("password") or ""
+    else:
+        stype = body.type.strip().lower()
+        if stype not in config.LIBRARY_SERVER_TYPES:
+            raise HTTPException(400, detail="Server type must be Plex, Jellyfin or Emby.")
+        url = body.url.strip().rstrip("/")
+        key = body.api_key.strip()
+        if not key and body.id:
+            key = await asyncio.to_thread(config.get_library_server_key, body.id) or ""
     if not url or not key:
         raise HTTPException(400, detail="Enter the URL and token / API key first.")
     try:

@@ -3054,10 +3054,21 @@ function HandoffCard() {
 }
 
 // KNM: In Library badge settings -- the user's own Plex / Jellyfin / Emby servers (2026-10-18).
-// The media servers are called only by Test and Scan; cards read the local table.
+// A server is a ticked Plex / Jellyfin / Emby provider (linked by id; the backend reads its URL and
+// token from the provider each time) or, as a fallback, one typed in here. The media servers are
+// called only by Test and Scan; cards read the local table.
 type LibraryServerType = 'plex' | 'jellyfin' | 'emby'
 interface LibraryRef { key: string; title: string; kind: string }
-interface LibraryServer { id: string | null; type: LibraryServerType; name: string; url: string; has_key?: boolean; libraries: LibraryRef[] }
+interface LibraryServer {
+  id: string | null
+  source: 'provider' | 'manual'
+  provider_id?: number | null
+  type: LibraryServerType
+  name: string
+  url: string
+  has_key?: boolean
+  libraries: LibraryRef[]
+}
 interface LibraryScanResult { id: string; name: string; ok: boolean; count: number; error?: string | null }
 interface LibraryPresenceSettings {
   servers: LibraryServer[]
@@ -3065,41 +3076,46 @@ interface LibraryPresenceSettings {
   status?: { last_scan_at: number | null; last_results: LibraryScanResult[]; rows: Record<string, { count: number; seen_at: string }> }
 }
 const LIBRARY_SERVER_LABEL: Record<LibraryServerType, string> = { plex: 'Plex', jellyfin: 'Jellyfin', emby: 'Emby' }
+const isLibraryServerType = (t: string | undefined): t is LibraryServerType => t === 'plex' || t === 'jellyfin' || t === 'emby'
+const blankManualServer = (): LibraryServer => ({ id: null, source: 'manual', type: 'plex', name: '', url: '', libraries: [] })
 
 function LibraryPresenceCard({ providers }: { providers: Provider[] }) {
   const qc = useQueryClient()
   const query = useQuery<LibraryPresenceSettings>({ queryKey: ['vod-library-presence'], queryFn: () => api.get('/vod/library-presence/settings/').then((r) => r.data) })
+  const mediaProviders = providers.filter((p) => isLibraryServerType(p.provider_type))
   const [draft, setDraft] = useState<LibraryPresenceSettings | null>(null)
   const [keys, setKeys] = useState<Record<number, string>>({})
   const [found, setFound] = useState<Record<number, LibraryRef[]>>({})
   const [testMsg, setTestMsg] = useState<Record<number, { ok: boolean; text: string }>>({})
-  const [copyFrom, setCopyFrom] = useState('')
   const [error, setError] = useState<string | null>(null)
-  useEffect(() => { if (query.data && !draft) setDraft(query.data) }, [query.data, draft])
+  // A blank typed-in server is only a form to fill in: it isn't saved and doesn't make the card dirty.
+  const isBlank = (s: LibraryServer, i: number, k: Record<number, string> = keys) => s.source === 'manual' && !s.id && !s.url.trim() && !s.name.trim() && !k[i]
+  const withForm = (d: LibraryPresenceSettings) =>
+    // No Plex / Jellyfin / Emby provider to tick: open the typed-in form straight away.
+    mediaProviders.length === 0 && !d.servers.some((s) => s.source === 'manual') ? { ...d, servers: [...d.servers, blankManualServer()] } : d
+  useEffect(() => { if (query.data && !draft) setDraft(withForm(query.data)) }, [query.data, draft])
   const errText = (e: any) => e?.response?.data?.detail ?? e?.message ?? 'Request failed.'
   const loaded = (saved: LibraryPresenceSettings) => {
-    setError(null); setDraft(saved); setKeys({}); setFound({}); setTestMsg({})
+    setError(null); setDraft(withForm(saved)); setKeys({}); setFound({}); setTestMsg({})
     qc.setQueryData(['vod-library-presence'], saved)
   }
   const refreshLists = () => { qc.invalidateQueries({ queryKey: ['vod-movies'] }); qc.invalidateQueries({ queryKey: ['vod-series'] }) }
-  const save = useMutation({
-    mutationFn: (d: LibraryPresenceSettings) => api.post('/vod/library-presence/settings/', {
-      scan_hours: d.scan_hours,
-      servers: d.servers.map((s, i) => ({ id: s.id, type: s.type, name: s.name, url: s.url, api_key: keys[i] ?? '', libraries: s.libraries })),
-    }).then((r) => r.data as LibraryPresenceSettings),
-    onSuccess: (saved) => { loaded(saved); refreshLists(); toast.success('In Library settings saved') },
-    onError: (e: any) => setError(errText(e)),
+  const payload = (d: LibraryPresenceSettings, k: Record<number, string> = keys) => d.servers.flatMap((s, i): Record<string, unknown>[] => {
+    if (s.source === 'provider') return [{ source: 'provider', provider_id: s.provider_id, libraries: s.libraries }]
+    if (isBlank(s, i, k)) return []
+    return [{ source: 'manual', id: s.id, type: s.type, name: s.name, url: s.url, api_key: k[i] ?? '', libraries: s.libraries }]
   })
-  const copy = useMutation({
-    mutationFn: (providerId: number) => api.post(`/vod/library-presence/copy-from-provider/${providerId}`).then((r) => r.data as LibraryPresenceSettings),
-    onSuccess: (saved) => { loaded(saved); setCopyFrom(''); toast.success('Server copied. Press Test to pick its libraries.') },
+  const save = useMutation({
+    mutationFn: (d: LibraryPresenceSettings) => api.post('/vod/library-presence/settings/', { scan_hours: d.scan_hours, servers: payload(d) })
+      .then((r) => r.data as LibraryPresenceSettings),
+    onSuccess: (saved) => { loaded(saved); refreshLists(); toast.success('In Library settings saved') },
     onError: (e: any) => setError(errText(e)),
   })
   const test = useMutation({
     mutationFn: (i: number) => {
       const s = draft!.servers[i]
-      return api.post('/vod/library-presence/test/', { id: s.id, type: s.type, url: s.url, api_key: keys[i] ?? '' })
-        .then((r) => ({ i, data: r.data as { version?: string | null; libraries: LibraryRef[] } }))
+      const body = s.source === 'provider' ? { provider_id: s.provider_id } : { id: s.id, type: s.type, url: s.url, api_key: keys[i] ?? '' }
+      return api.post('/vod/library-presence/test/', body).then((r) => ({ i, data: r.data as { version?: string | null; libraries: LibraryRef[] } }))
     },
     onSuccess: ({ i, data }) => {
       setFound((f) => ({ ...f, [i]: data.libraries }))
@@ -3120,15 +3136,52 @@ function LibraryPresenceCard({ providers }: { providers: Provider[] }) {
   if (!draft) return null
   const setServer = (i: number, patch: Partial<LibraryServer>) =>
     setDraft({ ...draft, servers: draft.servers.map((s, k) => (k === i ? { ...s, ...patch } : s)) })
+  // Per-row state (keys, Test results) is by position, so it's cleared when a row is removed.
+  const removeServers = (servers: LibraryServer[]) => { setDraft({ ...draft, servers }); setKeys({}); setFound({}); setTestMsg({}) }
   const toggleLibrary = (i: number, lib: LibraryRef, on: boolean) => {
     const cur = draft.servers[i].libraries.filter((l) => l.key !== lib.key)
     setServer(i, { libraries: on ? [...cur, lib] : cur })
   }
-  const copyable = providers.filter((p) => p.provider_type === 'plex' || p.provider_type === 'jellyfin' || p.provider_type === 'emby')
+  const addServer = (s: LibraryServer) => setDraft({ ...draft, servers: [...draft.servers, s] })
+  const toggleProvider = (p: Provider, on: boolean) => (on
+    ? addServer( { id: `provider:${p.id}`, source: 'provider', provider_id: p.id, type: p.provider_type as LibraryServerType, name: p.name, url: p.base_url, libraries: [] })
+    : removeServers(draft.servers.filter((s) => !(s.source === 'provider' && s.provider_id === p.id))))
   const status = query.data?.status
-  const { status: _s, ...savedNoStatus } = query.data ?? { servers: [], scan_hours: 6 }
-  const { status: _d, ...draftNoStatus } = draft
-  const dirty = JSON.stringify(draftNoStatus) !== JSON.stringify(savedNoStatus) || Object.values(keys).some(Boolean)
+  const comparable = (d: LibraryPresenceSettings, k: Record<number, string>) => JSON.stringify({ scan_hours: d.scan_hours, servers: payload(d, k) })
+  const dirty = comparable(draft, keys) !== comparable(query.data ?? { servers: [], scan_hours: 6 }, {})
+  const manual = draft.servers.map((s, i) => ({ s, i })).filter(({ s }) => s.source === 'manual')
+  const anyServer = draft.servers.some((s, i) => !isBlank(s, i))
+
+  const testButton = (i: number) => (
+    <button className="px-2 py-0.5 rounded border border-border hover:bg-accent disabled:opacity-50" disabled={test.isPending} onClick={() => test.mutate(i)}>
+      {test.isPending && test.variables === i ? 'Testing…' : 'Test'}
+    </button>
+  )
+  const statusBits = (s: LibraryServer, i: number) => {
+    const msg = testMsg[i]
+    const rows = s.id ? status?.rows[s.id] : undefined
+    return (
+      <>
+        {msg && <span className={msg.ok ? 'text-emerald-500' : 'text-destructive'}>{msg.text}</span>}
+        {rows && <span className="text-muted-foreground">{rows.count} title{rows.count === 1 ? '' : 's'} found</span>}
+      </>
+    )
+  }
+  const libraryPicker = (s: LibraryServer, i: number) => {
+    const libs = found[i] ?? s.libraries
+    return (
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <span className="font-medium">Libraries</span>
+        {libs.length === 0 && <span className="text-muted-foreground">Press Test to list them</span>}
+        {libs.map((lib) => (
+          <label key={lib.key} className="flex items-center gap-1">
+            <input type="checkbox" checked={s.libraries.some((l) => l.key === lib.key)} onChange={(e) => toggleLibrary(i, lib, e.target.checked)} />
+            {lib.title}<span className="text-muted-foreground">({lib.kind === 'show' ? 'TV' : 'movies'})</span>
+          </label>
+        ))}
+      </div>
+    )
+  }
 
   return (
     <SectionCard title="In Library (your Plex / Jellyfin / Emby)" icon={<CheckCircle2 size={14} />}>
@@ -3138,55 +3191,63 @@ function LibraryPresenceCard({ providers }: { providers: Provider[] }) {
         the server. With more than one server, a title counts when any of them has it.
       </p>
       <div className="space-y-2 text-xs">
-        {draft.servers.length === 0 && <p className="text-muted-foreground">No servers yet.</p>}
-        {draft.servers.map((s, i) => {
-          const msg = testMsg[i]
-          const libs = found[i] ?? s.libraries
-          const rows = s.id ? status?.rows[s.id] : undefined
-          const keyWord = s.type === 'plex' ? 'Token' : 'API key'
-          return (
-            <div key={s.id ?? `new-${i}`} className="rounded border border-border/60 p-2 space-y-1.5">
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-                <select className={inputCls()} value={s.type} onChange={(e) => setServer(i, { type: e.target.value as LibraryServerType, libraries: [] })}>
-                  {(Object.keys(LIBRARY_SERVER_LABEL) as LibraryServerType[]).map((t) => <option key={t} value={t}>{LIBRARY_SERVER_LABEL[t]}</option>)}
-                </select>
-                <input className={inputCls('w-36')} placeholder="Name" value={s.name} onChange={(e) => setServer(i, { name: e.target.value })} />
-                <input className={inputCls('w-56')} placeholder={s.type === 'plex' ? 'http://host:32400' : 'http://host:8096'} value={s.url} onChange={(e) => setServer(i, { url: e.target.value })} />
-                <input className={inputCls('w-48')} type="password" autoComplete="off" placeholder={s.has_key ? `${keyWord} (saved)` : keyWord} title="Leave blank to keep the saved one." value={keys[i] ?? ''} onChange={(e) => setKeys({ ...keys, [i]: e.target.value })} />
-                <button className="px-2 py-0.5 rounded border border-border hover:bg-accent disabled:opacity-50" disabled={test.isPending} onClick={() => test.mutate(i)}>
-                  {test.isPending && test.variables === i ? 'Testing…' : 'Test'}
-                </button>
-                <button className="text-muted-foreground hover:text-destructive" title="Remove this server (its titles stop counting when you save)" onClick={() => setDraft({ ...draft, servers: draft.servers.filter((_, k) => k !== i) })}><Trash2 size={12} /></button>
-                {msg && <span className={msg.ok ? 'text-emerald-500' : 'text-destructive'}>{msg.text}</span>}
-                {rows && <span className="text-muted-foreground">{rows.count} title{rows.count === 1 ? '' : 's'} found</span>}
-              </div>
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                <span className="font-medium">Libraries</span>
-                {libs.length === 0 && <span className="text-muted-foreground">Press Test to list them</span>}
-                {libs.map((lib) => (
-                  <label key={lib.key} className="flex items-center gap-1">
-                    <input type="checkbox" checked={s.libraries.some((l) => l.key === lib.key)} onChange={(e) => toggleLibrary(i, lib, e.target.checked)} />
-                    {lib.title}<span className="text-muted-foreground">({lib.kind === 'show' ? 'TV' : 'movies'})</span>
-                  </label>
-                ))}
-              </div>
-            </div>
-          )
-        })}
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-          <button className="px-2 py-0.5 rounded border border-border hover:bg-accent" onClick={() => setDraft({ ...draft, servers: [...draft.servers, { id: null, type: 'plex', name: '', url: '', libraries: [] }] })}>
-            <Plus size={12} className="inline mr-1" />Add server
-          </button>
-          {copyable.length > 0 && (
-            <>
-              <select className={inputCls()} value={copyFrom} title="Copies the provider's URL and token into a new server. It is a copy: later changes to the provider are not picked up." onChange={(e) => setCopyFrom(e.target.value)}>
-                <option value="">Copy from provider…</option>
-                {copyable.map((p) => <option key={p.id} value={p.id}>{p.name} ({LIBRARY_SERVER_LABEL[p.provider_type as LibraryServerType]})</option>)}
-              </select>
-              <button className="px-2 py-0.5 rounded border border-border hover:bg-accent disabled:opacity-50" disabled={!copyFrom || copy.isPending || dirty} title={dirty ? 'Save or undo your changes first' : undefined} onClick={() => copy.mutate(Number(copyFrom))}>Copy</button>
-            </>
-          )}
-        </div>
+        {mediaProviders.length > 0 && (
+          <div className="space-y-1.5">
+            <p className="text-muted-foreground">
+              Tick the providers that are your own library. Their URL and token come from the Providers page, so a change there applies here too.
+            </p>
+            {mediaProviders.map((p) => {
+              const i = draft.servers.findIndex((s) => s.source === 'provider' && s.provider_id === p.id)
+              const s = i >= 0 ? draft.servers[i] : null
+              return (
+                <div key={p.id} className="rounded border border-border/60 p-2 space-y-1.5">
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                    <label className="flex items-center gap-1.5 font-medium">
+                      <input type="checkbox" checked={!!s} onChange={(e) => toggleProvider(p, e.target.checked)} />
+                      {p.name}<span className="font-normal text-muted-foreground">({LIBRARY_SERVER_LABEL[p.provider_type as LibraryServerType]})</span>
+                    </label>
+                    {s && testButton(i)}
+                    {s && statusBits(s, i)}
+                  </div>
+                  {s && libraryPicker(s, i)}
+                </div>
+              )
+            })}
+          </div>
+        )}
+        {manual.length > 0 && (
+          <div className="space-y-1.5">
+            {mediaProviders.length > 0 && <p className="font-medium pt-1">Servers that aren't providers</p>}
+            {mediaProviders.length === 0 && (
+              <p className="text-muted-foreground">
+                No Plex, Jellyfin or Emby provider yet, so enter your server here. (Adding it on the Providers page would also import its titles
+                into the catalog; entering it here only checks what it has.)
+              </p>
+            )}
+            {manual.map(({ s, i }) => {
+              const keyWord = s.type === 'plex' ? 'Token' : 'API key'
+              return (
+                <div key={s.id ?? `new-${i}`} className="rounded border border-border/60 p-2 space-y-1.5">
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                    <select className={inputCls()} value={s.type} onChange={(e) => setServer(i, { type: e.target.value as LibraryServerType, libraries: [] })}>
+                      {(Object.keys(LIBRARY_SERVER_LABEL) as LibraryServerType[]).map((t) => <option key={t} value={t}>{LIBRARY_SERVER_LABEL[t]}</option>)}
+                    </select>
+                    <input className={inputCls('w-36')} placeholder="Name" value={s.name} onChange={(e) => setServer(i, { name: e.target.value })} />
+                    <input className={inputCls('w-56')} placeholder={s.type === 'plex' ? 'http://host:32400' : 'http://host:8096'} value={s.url} onChange={(e) => setServer(i, { url: e.target.value })} />
+                    <input className={inputCls('w-48')} type="password" autoComplete="off" placeholder={s.has_key ? `${keyWord} (saved)` : keyWord} title="Leave blank to keep the saved one." value={keys[i] ?? ''} onChange={(e) => setKeys({ ...keys, [i]: e.target.value })} />
+                    {testButton(i)}
+                    <button className="text-muted-foreground hover:text-destructive" title="Remove this server (its titles stop counting when you save)" onClick={() => removeServers(draft.servers.filter((_, k) => k !== i))}><Trash2 size={12} /></button>
+                    {statusBits(s, i)}
+                  </div>
+                  {libraryPicker(s, i)}
+                </div>
+              )
+            })}
+          </div>
+        )}
+        <button className="text-muted-foreground underline-offset-2 hover:underline hover:text-foreground" title="For a server you don't want as a provider (a provider's titles are imported into the catalog)." onClick={() => addServer(blankManualServer())}>
+          <Plus size={12} className="inline mr-1" />{manual.length ? 'Add another server' : "Add a server that isn't a provider"}
+        </button>
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 border-t border-border/50 pt-2">
           <span className="font-medium">Scan every</span>
           <input className={inputCls('w-14')} type="number" min={1} step={1} title="Hours between scans. A scan also runs right after Radarr / Sonarr import a download." value={draft.scan_hours} onChange={(e) => setDraft({ ...draft, scan_hours: Math.max(1, Math.round(Number(e.target.value) || 1)) })} />
@@ -3199,7 +3260,7 @@ function LibraryPresenceCard({ providers }: { providers: Provider[] }) {
           <Button size="sm" disabled={save.isPending} onClick={() => save.mutate(draft)}>
             {save.isPending ? <Loader2 size={12} className="animate-spin" /> : 'Save'}
           </Button>
-          <Button size="sm" variant="outline" disabled={scan.isPending || dirty || !draft.servers.length} title={dirty ? 'Save first' : 'Read the ticked libraries now'} onClick={() => scan.mutate()}>
+          <Button size="sm" variant="outline" disabled={scan.isPending || dirty || !anyServer} title={dirty ? 'Save first' : 'Read the ticked libraries now'} onClick={() => scan.mutate()}>
             {scan.isPending ? <Loader2 size={12} className="animate-spin mr-1" /> : <RefreshCw size={12} className="mr-1" />}Scan now
           </Button>
         </div>
@@ -8968,7 +9029,8 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
 
       <HandoffCard />
 
-      <LibraryPresenceCard providers={providersQuery.data ?? []} />
+      {/* KNM: wait for providers so the card knows whether to open the typed-in form (2026-10-18) */}
+      {!providersQuery.isPending && <LibraryPresenceCard providers={providersQuery.data ?? []} />}
 
       <SectionCard title="Dispatcharr Connections" icon={<Zap size={14} />}>
         <p className="text-xs text-muted-foreground">
