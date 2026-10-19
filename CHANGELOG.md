@@ -42,6 +42,15 @@ instead of opening a duplicate request.
     finished removes only failed and cancelled downloads. Downloaded files
     are never deleted. Rows still being imported into Radarr/Sonarr are kept,
     as with Clear finished.
+- ✅ **Failed downloads no longer show as "library import pending".**
+  - **Before:** with the Radarr/Sonarr handoff on, a download that failed or
+    was cancelled kept the import state it got when it was queued, so the
+    trash icon and Clear failed skipped it ("kept: library import still
+    pending").
+  - **After:** a failed or cancelled download can always be removed and no
+    longer shows a leftover import chip. A completed download that is still
+    waiting on Radarr/Sonarr can now be removed too: its trash icon asks for
+    confirmation first.
 
 ## 2026-10-19 (Synced with upstream v0.3.04)
 
