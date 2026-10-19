@@ -33,7 +33,7 @@ instead of opening a duplicate request.
 
 ## 2026-10-19 (Remove failed downloads from the queue)
 
-- ✅ **Failed and cancelled downloads can be removed from the queue.**
+- ✅ 🔀 [#61](https://github.com/jstevenscl/vod-manager/pull/61) **Failed and cancelled downloads can be removed from the queue.**
   - **Before:** the only way to get a failed row (e.g. "This episode no
     longer exists.") out of the queue was **Clear finished**, which also
     removed every completed download.
