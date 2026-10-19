@@ -1136,7 +1136,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         finished_at        TEXT
     )""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_download_jobs_status ON download_jobs(status)")
-    # KNM: 2026-10-18 persistent notices (notices.py): stay until acknowledged.
+    # persistent notices (notices.py): stay until acknowledged.
     conn.execute("""CREATE TABLE IF NOT EXISTS notices (
         id              INTEGER PRIMARY KEY AUTOINCREMENT,
         kind            TEXT NOT NULL,
@@ -1147,7 +1147,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         created_at      TEXT NOT NULL,
         acknowledged_at TEXT
     )""")
-    # KNM: 2026-10-18 In Library badge (library_presence.py): what the user's media
+    # In Library badge (library_presence.py): what the user's media
     # servers hold, replaced per server on each scan. Episode rows carry their show's
     # ids/title/year. server='import' rows are items a Radarr/Sonarr import just added.
     conn.execute("""CREATE TABLE IF NOT EXISTS library_presence (
@@ -6971,7 +6971,7 @@ def _movie_filter_clause(
         params.append(provider_id)
     if no_tmdb:
         where.append("m.tmdb_id IS NULL")
-    in_lib = _in_library_clause("m", "movie", in_library)  # KNM: In Library filter (2026-10-18)
+    in_lib = _in_library_clause("m", "movie", in_library)  # In Library filter
     if in_lib:
         where.append(in_lib)
     clause = f"WHERE {' AND '.join(where)}" if where else ""
@@ -8264,7 +8264,7 @@ def _series_filter_clause(
         params.append(provider_id)
     if no_tmdb:
         where.append("s.tmdb_id IS NULL")
-    in_lib = _in_library_clause("s", "series", in_library)  # KNM: In Library filter (2026-10-18)
+    in_lib = _in_library_clause("s", "series", in_library)  # In Library filter
     if in_lib:
         where.append(in_lib)
     clause = f"WHERE {' AND '.join(where)}" if where else ""
@@ -15431,7 +15431,7 @@ def delete_library_presence(servers_to_keep: list[str] | None = None, server: st
             conn.close()
 
 
-# KNM: prune individual import marks once a server lists them or they age out (2026-10-18)
+# prune individual import marks once a server lists them or they age out
 def delete_library_presence_ids(ids: list[int]) -> None:
     if not ids:
         return
@@ -15610,7 +15610,7 @@ def cancel_download_jobs(job_ids: list[int] | None = None) -> list[int]:
             conn.close()
 
 
-# KNM: rows whose Radarr/Sonarr import is still in flight must survive "Clear finished" (2026-10-18)
+# rows whose Radarr/Sonarr import is still in flight must survive "Clear finished"
 PENDING_IMPORT_STATUSES = ("add", "ready", "waiting", "importing")
 _CLEARABLE = ("status IN ('done','failed','cancelled') AND "
               "(import_status IS NULL OR import_status NOT IN ("

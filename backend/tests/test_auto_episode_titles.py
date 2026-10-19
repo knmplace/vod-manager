@@ -102,7 +102,7 @@ def test_run_once_off_does_nothing_and_survives_a_stale_id(db, monkeypatch):
     assert result["failed"] == 1 and result["episodes_renamed"] == 0
 
 
-# KNM: 2026-10-18 -- local TMDB library first; TMDB only when local can't fill.
+# Local TMDB library first; TMDB only when local can't fill.
 def _store_show(tmdb_id, season_eps, age=3 * 86400):
     import tmdb_store
     config.save_tmdb_store_settings({"enabled": True})

@@ -15,7 +15,7 @@ import { Button } from '@/components/ui/button'
 type ConfirmState = { message: string; onConfirm: () => void; confirmLabel?: string } | null
 let _setConfirmDialog: ((state: ConfirmState) => void) | null = null
 
-// KNM: confirmLabel lets a caller name the action, e.g. "Download anyway" (2026-10-18)
+// confirmLabel lets a caller name the action, e.g. "Download anyway"
 export function askConfirm(message: string, onConfirm: () => void, confirmLabel?: string) {
   _setConfirmDialog?.({ message, onConfirm, confirmLabel })
 }

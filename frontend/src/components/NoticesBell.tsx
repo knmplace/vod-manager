@@ -4,7 +4,7 @@ import { Bell, Check } from 'lucide-react'
 import api from '@/lib/api'
 import { toast } from '@/lib/toast'
 
-// KNM: 2026-10-18 notices that stay until acknowledged (stalled / failed Radarr-Sonarr imports)
+// notices that stay until acknowledged (stalled / failed Radarr-Sonarr imports)
 interface Notice {
   id: number; kind: string; severity: 'info' | 'warn' | 'error'; title: string; body: string | null
   job_id: number | null; created_at: string

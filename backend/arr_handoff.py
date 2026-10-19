@@ -192,7 +192,7 @@ def _tick_importing(job: dict, client, settings: dict, now: float) -> None:
     if status == "completed" and client.has_file(job["arr_id"], *_episode_numbers(job)):
         vod_db.update_import(job["id"], import_status="imported", import_note=None)
         logger.info("[handoff] job=%s imported into %s", job["id"], _APP[job["kind"]])
-        try:  # KNM: show the In Library badge now, before the next media-server scan (2026-10-18)
+        try:  # show the In Library badge now, before the next media-server scan
             library_presence.mark_imported(job)
         except Exception:
             logger.exception("[handoff] job=%s in-library mark failed", job["id"])

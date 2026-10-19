@@ -38,8 +38,8 @@ def handoff(db, tmp_path, monkeypatch):
     config.save_download_settings({"enabled": True, "output_dir": str(tmp_path / "library"), "min_free_gb": 0})
     config.save_handoff_settings({"radarr_url": "http://r:7878", "radarr_api_key": "RK",
                                   "sonarr_url": "http://s:8989", "sonarr_api_key": "SK",
-                                  "radarr_root": "/MEDIA50/Movies", "radarr_profile_id": 6,
-                                  "sonarr_root": "/MEDIA50/Tv", "sonarr_profile_id": 6})
+                                  "radarr_root": "/media/Movies", "radarr_profile_id": 6,
+                                  "sonarr_root": "/media/Tv", "sonarr_profile_id": 6})
     fakes = {}
     monkeypatch.setattr(arr_handoff, "client_for", lambda kind: fakes.get(kind))
     return fakes
@@ -106,7 +106,7 @@ def test_missing_movie_added_unmonitored(db, handoff):
     handoff["movie"] = fake = FakeArr({"777": {"title": "Some Movie"}})
     vod_downloader.enqueue(movie_ids=[_movie(db)])
     job = _resolve()[0]
-    assert ("add", "Some Movie", "/MEDIA50/Movies", 6, "unmonitored") in fake.calls
+    assert ("add", "Some Movie", "/media/Movies", 6, "unmonitored") in fake.calls
     assert job["arr_id"] == 900 and job["import_status"] == "ready"
 
 
@@ -114,7 +114,7 @@ def test_missing_show_added_future_only(db, handoff):
     handoff["episode"] = fake = FakeArr({"555": {"title": "Show"}})
     vod_downloader.enqueue(series_ids=[_series(db)])
     _resolve()
-    assert ("add", "Show", "/MEDIA50/Tv", 6, "future") in fake.calls
+    assert ("add", "Show", "/media/Tv", 6, "future") in fake.calls
 
 
 def test_add_step_groups_episodes_by_series(db, handoff):
@@ -179,9 +179,9 @@ class WatchArr(FakeArr):
 
 @pytest.fixture()
 def watch(handoff, tmp_path):
-    finished = tmp_path / "netdl" / "radarr"
-    shows_finished = tmp_path / "netdl" / "tv"
-    config.save_handoff_settings({"movies_finished_dir": str(finished), "movies_arr_dir": "/MEDIA50/netdl/radarr",
+    finished = tmp_path / "finished" / "radarr"
+    shows_finished = tmp_path / "finished" / "tv"
+    config.save_handoff_settings({"movies_finished_dir": str(finished), "movies_arr_dir": "/media/finished/radarr",
                                   "shows_finished_dir": str(shows_finished)})
     return {"fakes": handoff, "finished": finished, "shows_finished": shows_finished,
             "staging": tmp_path / "library" / "Movies"}
@@ -212,8 +212,7 @@ def _job(jid):
 
 
 def test_done_marks_waiting_only_for_handoff_jobs(db, tmp_path):
-    config.save_download_settings({"enabled": True, "output_dir": str(tmp_path / "library"), "min_free_gb": 0,
-                                   "tmdb_id_in_folder": False})
+    config.save_download_settings({"enabled": True, "output_dir": str(tmp_path / "library"), "min_free_gb": 0})
     vod_downloader.enqueue(movie_ids=[_movie(db)])
     plain = _jobs()[0]["id"]
     vod_db.mark_import_waiting(plain)
@@ -222,7 +221,7 @@ def test_done_marks_waiting_only_for_handoff_jobs(db, tmp_path):
     config.save_handoff_settings({"radarr_url": "http://r:7878", "radarr_api_key": "RK"})
     vod_downloader.enqueue(movie_ids=[_movie(db, name="Other", year=2002, tmdb="778")])
     jid = _jobs()[1]["id"]
-    _put(tmp_path / "library" / "Movies" / "Other (2002)", "Other (2002).mp4")
+    _put(tmp_path / "library" / "Movies" / "Other (2002) [tmdbid-778]", "Other (2002).mp4")
     asyncio.run(vod_downloader.run_job(jid))
     job = _job(jid)
     assert job["status"] == "done" and job["import_status"] == "waiting" and job["import_since"]
@@ -245,7 +244,7 @@ def test_waits_for_size_stable_60s(db, watch):
     _tick(T0 + 40)
     assert "import" not in fake.names()
     _tick(T0 + 71)
-    assert ("import", "/MEDIA50/netdl/radarr/Some Movie (2001)") in fake.calls
+    assert ("import", "/media/finished/radarr/Some Movie (2001)") in fake.calls
     job = _job(jid)
     assert job["import_status"] == "importing" and job["import_cmd_id"] == 55
 

@@ -20,7 +20,7 @@ def _save(**kw):
 
 
 def test_settings_roundtrip_hides_key(db):
-    out = _save(radarr_url="http://r:7878/", radarr_api_key="SECRET", radarr_root="/MEDIA50/Movies",
+    out = _save(radarr_url="http://r:7878/", radarr_api_key="SECRET", radarr_root="/media/Movies",
                 radarr_profile_id=6, stall_hours=[2, 6, 12], fail_hours=20)
     got = asyncio.run(vod_routes.get_handoff_settings_route())
     for s in (out, got):
@@ -44,11 +44,11 @@ def test_bad_monitor_rejected(db):
     assert exc.value.status_code == 400
 
 
-# KNM: the "as Radarr/Sonarr see them" folder is the finished folder, never the library root (2026-10-18)
+# the "as Radarr/Sonarr see them" folder is the finished folder, never the library root
 @pytest.mark.parametrize("kw", [
-    dict(movies_arr_dir="/MEDIA50/Movies", radarr_root="/MEDIA50/Movies"),
-    dict(movies_arr_dir="/MEDIA50/Movies/", radarr_root="/MEDIA50/Movies"),
-    dict(shows_arr_dir="/MEDIA50/Tv", sonarr_root="/MEDIA50/Tv/"),
+    dict(movies_arr_dir="/media/Movies", radarr_root="/media/Movies"),
+    dict(movies_arr_dir="/media/Movies/", radarr_root="/media/Movies"),
+    dict(shows_arr_dir="/media/TV", sonarr_root="/media/TV/"),
 ])
 def test_arr_dir_equal_to_root_folder_rejected(db, kw):
     with pytest.raises(HTTPException) as exc:
@@ -57,9 +57,9 @@ def test_arr_dir_equal_to_root_folder_rejected(db, kw):
 
 
 def test_arr_dir_different_from_root_folder_saved(db):
-    out = _save(movies_arr_dir="/MEDIA50/netdl/radarr", radarr_root="/MEDIA50/Movies",
-                shows_arr_dir="", sonarr_root="/MEDIA50/Tv")
-    assert out["movies_arr_dir"] == "/MEDIA50/netdl/radarr"
+    out = _save(movies_arr_dir="/media/finished/movies", radarr_root="/media/Movies",
+                shows_arr_dir="", sonarr_root="/media/TV")
+    assert out["movies_arr_dir"] == "/media/finished/movies"
 
 
 class _FakeClient:
@@ -75,7 +75,7 @@ class _FakeClient:
         return {"version": "5.1"}
 
     def root_folders(self):
-        return [{"id": 1, "path": "/MEDIA50/Movies"}]
+        return [{"id": 1, "path": "/media/Movies"}]
 
     def quality_profiles(self):
         return [{"id": 6, "name": "HD"}]
@@ -85,7 +85,7 @@ def test_test_endpoint_returns_profiles(db, monkeypatch):
     monkeypatch.setattr(arr_client, "ArrClient", _FakeClient)
     _save(radarr_url="http://r:7878", radarr_api_key="SAVED")
     out = asyncio.run(vod_routes.test_handoff("radarr", vod_routes.HandoffTestRequest()))
-    assert out == {"ok": True, "version": "5.1", "root_folders": [{"id": 1, "path": "/MEDIA50/Movies"}],
+    assert out == {"ok": True, "version": "5.1", "root_folders": [{"id": 1, "path": "/media/Movies"}],
                    "profiles": [{"id": 6, "name": "HD"}]}
     assert _FakeClient.seen[-1] == ("radarr", "http://r:7878", "SAVED")
     # unsaved values from the form win over the saved ones

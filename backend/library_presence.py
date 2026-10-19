@@ -199,7 +199,7 @@ async def scan_all() -> dict:
                     logger.warning("[library_presence] scan of %s failed: %s", server["name"], res["error"])
             results.append(res)
         keep = [s["id"] for s in servers]      # also drops rows of a server no longer configured
-        # KNM: import marks are pruned one by one, never mass-cleared on a clean scan (2026-10-18)
+        # import marks are pruned one by one, never mass-cleared on a clean scan
         await asyncio.to_thread(vod_db.delete_library_presence, keep + [IMPORT_SERVER])
         await asyncio.to_thread(_prune_import_marks, scan_start)
         matched = await asyncio.to_thread(rebuild_matches)
@@ -273,7 +273,7 @@ def _join(labels) -> str:
     return ", ".join(dict.fromkeys(labels))
 
 
-# KNM: serializes rebuild_matches' read->replace with mark_imported's writes so a mark isn't lost (2026-10-18)
+# serializes rebuild_matches' read->replace with mark_imported's writes so a mark isn't lost
 _match_lock = threading.RLock()
 IMPORT_MARK_TTL = 24 * 3600
 

@@ -1,7 +1,4 @@
-# KNM: 2026-10-14 -- the store only kept titles the catalog already used, so
-# every newly imported title cost a TMDB call and anything leaving the catalog
-# was deleted the next day. It now also fills/keeps the most popular TMDB
-# titles, keeps unused titles until the cache age limit, and compacts the file.
+"""Popular-title fill, keep-until-cache-limit retention, and store compaction."""
 
 import asyncio
 import time

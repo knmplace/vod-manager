@@ -517,8 +517,8 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_strm_export_scheduler()),
         asyncio.create_task(_auto_episode_titles_scheduler()),
         asyncio.create_task(vod_downloader.download_loop()),
-        asyncio.create_task(arr_handoff.handoff_loop()),  # KNM: 2026-10-18 Radarr/Sonarr import watcher
-        asyncio.create_task(library_presence.scan_loop()),  # KNM: 2026-10-18 In Library scans of the user's media servers
+        asyncio.create_task(arr_handoff.handoff_loop()),  # Radarr/Sonarr import watcher
+        asyncio.create_task(library_presence.scan_loop()),  # In Library scans of the user's media servers
         asyncio.create_task(_dispatcharr_dvr_poller()),
         asyncio.create_task(_watch_session_poller()),
         asyncio.create_task(_vod_enrichment_scheduler()),

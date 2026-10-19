@@ -427,6 +427,11 @@ never touched. The preview and the cleanup always report the same counts.
 Cleanup is XC-only: for Plex/Emby/Jellyfin the exclusion still applies to future
 imports, but existing content is not removed.
 
+The Language and Country rules above work the same way on Xtream-Codes
+providers: a matching title is **skipped during import** and counted with the
+excluded titles, instead of being created archived and removed again on every
+import. On Plex/Emby/Jellyfin, matching titles are still auto-archived.
+
 If a provider's own category list has drifted since you last set exclusions
 (a category renamed or removed on their end), the picker calls those out
 separately — "N saved exclusions no longer reported by this provider" — with
@@ -884,7 +889,10 @@ Recreate the container, choose the encoder and press **Test encoder**: it runs a
 GPU and tells you at once if the device or driver is missing. If a GPU encode fails during a real
 download, that download falls back to the CPU instead of failing (the *Status* note says so). The
 image includes the Intel media driver; AMD GPUs and some older Intel generations may not work out of the
-box. Hardware encodes are quicker but a little larger than software at the same quality setting.
+box. The GPU only encodes; the CPU still decodes and scales, which is faster than GPU decoding on most small
+boxes. **Quick Sync (QSV)** needs an 11th-gen or newer Intel CPU; on older ones (Gemini Lake, Skylake and so on)
+choose **VAAPI** instead. The **Test encoder** result shows the speed, so you can see before downloading whether
+the GPU is actually faster than the CPU. Hardware encodes are quicker but a little larger than software at the same quality setting.
 Without a GPU, **CPU threads** (software encoder) limits (roughly) how many cores one re-encode uses so the
 rest of the server stays responsive. Re-encoding runs at low priority either way.
 
@@ -935,6 +943,21 @@ provider can override (**Providers → Downloads**; blank means "use the default
 | At once per provider | How many downloads may run on one provider together (needs a matching max streams). |
 | Pause between (seconds) | A rest between two downloads from the same provider. |
 | Only between (hours) | Optionally only *start* downloads in a quiet window, such as 1-7. |
+| Reconnect when slow | Drops a download that has crawled for about 30 seconds and resumes it on a fresh connection (on by default; see below). |
+
+**Seeing how a download is going, and slow providers.** While a download runs, the note under its name in
+the queue shows the live speed and a short **server** id, for example *Downloading · 3.7 MB/s · server 50830*.
+Most providers answer the request by sending the download to one of their own content servers, and that server
+is what you are really downloading from. The id is a short code for it (the address itself is not shown): the
+same id means the same server, so you can see whether slow downloads share one. Provider speeds can also swing
+ten times from one connection to the next, even for the same title and server.
+With **Reconnect when slow** ticked (the default, in the pacing row), a large download that has crawled for about
+half a minute (under roughly 1 MB/s, or under a fifth of the best speed that file has reached) is dropped and carried on
+from the same byte on a fresh connection, up to four times per file; the note then says *reconnected 1×*. It is never
+done when you set a **Speed cap** (the cap is the slowness), when the provider does not support resuming, or
+for the last 200 MB of a file. It uses the same single provider connection throughout. If downloads still crawl,
+try **Pause between** (some providers slow an account that makes many requests in a row), a lower **At once per
+provider**, another source for the same title (each source has its own download icon), or a different time of day.
 
 If a provider answers "slow down" (HTTP 429, 458, 509 or 403) the download waits and
 retries with a growing delay on its own, and gives up after several refusals so it
@@ -955,6 +978,78 @@ partial stays there so *Try again* can resume it; **Clear finished** removes the
 **Free space.** *Keep free (GB)* stops a download, and prevents new ones, before the
 folder fills up. Nothing in the download folder is ever deleted except the app's own
 half-finished files.
+
+### Handing finished downloads to Radarr or Sonarr
+
+If you already run **Radarr** or **Sonarr** (often with an encoder such as Tdarr between the download and
+the library), you can let them own the library. VOD & DVR Manager keeps downloading (and, if you ask, encoding)
+exactly as above, then hands the finished file to Radarr or Sonarr to import, so the file lands in their library
+with their naming and your media server is told. It is optional and does nothing until a Radarr or Sonarr URL and
+API key are saved under **Configuration → Library handoff (Radarr / Sonarr)**.
+
+![The Library handoff card, with Radarr and Sonarr connected](docs/screenshots/library-handoff.png)
+
+1. **Connect.** Enter the URL and API key of Radarr and/or Sonarr and press **Test**. A working connection
+   fills the **Root folder** and **Profile** lists from the app itself; pick the ones new titles should use and
+   press **Save handoff**. The key is stored encrypted and is never shown again (the box says *saved*; leave it
+   blank to keep it, type `-` to remove it).
+2. **When you queue a download**, a movie or show the app doesn't have yet is **added** to Radarr or Sonarr with
+   your root folder and profile. Nothing is ever *searched for*: new movies are added **unmonitored** and new shows
+   watch **future episodes** only (both can be changed with *New shows* / *New movies*). A title with no TMDB or
+   TVDB match can't be added automatically and shows **Add to Radarr / Sonarr manually** in the queue.
+3. **After the download**, the app waits for the file in the **Finished folders** (blank = the download folder; set
+   your encoder's output folder if an encoder such as Tdarr sits in between). Once the file has stopped growing it
+   asks Radarr or Sonarr to import it. The import **moves** the file, so it leaves the finished folder and appears in
+   the Radarr / Sonarr library.
+4. **Confirm.** The app checks that Radarr or Sonarr now has the file. If it refuses, the reason it gives is kept
+   and shown.
+
+![A finished download whose file Radarr / Sonarr imported, marked In library](docs/screenshots/download-import-status.png)
+
+Each queue row gets a chip next to its status: **Waiting for encoder** → **Importing into Radarr / Sonarr** →
+**In library**, or **Import failed** / **Import timed out** (hover it for the reason) with a **Retry import**
+button. **Clear finished** keeps rows whose import is still pending, so a file is never forgotten.
+
+**Finished folders as Radarr / Sonarr see them.** If Radarr or Sonarr run in their own containers they may see
+the finished folder under a different path than this app does. Enter the path *as they see it* in the second
+row (blank = same as above). This is **not** your library or root folder: pointing it at the root folder makes
+Radarr or Sonarr scan an empty folder, so the app refuses to save that. Hover the small info icons beside both
+rows for examples.
+
+**Files that never show up.** A file that is not in the finished folder after a while raises a **notice** (by
+default after 4, 8 and 16 hours) and is marked *Import timed out* after 24 hours; all of these hours can be changed
+on the card. Notices live in the **bell** at the top of the page, stay until you acknowledge them, and each
+download is checked on its own, so one stuck file never blocks the others.
+
+### Knowing what your media server already has (In Library)
+
+It is easy to download something you already own. **Configuration → In Library (your Plex / Jellyfin / Emby)**
+lets VOD & DVR Manager read the libraries on your own media server and mark matching titles everywhere they are
+shown. It is optional, and nothing changes until you add a server.
+
+![The In Library card with a Jellyfin server and its Movies library ticked](docs/screenshots/in-library-card.png)
+
+- **Add a server.** If a Plex, Jellyfin or Emby provider is already set up it is listed with a checkbox (only the
+  provider is remembered; its URL and token are read from the provider each time). A server that is **not** a
+  provider can be typed in (type, URL, token or API key), for people who don't want its titles imported into the
+  catalog. More than one server is fine: a title is *In Library* if any of them has it.
+- **Pick the libraries.** **Test** checks the connection and lists the server's movie and TV libraries; only the ones
+  you tick count, so a stream or VOD bridge library on the same server doesn't mark every title.
+- **Scanning.** The app lists the ticked libraries every few hours (default 6, changeable), when you press
+  **Scan now**, and straight after Radarr or Sonarr import a file. Results are kept locally: browsing never contacts
+  your media server, and a server that is briefly down keeps its previous results rather than clearing the badges.
+  Matching is by TMDB id, then IMDb id, then title and year (a year either side).
+  Scanning a very large catalog is a lot of work for the app, so it can take a while right after a big import.
+
+![Movies filtered to Only In Library, each with the lime In Library badge](docs/screenshots/in-library-badge.png)
+
+- **The badge.** Movie and show cards get a lime **In Library** badge (hover it to see which server and library has
+  it), and episodes your server already has show **✓ in library**, so the missing ones stand out.
+- **The filter.** Movies and TV Shows have an **In Library** filter: *any*, **Hide In Library** or **Only In Library**.
+  *Place all filtered* and *Remove all filtered* are switched off while it is on.
+- **Download anyway or Cancel.** When you queue a movie, an episode, a season or a selection, the app first checks
+  your library. If any of it is already there a dialog says so ("Already in your library (Jellyfin: Movies)") and,
+  for a season or selection, lists which episodes or titles, with **Download anyway** and **Cancel**.
 
 ## 7. DVR recordings
 
@@ -1519,7 +1614,8 @@ the ones you have already applied TMDB episode titles to (the default), every
 series with a confirmed TMDB ID, or off. It only replaces blank or placeholder
 names, so a real name your provider sent and any name you set or locked is never
 changed, and a series is only sent to TMDB when it actually has a placeholder
-name to fix. **Run now** does one pass immediately.
+name to fix. When the local TMDB library is on, names come from it first and TMDB is only asked for
+what it could not fill, so a normal pass costs no TMDB requests. **Run now** does one pass immediately.
 
 ![Automatic TMDB Episode Titles settings](docs/screenshots/auto-episode-titles.png)
 
@@ -2259,6 +2355,12 @@ expired. With several sources, failover moves on to the next one by itself.
 **The progress bar sits at 50% while it is re-encoding.** The first half is the download and the second
 half the re-encode. The bar moves with the encode when the file reports its length; if it does not, the bar
 follows how much of the file ffmpeg has read, and the status line shows how much has been written so far.
+
+**Downloads start fast and then crawl (0.5 to 2 MB/s).** Provider speeds vary a lot per request, and some providers
+slow an account after several big transfers in a row. The queue note shows the live speed and the server id; with
+**Reconnect when slow** on (the default) a crawling transfer is resumed on a fresh connection by itself. You can also add a
+**Pause between** downloads, lower **At once per provider**, pick a different source for the title, or try again later.
+A VPN or other network path can change which server the provider sends you to.
 
 **Movies/series show up as duplicates.** Run Duplicate Finder (§11) — most
 duplication is either a punctuation difference between providers (that

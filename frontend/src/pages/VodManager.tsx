@@ -1430,7 +1430,7 @@ interface Movie {
   flagged_reason?: string | null
   sources: MovieSource[]
   placements: MoviePlacement[]
-  in_library?: string | null   // KNM: "Plex: Movies" when the user's media server has it (2026-10-18)
+  in_library?: string | null   // "Plex: Movies" when the user's media server has it
 }
 
 interface MetadataRule {
@@ -2474,7 +2474,7 @@ interface DownloadJob {
   import_note?: string | null
 }
 interface DownloadSettings {
-  enabled: boolean; output_dir: string; movies_dir: string; shows_dir: string; work_dir: string; audio_languages: string; keep_subtitles: boolean; tmdb_id_in_folder: boolean; default_preset: string; max_concurrent: number; min_free_gb: number
+  enabled: boolean; output_dir: string; movies_dir: string; shows_dir: string; work_dir: string; audio_languages: string; keep_subtitles: boolean; tmdb_id_in_folder: boolean; reconnect_slow: boolean; default_preset: string; max_concurrent: number; min_free_gb: number
   encoder: string; hw_device: string; encode_threads: number
   speed_limit_mbps: number; provider_concurrent: number; pause_seconds: number
   window_enabled: boolean; window_start: number; window_end: number
@@ -2514,7 +2514,7 @@ function queueResultText(r: { queued: number; already_queued: number; no_source:
   return (parts.join(', ') || 'Nothing to queue') + '. Progress is under Configuration → Downloads.'
 }
 
-// KNM: the queue asks first when the user's media server already has some of it (2026-10-18)
+// the queue asks first when the user's media server already has some of it
 function alreadyInLibraryText(present: { title: string; where: string }[]): string {
   if (present.length === 1) return `Already in your library (${present[0].where}):\n${present[0].title}`
   const lines = present.slice(0, 15).map((p) => `• ${p.title} (${p.where})`)
@@ -2760,6 +2760,10 @@ function DownloadsCard() {
               At once per provider
               <input className={inputCls('w-12')} type="number" min={1} max={4} value={draft.provider_concurrent} onChange={(e) => setDraft({ ...draft, provider_concurrent: Math.min(4, Math.max(1, Number(e.target.value) || 1)) })} />
             </label>
+            <label className="flex items-center gap-1" title="Provider speeds can swing 10x from one connection to the next. When a large download has crawled for about 30 seconds, drop it and carry on from the same byte on a fresh connection (up to 4 times per file). Never done when you set a speed cap, or if the provider cannot resume.">
+              <input type="checkbox" checked={draft.reconnect_slow} onChange={(e) => setDraft({ ...draft, reconnect_slow: e.target.checked })} />
+              Reconnect when slow
+            </label>
             <label className="flex items-center gap-1" title="Rest between two downloads from the same provider.">
               Pause between
               <input className={inputCls('w-14')} type="number" min={0} value={draft.pause_seconds} onChange={(e) => setDraft({ ...draft, pause_seconds: Math.max(0, Number(e.target.value) || 0) })} />
@@ -2851,7 +2855,7 @@ function DownloadsCard() {
   )
 }
 
-// ── Library handoff: finished downloads go to Radarr/Sonarr (arr_handoff.py) ── KNM: 2026-10-18
+// ── Library handoff: finished downloads go to Radarr/Sonarr (arr_handoff.py) ──
 type ArrKind = 'radarr' | 'sonarr'
 interface HandoffSettings {
   radarr_url: string; sonarr_url: string; radarr_has_key: boolean; sonarr_has_key: boolean
@@ -2862,7 +2866,7 @@ interface HandoffSettings {
 }
 interface ArrProbe { version: string | null; root_folders: { id: number; path: string }[]; profiles: { id: number; name: string }[] }
 
-// KNM: same lime as the queue's "In library" chip; label says which server/library has it (2026-10-18)
+// same lime as the queue's "In library" chip; label says which server/library has it
 const IN_LIBRARY_CLS = 'border-lime-500/40 bg-lime-500/15 text-lime-500'
 function InLibraryBadge({ where }: { where?: string | null }) {
   if (!where) return null
@@ -2884,7 +2888,7 @@ function ImportChip({ job }: { job: DownloadJob }) {
   return <span className={`inline-block whitespace-nowrap rounded border px-1.5 py-px text-[11px] font-medium ${hit[1]}`} title={job.import_note ?? undefined}>{hit[0]}</span>
 }
 
-// KNM: hover/focus help for the handoff folder rows -- native title tips were too terse and the
+// hover/focus help for the handoff folder rows -- native title tips were too terse and the
 // arr-folder row got filled with library root folders (2026-10-18)
 function HelpTip({ children, label }: { children: React.ReactNode; label: string }) {
   return (
@@ -2924,7 +2928,7 @@ function HandoffCard() {
   })
   if (!draft) return null
   const set = (patch: Partial<HandoffSettings>) => setDraft({ ...draft, ...patch })
-  // KNM: catch the "library root folder in the arr-folder box" mistake before saving; the server rejects it too (2026-10-18)
+  // catch the "library root folder in the arr-folder box" mistake before saving; the server rejects it too
   const onSave = () => {
     for (const [dir, root, app] of [[draft.movies_arr_dir, draft.radarr_root, 'Radarr'], [draft.shows_arr_dir, draft.sonarr_root, 'Sonarr']]) {
       const d = trimSlash(dir)
@@ -7947,7 +7951,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
   const [movieProviderFilter, setMovieProviderFilter] = useState<number | null>(null)
   const [movieShowArchived, setMovieShowArchived] = useState(false)
   const [movieNoTmdb, setMovieNoTmdb] = useState(false)
-  const [movieInLibrary, setMovieInLibrary] = useState<'' | 'only' | 'hide'>('')   // KNM: In Library filter (2026-10-18)
+  const [movieInLibrary, setMovieInLibrary] = useState<'' | 'only' | 'hide'>('')   // In Library filter
   const [MOVIE_LIMIT, setMovieLimitState] = useState(
     () => Number(localStorage.getItem('vodmanager-movies-limit')) || 25
   )
@@ -8049,7 +8053,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
   const [seriesProviderFilter, setSeriesProviderFilter] = useState<number | null>(null)
   const [seriesShowArchived, setSeriesShowArchived] = useState(false)
   const [seriesNoTmdb, setSeriesNoTmdb] = useState(false)
-  const [seriesInLibrary, setSeriesInLibrary] = useState<'' | 'only' | 'hide'>('')   // KNM: In Library filter (2026-10-18)
+  const [seriesInLibrary, setSeriesInLibrary] = useState<'' | 'only' | 'hide'>('')   // In Library filter
   const [SERIES_LIMIT, setSeriesLimitState] = useState(
     () => Number(localStorage.getItem('vodmanager-series-limit')) || 25
   )

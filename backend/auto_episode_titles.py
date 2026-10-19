@@ -59,7 +59,7 @@ async def run_once(mode: str | None = None, limit: int = MAX_SERIES_PER_RUN) -> 
             for series in due:
                 result["series_checked"] += 1
                 try:
-                    # KNM: 2026-10-18 -- local TMDB library first; TMDB only for what it left as placeholders.
+                    # Local TMDB library first; TMDB only for what it left as placeholders.
                     tmdb_id = str(series["tmdb_id"])
                     renamed = await _fill(series["id"], await tmdb_sync.get_series_episode_list_local(tmdb_id))
                     if renamed:

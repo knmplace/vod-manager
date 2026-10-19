@@ -22,7 +22,7 @@ APP_PORT    = int(os.environ.get("APP_PORT", "8282"))
 # of sync once before (main.py's FastAPI(version=...) vs. routes.py's /version/
 # endpoint each having their own independent hardcoded literal), so both now
 # import this instead of repeating the string.
-APP_VERSION = "0.3.03"
+APP_VERSION = "0.3.04"
 
 # Persisted log file for main.py's rotating file handler -- the app previously
 # only logged to stdout, so a container restart (or just not having docker
@@ -371,6 +371,7 @@ _DOWNLOADS_DEFAULTS = {
     "speed_limit_mbps": 0,      # 0 = unlimited
     "provider_concurrent": 1,   # downloads at once from ONE provider
     "pause_seconds": 0,         # rest between two downloads from the same provider
+    "reconnect_slow": True,     # drop and resume a transfer that crawls, on a fresh connection
     # optional: only START downloads inside this local-time window (hours 0-23)
     "window_enabled": False, "window_start": 1, "window_end": 7,
 }
@@ -391,6 +392,7 @@ def get_download_settings() -> dict:
     out["encode_threads"] = min(64, max(0, int(out["encode_threads"] or 0)))
     out["min_free_gb"] = max(0, int(out["min_free_gb"] or 0))
     out["speed_limit_mbps"] = max(0, int(out["speed_limit_mbps"] or 0))
+    out["reconnect_slow"] = bool(out["reconnect_slow"])
     out["provider_concurrent"] = min(4, max(1, int(out["provider_concurrent"] or 1)))
     out["pause_seconds"] = max(0, int(out["pause_seconds"] or 0))
     out["window_enabled"] = bool(out["window_enabled"])
@@ -408,7 +410,7 @@ def save_download_settings(settings: dict) -> None:
     _update_raw(lambda data: data.__setitem__("downloads", {**(data.get("downloads") or {}), **clean}))
 
 
-# KNM: 2026-10-18 library handoff -- finished downloads are imported by Radarr/Sonarr
+# library handoff -- finished downloads are imported by Radarr/Sonarr
 # (see arr_handoff.py). Off until a URL + API key is saved for that app.
 _HANDOFF_DEFAULTS = {
     "radarr_url": "", "sonarr_url": "",
@@ -484,7 +486,7 @@ def save_handoff_settings(settings: dict) -> None:
     _update_raw(_mutate)
 
 
-# KNM: 2026-10-18 In Library badge -- the user's own media servers (see library_presence.py).
+# In Library badge -- the user's own media servers (see library_presence.py).
 # A server is either a link to an existing Plex/Jellyfin/Emby provider (only the provider id
 # is stored; its URL and token are read from the provider when used) or entered by hand.
 LIBRARY_SERVER_TYPES = ("plex", "jellyfin", "emby")

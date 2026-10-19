@@ -74,7 +74,7 @@ def test_movie_import_excludes_stream_after_display_rule_strips_prefix(db, monke
     }])
     lang = {"exclude_prefixes": ["ES"], "exclude_non_latin": False}
 
-    asyncio.run(vod_importer._import_movies_for_provider(
+    result, _, _ = asyncio.run(vod_importer._import_movies_for_provider(
         client, {"id": 4, "name": "TestProvider"}, provider_id=4,
         category_names={"5": "Movies"}, exclude_categories=[], exclude_uncategorized=False,
         lang=lang, country=[],
@@ -106,7 +106,7 @@ def test_series_import_excludes_stream_after_display_rule_strips_prefix(db, monk
     }])
     lang = {"exclude_prefixes": ["ES"], "exclude_non_latin": False}
 
-    asyncio.run(vod_importer._import_series_for_provider(
+    result, _, _ = asyncio.run(vod_importer._import_series_for_provider(
         client, {"id": 4, "name": "TestProvider"}, provider_id=4,
         series_category_names={"5": "Series"}, exclude_categories=[], exclude_uncategorized=False,
         lang=lang, country=[],

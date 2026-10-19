@@ -125,12 +125,19 @@ languages and subtitles to keep (even without re-encoding). Downloads respect ea
 provider's connection limit (a download waits for a free connection and pauses itself,
 then resumes, when a viewer needs it), can be paced per provider
 (speed cap, downloads at once, pause between, an allowed time window), back off by
-themselves when a provider says "slow down", resume after an interruption, and verify
+themselves when a provider says "slow down", show live speed, reconnect a crawling transfer on a fresh connection,
+resume after an interruption, and verify
 each file with ffprobe. Unfinished files live in a separate processing folder and move into the
 library only when complete, so nothing partial is ever picked up. See the
 [User Guide](USERGUIDE.md#downloading-files-into-a-library-folder).
 
 ![The Downloads card](docs/screenshots/downloads-card.png)
+
+If you run **Radarr** or **Sonarr**, a finished download can be handed to them to import (optional, under
+**Configuration → Library handoff**), so they own the library and its naming; the queue shows each file as it
+goes from *Waiting for encoder* to *Importing* to *In library*. An optional **In Library** badge shows which movies,
+shows and episodes your own Plex, Jellyfin or Emby already has, and asks before you download them again. See the
+[User Guide](USERGUIDE.md#handing-finished-downloads-to-radarr-or-sonarr).
 
 ## Connecting Dispatcharr instances
 
@@ -471,8 +478,8 @@ or a filtered slice, and the result names the series that had no TMDB match.
 **Automatic TMDB Episode Titles** (Curation & Maintenance) keeps episode names
 filled in as a provider adds episodes: hourly, it replaces blank or placeholder
 names from TMDB for the series you've already applied titles to (or every
-series with a TMDB id, or off). A real provider name, or one you set or locked,
-is never changed.
+series with a TMDB id, or off), using the local TMDB library first so a normal pass costs
+no TMDB requests. A real provider name, or one you set or locked, is never changed.
 
 ![Automatic TMDB Episode Titles settings](docs/screenshots/auto-episode-titles.png)
 

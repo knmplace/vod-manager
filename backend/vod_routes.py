@@ -1809,7 +1809,7 @@ async def delete_provider(provider_id: int):
     # indexes -- off the event loop so it doesn't stall every other request
     # (including the Activity poll) while it runs.
     await asyncio.to_thread(vod_db.delete_provider, provider_id)
-    # KNM: an In Library server linked to this provider goes with it (2026-10-18)
+    # an In Library server linked to this provider goes with it
     await asyncio.to_thread(library_presence.forget_provider, provider_id)
     await vod_importer.evict_provider_client(provider_id)
     await rclone_client.stop_daemon(provider_id)
@@ -3653,7 +3653,7 @@ async def list_movies(
     ids = [m["id"] for m in movies]
     sources_by_id    = vod_db.list_movie_sources_for_ids(ids)
     placements_by_id = vod_db.list_movie_placements_for_ids(ids)
-    presence = vod_db.presence_labels("movie", ids)  # KNM: In Library badge, local table only (2026-10-18)
+    presence = vod_db.presence_labels("movie", ids)  # In Library badge, local table only
     for m in movies:
         m["sources"]    = sources_by_id.get(m["id"], [])
         m["placements"] = placements_by_id.get(m["id"], [])
@@ -3972,7 +3972,7 @@ async def list_series(
         for e in s["episodes"]:
             e["sources"] = episode_sources_by_id.get(e["id"], [])
         s["placements"] = placements_by_id.get(s["id"], [])
-    _attach_series_presence(series)  # KNM: In Library badge + episode marks (2026-10-18)
+    _attach_series_presence(series)  # In Library badge + episode marks
     return {
         "items": series,
         "total": vod_db.count_series(search=search, category_id=category_id, provider_id=provider_id, archived=archived, no_tmdb=no_tmdb, in_library=in_library),
@@ -4244,6 +4244,7 @@ class DownloadSettingsRequest(BaseModel):
     audio_languages: str = ""
     keep_subtitles: bool = True
     tmdb_id_in_folder: bool = True
+    reconnect_slow: bool = True
     default_preset: str = "original"
     max_concurrent: int = 1
     min_free_gb: int = 5
@@ -4437,7 +4438,7 @@ async def save_handoff_settings(body: HandoffSettingsRequest):
     hours, fail = settings["stall_hours"], settings["fail_hours"]
     if not hours or not all(a < b for a, b in zip([0] + hours, hours + [fail])):
         raise HTTPException(400, detail="Notice hours must be above 0, increasing, and below the fail hours.")
-    # KNM: the arr_dir is the finished folder as Radarr/Sonarr see it; the library root there
+    # the arr_dir is the finished folder as Radarr/Sonarr see it; the library root there
     # makes Radarr/Sonarr import from an empty folder and fail (2026-10-18)
     for arr_key, root_key, app in (("movies_arr_dir", "radarr_root", "Radarr"), ("shows_arr_dir", "sonarr_root", "Sonarr")):
         arr_dir = settings[arr_key].strip().rstrip("/\\")
@@ -4599,7 +4600,7 @@ async def ack_notice(notice_id: int):
 async def clear_downloads():
     finished = [j for j in await asyncio.to_thread(vod_db.list_download_jobs, 100000)
                 if j["status"] in ("done", "failed", "cancelled")]
-    # KNM: keep rows whose library import is still pending, or the watcher loses them (2026-10-18)
+    # keep rows whose library import is still pending, or the watcher loses them
     pending = [j for j in finished if j.get("import_status") in vod_db.PENDING_IMPORT_STATUSES]
     clear_ids = [j["id"] for j in finished if j not in pending]
     await asyncio.to_thread(vod_downloader.purge_work, clear_ids)   # drop their unfinished leftovers too

@@ -56,11 +56,11 @@ def test_get_existing_only_returns_items_in_library():
 
 def test_add_movie_never_searches():
     handler, seen = _record({("POST", "/api/v3/movie"): lambda r: {**json.loads(r.content), "id": 7}})
-    out = _client("radarr", handler).add({"title": "X", "tmdbId": 1}, "/MEDIA50/Movies", 6, "unmonitored")
+    out = _client("radarr", handler).add({"title": "X", "tmdbId": 1}, "/media/Movies", 6, "unmonitored")
     body = json.loads(seen[0].content)
     assert body["addOptions"]["searchForMovie"] is False
     assert body["monitored"] is False
-    assert body["rootFolderPath"] == "/MEDIA50/Movies" and body["qualityProfileId"] == 6
+    assert body["rootFolderPath"] == "/media/Movies" and body["qualityProfileId"] == 6
     assert out["id"] == 7
 
 
@@ -72,7 +72,7 @@ def test_add_movie_monitored_when_asked():
 
 def test_add_series_future_monitor_never_searches():
     handler, seen = _record({("POST", "/api/v3/series"): {"id": 9}})
-    _client("sonarr", handler).add({"title": "S", "tvdbId": 5}, "/MEDIA50/Tv", 6, "future")
+    _client("sonarr", handler).add({"title": "S", "tvdbId": 5}, "/media/Tv", 6, "future")
     body = json.loads(seen[0].content)
     assert body["addOptions"] == {"monitor": "future", "searchForMissingEpisodes": False,
                                   "searchForCutoffUnmetEpisodes": False}
@@ -81,11 +81,11 @@ def test_add_series_future_monitor_never_searches():
 
 def test_import_path_posts_command():
     handler, seen = _record({("POST", "/api/v3/command"): {"id": 55}})
-    assert _client("radarr", handler).import_path("/netdl/radarr/X (2000)") == 55
-    assert json.loads(seen[0].content) == {"name": "DownloadedMoviesScan", "path": "/netdl/radarr/X (2000)",
+    assert _client("radarr", handler).import_path("/finished/radarr/X (2000)") == 55
+    assert json.loads(seen[0].content) == {"name": "DownloadedMoviesScan", "path": "/finished/radarr/X (2000)",
                                            "importMode": "Move"}
     handler, seen = _record({("POST", "/api/v3/command"): {"id": 56}})
-    _client("sonarr", handler).import_path("/netdl/tv/S/Season 01/S - S01E02.mkv")
+    _client("sonarr", handler).import_path("/finished/tv/S/Season 01/S - S01E02.mkv")
     assert json.loads(seen[0].content)["name"] == "DownloadedEpisodesScan"
 
 
@@ -113,7 +113,7 @@ def test_has_file_episode_matches_season_and_number():
 def test_rejection_for_joins_reasons():
     handler, _ = _record({("GET", "/api/v3/manualimport"): [
         {"rejections": [{"reason": "Not an upgrade"}, {"reason": "Custom Format score 0 below minimum 1"}]}]})
-    msg = _client("radarr", handler).rejection_for("/netdl/radarr/X")
+    msg = _client("radarr", handler).rejection_for("/finished/radarr/X")
     assert "Not an upgrade" in msg and "below minimum" in msg
 
 
@@ -123,10 +123,10 @@ def test_rejection_for_none_when_clean():
 
 
 def test_root_folders_and_profiles():
-    handler, _ = _record({("GET", "/api/v3/rootfolder"): [{"id": 1, "path": "/MEDIA50/Movies", "freeSpace": 1}],
+    handler, _ = _record({("GET", "/api/v3/rootfolder"): [{"id": 1, "path": "/media/Movies", "freeSpace": 1}],
                           ("GET", "/api/v3/qualityprofile"): [{"id": 6, "name": "HD", "items": []}]})
     c = _client("radarr", handler)
-    assert c.root_folders() == [{"id": 1, "path": "/MEDIA50/Movies"}]
+    assert c.root_folders() == [{"id": 1, "path": "/media/Movies"}]
     assert c.quality_profiles() == [{"id": 6, "name": "HD"}]
 
 
