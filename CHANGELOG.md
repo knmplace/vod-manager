@@ -31,9 +31,44 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-19 (Synced with upstream v0.3.04)
+
+- 🔼 **Upstream [v0.3.04](https://github.com/jstevenscl/vod-manager/releases/tag/v0.3.04)
+  merged; the fork now reports version 0.3.04.** v0.3.04 ships this fork's
+  PRs #53–#60 (marked 🔼 below). New from upstream:
+  - **Faster GPU (VAAPI) re-encode.** The CPU now decodes and scales and the
+    GPU only encodes, instead of copying every frame back from the GPU.
+    **Test encoder** uses a 1080p source like a real job and reports its speed.
+  - **Live download speed and server id** in the queue note (MB/s plus a short
+    hash of the content server, so you can tell when a provider switched
+    servers).
+  - **Reconnect when slow** (Configuration → Downloads, on by default): a
+    large download that crawls for 30 s is dropped and resumed on a fresh
+    connection, up to 4 times per file.
+  - List Sync warnings no longer print the TMDB `api_key`.
+  - README / USERGUIDE sections and screenshots for the handoff, In Library
+    and Downloads.
+
+### The fork now mirrors upstream
+
+With v0.3.04 every fork change proposed upstream so far has been released
+there, so this fork tracks upstream `main` and differs only where noted:
+
+- **Import exclusions (#53):** the fork keeps its own skip at import, which
+  reuses the auto-archive check (same result: titles matching a language or
+  country import exclusion are never imported). Upstream's
+  `_matches_import_title_exclusion` is not used; upstream's tests for it pass
+  against the fork's code.
+- **TMDB library retention:** the fork keeps its own store/fill design and
+  tests (catalog titles first, refresh after 150 days, hard limit 170 days).
+- **Fork-only features:** entries marked ✅ without a 🔼/🔀 marker have not
+  been proposed upstream and stay fork-only.
+- **Branding** ("VOD & DVR Manager - KNM") is fork-only and never sent
+  upstream.
+
 ## 2026-10-18 (In Library badge)
 
-- ✅ 🔀 [#60](https://github.com/jstevenscl/vod-manager/pull/60) **In Library badge for titles your own media server already has.**
+- ✅ 🔼 [#60](https://github.com/jstevenscl/vod-manager/pull/60) **In Library badge for titles your own media server already has.**
   - **Before:** nothing showed whether a movie, show or episode was already
     in your own Plex, Jellyfin or Emby library, so it was easy to download
     something you already had.
@@ -65,7 +100,7 @@ instead of opening a duplicate request.
 
 ## 2026-10-18 (Library handoff — folder help)
 
-- ✅ 🔀 [#59](https://github.com/jstevenscl/vod-manager/pull/59) **Clearer handoff folder settings.**
+- ✅ 🔼 [#59](https://github.com/jstevenscl/vod-manager/pull/59) **Clearer handoff folder settings.**
   - **Before:** the second folder row read "Same folders in Radarr/Sonarr",
     which looked like it wanted the Radarr/Sonarr library folders. Entering
     those made Radarr/Sonarr import from an empty folder, and the only
@@ -77,7 +112,7 @@ instead of opening a duplicate request.
 
 ## 2026-10-18 (Radarr/Sonarr library handoff — screens)
 
-- ✅ 🔀 [#59](https://github.com/jstevenscl/vod-manager/pull/59) **Library handoff settings, import status and a notice bell.**
+- ✅ 🔼 [#59](https://github.com/jstevenscl/vod-manager/pull/59) **Library handoff settings, import status and a notice bell.**
   - **Before:** the handoff could only be set up through the API, the
     download queue showed only download status (`done · 1.2 GB`), and stall
     or failure notices were stored but never shown.
@@ -111,7 +146,7 @@ instead of opening a duplicate request.
 
 ## 2026-10-18 (Radarr/Sonarr library handoff — backend)
 
-- ✅ 🔀 [#59](https://github.com/jstevenscl/vod-manager/pull/59) **Finished downloads can be handed to Radarr/Sonarr, so they land in
+- ✅ 🔼 [#59](https://github.com/jstevenscl/vod-manager/pull/59) **Finished downloads can be handed to Radarr/Sonarr, so they land in
   Plex the normal way.** Off until a Radarr and/or Sonarr URL + API key are
   saved; nothing changes for existing setups. Backend only in this build (the
   settings card, import chips and notice bell come next), configured through
@@ -145,7 +180,7 @@ instead of opening a duplicate request.
 
 ## 2026-10-18 (Download folders without the TMDB id)
 
-- ✅ 🔀 [#58](https://github.com/jstevenscl/vod-manager/pull/58) **Downloads can leave the TMDB id out of folder names.** A new
+- ✅ 🔼 [#58](https://github.com/jstevenscl/vod-manager/pull/58) **Downloads can leave the TMDB id out of folder names.** A new
   **TMDB id in folder names** checkbox in Configuration → Downloads (on by
   default, so nothing changes unless you turn it off). Off saves to
   `Title (Year)/Title (Year).mp4` and `Show (Year)/Season NN/…` instead of
@@ -163,9 +198,9 @@ instead of opening a duplicate request.
   a movies/TV library folder (off by default), with optional re-encoding,
   GPU encoders, a CPU thread cap, and a processing folder so unfinished files
   never land in the library. The image now includes `vainfo` and the Intel
-  media driver. Our open upstream PRs (#53–#56) are not part of these releases
-  and stay in the fork as before.
-- ✅ 🔀 [#57](https://github.com/jstevenscl/vod-manager/pull/57) **Automatic episode titles use the local TMDB library first.** Each pass
+  media driver. Our open upstream PRs (#53–#56) were not part of these
+  releases; they shipped later in v0.3.04 (see the 2026-10-19 entry).
+- ✅ 🔼 [#57](https://github.com/jstevenscl/vod-manager/pull/57) **Automatic episode titles use the local TMDB library first.** Each pass
   fills placeholder episode names from the local TMDB library, and asks TMDB
   only for names still missing after that. A series the library already covers
   costs no TMDB request, not even the daily refresh of the newest season.
@@ -173,7 +208,7 @@ instead of opening a duplicate request.
 
 ## 2026-10-15 (Archived movies get their TMDB year)
 
-- ✅ 🔀 [#56](https://github.com/jstevenscl/vod-manager/pull/56) **Archived movies now show their year too.** The startup fix that gives
+- ✅ 🔼 [#56](https://github.com/jstevenscl/vod-manager/pull/56) **Archived movies now show their year too.** The startup fix that gives
   held, yearless movies their year from the TMDB release date skipped movies
   archived by language or import rules, so they showed a blank year under
   **Show archived** and would come back still held if restored. They are now
@@ -181,28 +216,28 @@ instead of opening a duplicate request.
 
 ## 2026-10-14 (TMDB library keeps popular titles)
 
-- ✅ 🔀 [#55](https://github.com/jstevenscl/vod-manager/pull/55) **The TMDB library also stores the most popular TMDB titles.** It used to
+- ✅ 🔼 [#55](https://github.com/jstevenscl/vod-manager/pull/55) **The TMDB library also stores the most popular TMDB titles.** It used to
   store only titles already in your catalog, so every newly imported title
   cost a TMDB call, even blockbusters. After your catalog, fill bursts now
   also fetch the top **Popular titles to keep** movies and TV shows from
   TMDB's daily export (default 25,000 of each; adult titles are never
   included; 0 = catalog only). New drops are then usually local already.
-- ✅ 🔀 [#55](https://github.com/jstevenscl/vod-manager/pull/55) **Titles leaving the catalog are kept until the cache limit.** The daily
+- ✅ 🔼 [#55](https://github.com/jstevenscl/vod-manager/pull/55) **Titles leaving the catalog are kept until the cache limit.** The daily
   cleanup deleted any title no longer in the catalog, so one that dropped out
   and came back was fetched again. Stored titles now stay until the 170-day
   cache limit, which still keeps the library inside TMDB's six-month rule.
-- ✅ 🔀 [#55](https://github.com/jstevenscl/vod-manager/pull/55) **The library file is compacted.** Deletes left free space in the file
+- ✅ 🔼 [#55](https://github.com/jstevenscl/vod-manager/pull/55) **The library file is compacted.** Deletes left free space in the file
   that was never given back (about half of it on a long-running install).
   The daily cleanup now compacts the file when more than a quarter is free.
 
 ## 2026-10-14 (Metadata Review count and held movies)
 
-- ✅ 🔀 [#54](https://github.com/jstevenscl/vod-manager/pull/54) **TMDB library jobs report their result.** "Run fill burst now", "Check
+- ✅ 🔼 [#54](https://github.com/jstevenscl/vod-manager/pull/54) **TMDB library jobs report their result.** "Run fill burst now", "Check
   TMDB changes" and "Refresh TMDB ID list" run in the background and showed
   nothing when done, so a burst with nothing to fetch looked like the button
   did nothing. Each job now shows a toast and a "Last ..." line with what it
   did, e.g. "nothing to fetch — every catalog title is stored and up to date".
-- ✅ 🔀 [#56](https://github.com/jstevenscl/vod-manager/pull/56) **Movies held for a year review now take their year from TMDB.** A
+- ✅ 🔼 [#56](https://github.com/jstevenscl/vod-manager/pull/56) **Movies held for a year review now take their year from TMDB.** A
   movie matched to TMDB but held because its year was unknown never got the
   year from TMDB's release date (TV shows already did). It stayed held out of
   every category, so XC players never saw it, and it was missing from Metadata
