@@ -31,6 +31,18 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-19 (Remove failed downloads from the queue)
+
+- ✅ **Failed and cancelled downloads can be removed from the queue.**
+  - **Before:** the only way to get a failed row (e.g. "This episode no
+    longer exists.") out of the queue was **Clear finished**, which also
+    removed every completed download.
+  - **After:** each finished, failed or cancelled row has a trash icon that
+    removes just that row, and a **Clear failed** button next to Clear
+    finished removes only failed and cancelled downloads. Downloaded files
+    are never deleted. Rows still being imported into Radarr/Sonarr are kept,
+    as with Clear finished.
+
 ## 2026-10-19 (Synced with upstream v0.3.04)
 
 - 🔼 **Upstream [v0.3.04](https://github.com/jstevenscl/vod-manager/releases/tag/v0.3.04)
