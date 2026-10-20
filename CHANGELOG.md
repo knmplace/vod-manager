@@ -31,9 +31,20 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-20 (Synced with upstream v0.3.05)
+
+- 🔼 **Upstream [v0.3.05](https://github.com/jstevenscl/vod-manager/releases/tag/v0.3.05)
+  merged; the fork now reports version 0.3.05.** v0.3.05 ships this fork's
+  queue row removal (#61, both 2026-10-19 entries below). Upstream's version
+  matches the fork's backend exactly; differences:
+  - Removing a completed download that is still waiting on Radarr/Sonarr now
+    asks in the app's own confirm dialog (**Remove anyway**) instead of a
+    browser pop-up.
+  - README / USERGUIDE notes and a queue screenshot for the new buttons.
+
 ## 2026-10-19 (Remove failed downloads from the queue)
 
-- ✅ 🔀 [#61](https://github.com/jstevenscl/vod-manager/pull/61) **Failed and cancelled downloads can be removed from the queue.**
+- ✅ 🔼 [#61](https://github.com/jstevenscl/vod-manager/pull/61) **Failed and cancelled downloads can be removed from the queue.**
   - **Before:** the only way to get a failed row (e.g. "This episode no
     longer exists.") out of the queue was **Clear finished**, which also
     removed every completed download.
@@ -42,7 +53,7 @@ instead of opening a duplicate request.
     finished removes only failed and cancelled downloads. Downloaded files
     are never deleted. Rows still being imported into Radarr/Sonarr are kept,
     as with Clear finished.
-- ✅ **Failed downloads no longer show as "library import pending".**
+- ✅ 🔼 [#61](https://github.com/jstevenscl/vod-manager/pull/61) **Failed downloads no longer show as "library import pending".**
   - **Before:** with the Radarr/Sonarr handoff on, a download that failed or
     was cancelled kept the import state it got when it was queued, so the
     trash icon and Clear failed skipped it ("kept: library import still
