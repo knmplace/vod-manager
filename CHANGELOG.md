@@ -31,6 +31,20 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-20 (Synced with upstream v0.3.06 + v0.3.07)
+
+- 🔼 **Upstream [v0.3.06](https://github.com/jstevenscl/vod-manager/releases/tag/v0.3.06)
+  and [v0.3.07](https://github.com/jstevenscl/vod-manager/releases/tag/v0.3.07)
+  merged; the fork now reports version 0.3.07.** New from upstream:
+  - Smart category conditions can take several values, matched as any/all,
+    and a rule can mix different fields.
+  - An existing smart category's rule can be edited. Saving re-evaluates the
+    category and, by default, takes out titles that no longer match the new
+    rule (titles you removed by hand stay removed).
+  - Several titles can be placed into a rule-based category at once.
+  - Merge note: the fork's scoped smart-category evaluation (`item_ids`,
+    chunked queries) is kept; upstream's new `prune` option was added to it.
+
 ## 2026-10-20 (Synced with upstream v0.3.05)
 
 - 🔼 **Upstream [v0.3.05](https://github.com/jstevenscl/vod-manager/releases/tag/v0.3.05)
