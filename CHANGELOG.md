@@ -31,20 +31,38 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-24 (Synced with upstream v0.3.11)
+
+- 🔼 **Upstream [v0.3.11](https://github.com/jstevenscl/vod-manager/releases/tag/v0.3.11)
+  merged; the fork now reports version 0.3.11 and includes everything in
+  upstream `main`.** v0.3.11 includes this fork's trailer badge
+  ([#62](https://github.com/jstevenscl/vod-manager/pull/62)) and Download
+  Configuration page + hideable menu
+  ([#63](https://github.com/jstevenscl/vod-manager/pull/63)). New from upstream:
+  - Download progress when the provider sends no file size: the queue bar
+    uses the size from a **Check quality** run on that source; with no size
+    at all the row shows *size unknown* and the amount downloaded instead of
+    a stuck 0%.
+  - USERGUIDE/README updated for the trailer badge and the Download
+    Configuration page, with new screenshots.
+  - Merge note: small conflicts only (upstream reworded comments in our PR
+    code; streaming source queries gained `file_size_bytes`). Fork behavior
+    is unchanged.
+
 ## 2026-10-24 (Download Configuration page, hideable menu)
 
-- ✅ 🔀 ([#63](https://github.com/jstevenscl/vod-manager/pull/63)) **Download settings have their own page.** A new **Download
+- ✅ 🔼 ([#63](https://github.com/jstevenscl/vod-manager/pull/63)) **Download settings have their own page.** A new **Download
   Configuration** sidebar item (under System) now holds the Downloads,
   Library handoff (Radarr / Sonarr) and In Library cards, which used to sit
   on the Configuration page. Settings and behavior are unchanged; only the
   location moved. Frontend only.
-- ✅ 🔀 ([#63](https://github.com/jstevenscl/vod-manager/pull/63)) **The sidebar menu can be hidden.** A **Hide menu** button at the top
+- ✅ 🔼 ([#63](https://github.com/jstevenscl/vod-manager/pull/63)) **The sidebar menu can be hidden.** A **Hide menu** button at the top
   of the sidebar folds it away for more room; **Show menu** at the left of
   the top bar brings it back. The choice is remembered per browser.
 
 ## 2026-10-24 (Trailer badge on cards)
 
-- ✅ 🔀 ([#62](https://github.com/jstevenscl/vod-manager/pull/62)) **Movie
+- ✅ 🔼 ([#62](https://github.com/jstevenscl/vod-manager/pull/62)) **Movie
   and series cards show a red ▶ trailer badge when a trailer is known.** Clicking it plays the YouTube trailer in a popup. Trailers were
   already captured from the provider's catalog (and the TMDB trickle) but
   only passed to XC clients; the web UI never showed them. Same icon as the

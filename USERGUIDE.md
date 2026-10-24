@@ -83,7 +83,9 @@ Why this matters in practice:
   listing includes a trailer, VOD & DVR Manager keeps it and re-exposes it
   through its own XC feed, so Dispatcharr and other clients that read that
   field can show it — nothing to configure, and nothing is fetched from
-  anywhere else on VOD & DVR Manager's side.
+  anywhere else on VOD & DVR Manager's side. In the web app, a title that has
+  a trailer shows a small ▶ badge on its poster; click it to watch the trailer
+  in a pop-up (see *Movies tab* below).
 - **Recommended deployment**: on the same host/stack as Dispatcharr, since
   the two talk to each other constantly. It's fully capable of running on
   its own separate host too — nothing about it requires colocation, it's
@@ -854,7 +856,9 @@ Once on, a **Download** button appears:
 ![A movie's Download control, a per-source download icon and Download selected](docs/screenshots/download-buttons.png)
 
 Downloads wait in a queue, show live progress under **Download Configuration → Downloads**, and
-can be cancelled or retried. A title already in the folder is never downloaded twice,
+can be cancelled or retried. When a provider does not say how big a file is while it sends it,
+the queue uses the size from a **Check quality** you ran on that source for the percentage; with
+neither, it shows *size unknown* and the amount downloaded so far instead of a misleading 0%. A title already in the folder is never downloaded twice,
 and a download that was interrupted (restart, dropped connection) resumes where it left
 off.
 
@@ -1437,6 +1441,8 @@ currently running, plus the app's own process CPU usage, so you can tell at
 a glance whether something's actively working before digging into a
 specific tab's own progress display.
 
+![The sidebar, with the Download Configuration page under System and the Hide menu button at the top](docs/screenshots/sidebar-download-configuration.png)
+
 To get more room, click the **Hide menu** button at the top of the sidebar.
 The **Show menu** button at the left of the top bar brings it back. Your
 browser remembers which one you picked.
@@ -1497,7 +1503,11 @@ one would work if the client just retried."
 The **Movies** and **TV Shows** tabs below that are the main catalog views,
 each with a **list** or **grid** (poster wall) mode.
 
-![Movies tab, grid view](docs/screenshots/movies-grid.png)
+![Movies tab, grid view, with the trailer badge on titles that have one](docs/screenshots/movies-grid.png)
+
+In grid mode, a title that has a trailer shows a small **▶** badge in the top-right corner of its
+poster. Click it to watch the trailer in a pop-up (YouTube's player, so the browser needs to reach YouTube);
+this does not open the title's detail view. If a title is also marked 18+, that badge sits just below the ▶.
 
 - **Search / provider filter / page size** — top toolbar.
 - **Manage Categories**, **Needs Review**, **Missing Artwork**, **Language

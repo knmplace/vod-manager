@@ -3040,11 +3040,11 @@ function DownloadsCard() {
                     <td className="py-1 pr-2 whitespace-nowrap text-muted-foreground">{j.preset === 'original' ? 'original' : j.preset.replace('_', ' ')}</td>
                     <td className={`py-1 pr-2 ${j.import_status ? 'min-w-36' : 'w-36'}`}>
                       {j.status === 'running' && (
-                        <div className="h-1.5 rounded bg-border overflow-hidden"><div className="h-full bg-primary" style={{ width: `${Math.round(j.progress * 100)}%` }} /></div>
+                        <div className="h-1.5 rounded bg-border overflow-hidden"><div className={`h-full bg-primary ${j.total_bytes ? '' : 'animate-pulse opacity-50'}`} style={{ width: j.total_bytes ? `${Math.round(j.progress * 100)}%` : '100%' }} /></div>
                       )}
                       <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                       <span className={statusColor[j.status]}>
-                        {j.status === 'running' ? `${Math.round(j.progress * 100)}% · ${dlBytes(j.bytes_done)}${j.provider_name ? ` · ${j.provider_name}` : ''}` : j.status === 'done' ? `done · ${dlBytes(j.final_size)}` : j.status}
+                        {j.status === 'running' ? `${j.total_bytes ? `${Math.round(j.progress * 100)}%` : 'size unknown'} · ${dlBytes(j.bytes_done)}${j.provider_name ? ` · ${j.provider_name}` : ''}` : j.status === 'done' ? `done · ${dlBytes(j.final_size)}` : j.status}
                       </span>
                       <ImportChip job={j} />
                       </div>

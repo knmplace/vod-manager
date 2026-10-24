@@ -26,7 +26,8 @@ pool entry rather than duplicate entries, and automatically fails over
 between them if one goes down or hits its connection limit — series
 included, pulling episodes from every provider that matches, not just
 whichever matched first. A source's own trailer, when it has one, passes
-through to the re-exposed XC feed as-is.
+through to the re-exposed XC feed as-is, and shows as a small ▶ badge on the
+poster in the web app (click it to watch).
 
 **New here?** See [USERGUIDE.md](USERGUIDE.md) for a full walkthrough with
 screenshots — installation, connecting Dispatcharr (single or multiple
