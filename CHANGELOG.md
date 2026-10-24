@@ -31,6 +31,15 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-24 (Trailer badge on cards)
+
+- ✅ **Movie and series cards show a red ▶ trailer badge when a trailer is
+  known.** Clicking it plays the YouTube trailer in a popup. Trailers were
+  already captured from the provider's catalog (and the TMDB trickle) but
+  only passed to XC clients; the web UI never showed them. Same icon as the
+  VOD To Plex plugin. Frontend only; the card APIs already returned
+  `trailer_key`.
+
 ## 2026-10-24 (Synced with upstream v0.3.08 – v0.3.10)
 
 - 🔼 **Upstream [v0.3.08](https://github.com/jstevenscl/vod-manager/releases/tag/v0.3.08),
