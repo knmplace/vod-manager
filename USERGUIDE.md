@@ -858,6 +858,38 @@ can be cancelled or retried. A title already in the folder is never downloaded t
 and a download that was interrupted (restart, dropped connection) resumes where it left
 off.
 
+**Checking resolution and file size before you download.** Providers often carry the same
+title in several qualities, and the list doesn't say which is which. Next to each *source*
+(on a movie and on each episode) there is a **Check quality** button. Press it and the app
+reads the start of that one file from the provider (a few MB, not the whole thing) and shows
+what it really is, for example `1080p · H264 · 4.2 GB`. The result is saved on the source, so
+it is only ever fetched once; the small icon next to it re-checks. Where a provider keeps the
+information at the end of an MP4, the app also reads the end of the file. If a file still
+can't be read you see its size and *resolution unreadable*, and it can be tried again later.
+
+For a whole series or one season, use **Check quality** next to *Episodes*. That starts a
+slow background job: one episode at a time, a random 30 to 60 second pause between episodes
+on the same provider, and only the provider's top-priority source for each episode. Progress
+shows next to the button, and **Cancel** stops it. A season of 24 episodes takes a while on
+purpose. A job covers up to 30 episodes (run it again for the rest) and skips episodes that
+are already checked.
+
+![Check quality results on a series' episodes, and the background Check quality control](docs/screenshots/check-quality.png)
+
+**Providers are protected.** A check is a real connection to your provider, so it follows the
+same rules downloads and playback do:
+
+- it never starts while a download or a viewer is using the provider's connection, or when the
+  provider is at its connection limit (the button says to try again shortly);
+- only one check runs on a provider at a time, with a pause between checks, and no more than
+  eight on one provider in ten minutes;
+- if a provider answers "slow down" (HTTP 403, 429, 458 or 509, or a "maximum connections"
+  page) the provider goes on the same cooldown downloads use, and a background job **pauses and
+  stays paused** until you press **Resume**. It never retries on its own;
+- three episodes in a row that can't be read also pause a job.
+
+The background job lives in memory: a restart stops it, but everything already measured stays.
+
 **Re-encoding.** Provider files are often much larger than you want in a library. Pick
 a preset instead of *Original file* to shrink a file while saving it: H.264 or H.265,
 capped at 1080p or 720p. The provider connection is only used while the original is fetched; the encode
@@ -895,6 +927,16 @@ choose **VAAPI** instead. The **Test encoder** result shows the speed, so you ca
 the GPU is actually faster than the CPU. Hardware encodes are quicker but a little larger than software at the same quality setting.
 Without a GPU, **CPU threads** (software encoder) limits (roughly) how many cores one re-encode uses so the
 rest of the server stays responsive. Re-encoding runs at low priority either way.
+
+**VAAPI with nothing to scale.** When the file is already no taller than the preset (for example a 720p
+recording with a 720p or 1080p preset), VAAPI keeps the whole job on the GPU, decoding and encoding with no
+copy through the CPU, so the CPU stays almost idle. A taller file still uses the CPU to scale, as above. If the
+GPU can't decode that file, the download quietly falls back to the normal VAAPI path and then to the CPU.
+
+**Keep the original unless it shrinks.** VAAPI on some GPUs can only encode at a fixed quality, which can
+make an already-compact file *bigger*. After a re-encode, if the new file is not at least **10%** smaller than the
+downloaded original (change it under *Re-encoding*; 0 turns it off), the original is kept instead and saved with
+its own extension. It does not apply when other-language tracks were removed, because the original still has them.
 
 **Leaving the encoding to Tdarr (or similar).** If you already run a transcoder, keep the preset on
 *Original file* (and the language list blank): files are saved untouched into the library layout above, and
@@ -1012,6 +1054,9 @@ API key are saved under **Configuration → Library handoff (Radarr / Sonarr)**.
    your encoder's output folder if an encoder such as Tdarr sits in between). Once the file has stopped growing it
    asks Radarr or Sonarr to import it. The import **moves** the file, so it leaves the finished folder and appears in
    the Radarr / Sonarr library.
+   Radarr and Sonarr normally recognise the title from the folder and file names. If they can't (for example
+   their record has a different year or spelling, the movie has no year so its folder is just `Title [tmdbid-N]`, or an encoder renamed the file), the app imports the file straight
+   onto the movie or episode it already added, so it doesn't fail with "Unknown Movie" / "Unknown Series".
 4. **Confirm.** The app checks that Radarr or Sonarr now has the file. If it refuses, the reason it gives is kept
    and shown.
 

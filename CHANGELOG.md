@@ -31,6 +31,28 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-24 (Synced with upstream v0.3.08 – v0.3.10)
+
+- 🔼 **Upstream [v0.3.08](https://github.com/jstevenscl/vod-manager/releases/tag/v0.3.08),
+  [v0.3.09](https://github.com/jstevenscl/vod-manager/releases/tag/v0.3.09)
+  and [v0.3.10](https://github.com/jstevenscl/vod-manager/releases/tag/v0.3.10)
+  merged; the fork now reports version 0.3.10 and includes everything in
+  upstream `main`.** New from upstream:
+  - Radarr/Sonarr handoff no longer fails with *Unknown Movie* / *Unknown
+    Series*: when the name can't be matched, the file is imported onto the
+    item the app already added.
+  - VAAPI re-encodes stay on the GPU when nothing needs scaling, and a
+    re-encode that doesn't shrink the file by at least 10% (new
+    `min_saving_percent` download setting) is discarded and the original kept.
+  - **Check quality** next to a movie/episode source reads a few MB and shows
+    the real resolution, codec and size, stored on the source. On a series or
+    season it runs as a slow background job (one episode at a time, 30–60s
+    gaps) that stops at the first provider pushback until resumed.
+  - A real video file the provider labels `text/html` or JSON now downloads
+    instead of failing.
+  - Merge note: clean merge, no fork changes needed; adds eight `probe_*`
+    columns to `movie_sources` / `episode_sources` via the normal migration.
+
 ## 2026-10-20 (Synced with upstream v0.3.06 + v0.3.07)
 
 - 🔼 **Upstream [v0.3.06](https://github.com/jstevenscl/vod-manager/releases/tag/v0.3.06)
