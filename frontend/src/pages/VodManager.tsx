@@ -2720,7 +2720,7 @@ function queueResultText(r: { queued: number; already_queued: number; no_source:
   if (r.no_source) parts.push(`${r.no_source} skipped (no playable source)`)
   if (r.missing) parts.push(`${r.missing} no longer exist`)
   if (r.truncated) parts.push('stopped at 2,000 for one request, so narrow the selection and queue the rest')
-  return (parts.join(', ') || 'Nothing to queue') + '. Progress is under Configuration → Downloads.'
+  return (parts.join(', ') || 'Nothing to queue') + '. Progress is under Download Configuration.'
 }
 
 // the queue asks first when the user's media server already has some of it
@@ -2815,7 +2815,7 @@ function DownloadMenu({ target, label, providers, seasons }: {
   )
 }
 
-// Configuration -> Downloads: settings, the legal note, and the live queue.
+// Download Configuration -> Downloads: settings, the legal note, and the live queue.
 function DownloadsCard() {
   const qc = useQueryClient()
   const status = useDownloadStatus(true)
@@ -5911,7 +5911,7 @@ function LibraryLanguageModal({ contentType, qc, onClose }: {
   )
 }
 
-export type VodManagerTab = 'movies' | 'series' | 'metadata' | 'recovery' | 'curation' | 'providers' | 'config' | 'dvr'
+export type VodManagerTab = 'movies' | 'series' | 'metadata' | 'recovery' | 'curation' | 'providers' | 'config' | 'downloads' | 'dvr'
 export type DvrSubTab = 'scheduled' | 'users' | 'library' | 'missing' | 'metrics'
 
 interface PossibleMetadataMatchCandidate {
@@ -8715,6 +8715,18 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
 
       </>}
 
+      {/* KNM: download, Radarr/Sonarr handoff and In Library cards moved off Configuration to their own page (2026-10-24) */}
+      {activeTab === 'downloads' && (
+      <>
+      <DownloadsCard />
+
+      <HandoffCard />
+
+      {/* KNM: wait for providers so the card knows whether to open the typed-in form (2026-10-18) */}
+      {!providersQuery.isPending && <LibraryPresenceCard providers={providersQuery.data ?? []} />}
+      </>
+      )}
+
       {activeTab === 'config' && (
       <>
       <SectionCard title="API Keys" icon={<CheckCircle2 size={14} />}>
@@ -9300,13 +9312,6 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
           </div>
         )}
       </SectionCard>
-
-      <DownloadsCard />
-
-      <HandoffCard />
-
-      {/* KNM: wait for providers so the card knows whether to open the typed-in form (2026-10-18) */}
-      {!providersQuery.isPending && <LibraryPresenceCard providers={providersQuery.data ?? []} />}
 
       <SectionCard title="Dispatcharr Connections" icon={<Zap size={14} />}>
         <p className="text-xs text-muted-foreground">
@@ -12942,7 +12947,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
               size="sm"
               variant="outline"
               disabled={selectedMovieIds.size === 0 || queueDownload.isPending}
-              title="Saves the selected movies as files in your download folder (uses the default preset from Configuration → Downloads)"
+              title="Saves the selected movies as files in your download folder (uses the default preset from Download Configuration)"
               onClick={() => queueDownload.mutate({ movie_ids: Array.from(selectedMovieIds) })}
             >
               <Download size={12} className="mr-1" />Download selected ({selectedMovieIds.size})
@@ -13192,7 +13197,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
               size="sm"
               variant="outline"
               disabled={selectedSeriesIds.size === 0 || queueDownload.isPending}
-              title="Saves the selected shows (every episode) as files in your download folder (uses the default preset from Configuration → Downloads)"
+              title="Saves the selected shows (every episode) as files in your download folder (uses the default preset from Download Configuration)"
               onClick={() => queueDownload.mutate({ series_ids: Array.from(selectedSeriesIds) })}
             >
               <Download size={12} className="mr-1" />Download selected ({selectedSeriesIds.size})
