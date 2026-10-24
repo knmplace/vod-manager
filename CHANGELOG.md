@@ -33,12 +33,12 @@ instead of opening a duplicate request.
 
 ## 2026-10-24 (Download Configuration page, hideable menu)
 
-- ✅ **Download settings have their own page.** A new **Download
+- ✅ 🔀 ([#63](https://github.com/jstevenscl/vod-manager/pull/63)) **Download settings have their own page.** A new **Download
   Configuration** sidebar item (under System) now holds the Downloads,
   Library handoff (Radarr / Sonarr) and In Library cards, which used to sit
   on the Configuration page. Settings and behavior are unchanged; only the
   location moved. Frontend only.
-- ✅ **The sidebar menu can be hidden.** A **Hide menu** button at the top
+- ✅ 🔀 ([#63](https://github.com/jstevenscl/vod-manager/pull/63)) **The sidebar menu can be hidden.** A **Hide menu** button at the top
   of the sidebar folds it away for more room; **Show menu** at the left of
   the top bar brings it back. The choice is remembered per browser.
 
