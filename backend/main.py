@@ -327,7 +327,9 @@ async def _vod_enrichment_scheduler() -> None:
     while True:
         run_started_at = time.time()
         try:
-            await vod_importer.bulk_enrich_all()
+            # KNM: 2026-10-26 -- pending titles only; the full walk (58k movies,
+            # ~1.8h daily) enriched ~1 title. Enrich All (force) still walks all.
+            await vod_importer.bulk_enrich_all(pending_only=True)
         except Exception as exc:
             logger.warning("[vod_enrichment_scheduler] run failed: %s", exc)
         save_last_enrichment_run(run_started_at)

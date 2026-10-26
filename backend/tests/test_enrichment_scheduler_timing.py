@@ -21,7 +21,7 @@ def _run(monkeypatch, run_secs, ttl=TTL, cycles=3, run_raises=False, last_run=No
     clock = {"t": 1_000_000.0}
     starts, stamps, sleeps = [], [], []
 
-    async def bulk():
+    async def bulk(**kwargs):
         starts.append(clock["t"])
         clock["t"] += run_secs
         if run_raises:

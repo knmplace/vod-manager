@@ -48,7 +48,17 @@ instead of opening a duplicate request.
     enrichment loop, which this fork has replaced with provider-phased,
     batched enrichment, so it doesn't apply as written. The fork keeps its own
     enrichment code unchanged; upstream's database helper is present but
-    unused.
+    unused. Its private thread pool was adopted separately (below).
+- ✅ **The daily enrichment pass only looks at titles with pending work.** It
+  used to walk the whole catalog (~58k movies and ~8.7k series, about 1h50m)
+  and enriched almost nothing. It now lists never-enriched movies it can act on
+  and series sources that never had episodes. **Enrich All** with force still
+  walks everything.
+- ✅ **Its end-of-run auto-merge checks cover only titles that run changed**,
+  instead of re-checking the same unmergeable different-language pairs every
+  day.
+- ✅ **Bulk enrichment's database work runs on its own small thread pool**
+  (from upstream v0.3.12), so the UI stays responsive while it runs.
 
 ## 2026-10-24 (Synced with upstream v0.3.11)
 

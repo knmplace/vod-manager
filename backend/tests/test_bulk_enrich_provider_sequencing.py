@@ -131,7 +131,7 @@ def test_empty_configured_providers_do_not_reduce_active_lane_concurrency(monkey
     monkeypatch.setattr(vod_importer.vod_db, "list_providers", lambda: providers)
     monkeypatch.setattr(
         vod_importer.vod_db,
-        "list_movie_ids_pending_provider_enrichment",
+        "list_movie_ids_pending_bulk_enrichment",
         lambda provider_id=None: [10] if provider_id in (None, 1) else [],
     )
     monkeypatch.setattr(
@@ -299,7 +299,7 @@ def test_shared_series_across_providers_is_counted_once(monkeypatch):
 
     monkeypatch.setattr(vod_importer, "enrich_series_source_only", fake_enrich_series)
     monkeypatch.setattr(vod_importer.vod_db, "list_providers", lambda: providers)
-    monkeypatch.setattr(vod_importer.vod_db, "list_movie_ids_pending_provider_enrichment", lambda provider_id=None: [])
+    monkeypatch.setattr(vod_importer.vod_db, "list_movie_ids_pending_bulk_enrichment", lambda provider_id=None: [])
     monkeypatch.setattr(vod_importer.vod_db, "list_pending_series_sources", lambda provider_id=None: pending[provider_id])
     monkeypatch.setattr(vod_importer.vod_db, "has_pending_series_source_enrichment", lambda provider_id: True)
     monkeypatch.setattr(vod_importer.vod_db, "auto_merge_movies_by_tmdb_batch", lambda ids, should_stop=None: None)

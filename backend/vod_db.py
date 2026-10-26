@@ -7291,6 +7291,27 @@ def list_movie_ids_pending_provider_enrichment(provider_id: int | None = None) -
     return []
 
 
+# KNM: 2026-10-26 -- the scheduled pass listed every movie (58k) to find the
+# handful enrich_movie can still act on in a bulk run: never enriched and
+# either a known TMDB id or a Plex source (which just stamps).
+def list_movie_ids_pending_bulk_enrichment(provider_id: int) -> list[int]:
+    conn = _connect()
+    try:
+        rows = conn.execute("""
+            SELECT m.id FROM movies m
+            WHERE m.review_excluded=0 AND m.last_enriched_at IS NULL
+              AND m.id IN (SELECT movie_id FROM movie_sources WHERE provider_id=?)
+              AND (COALESCE(m.tmdb_id, '') <> '' OR EXISTS (
+                  SELECT 1 FROM movie_sources ms JOIN providers p ON p.id=ms.provider_id
+                  WHERE ms.movie_id=m.id AND p.provider_type='plex'))
+            ORDER BY m.id
+        """, (provider_id,)).fetchall()
+        conn.close()
+        return [r["id"] for r in rows]
+    finally:
+        conn.close()
+
+
 def list_movie_sources_for_ids(movie_ids: list[int]) -> dict[int, list[dict]]:
     """Bulk equivalent of list_movie_sources — one query for a whole page of
     movies instead of one query per movie (that N+1 pattern is what froze the
