@@ -31,6 +31,25 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-26 (Synced with upstream v0.3.12)
+
+- 🔼 **Upstream [v0.3.12](https://github.com/jstevenscl/vod-manager/releases/tag/v0.3.12)
+  merged; the fork now reports version 0.3.12.** New from upstream:
+  - **Deleting a provider removes its Dispatcharr M3U profile** on the
+    VOD-relay account (best effort; the delete still works if Dispatcharr is
+    unreachable, and real IPTV account profiles are never touched).
+  - **Downloads retry on a provider 5xx**: the same source is retried
+    (resuming) with a longer wait before failing over.
+  - The watch-session poller and the Providers list no longer wait on the
+    database write lock on the event loop, so a long import no longer freezes
+    other requests.
+  - Merge note: upstream's bulk-enrichment rework (private thread pool and a
+    freshness pre-filter) was **not** taken. It rewrites upstream's own
+    enrichment loop, which this fork has replaced with provider-phased,
+    batched enrichment, so it doesn't apply as written. The fork keeps its own
+    enrichment code unchanged; upstream's database helper is present but
+    unused.
+
 ## 2026-10-24 (Synced with upstream v0.3.11)
 
 - 🔼 **Upstream [v0.3.11](https://github.com/jstevenscl/vod-manager/releases/tag/v0.3.11)

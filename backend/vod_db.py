@@ -6193,6 +6193,21 @@ def get_provider_sync_profile(provider_id: int, connection_id: int) -> int | Non
         conn.close()
 
 
+def list_provider_sync_profiles(provider_id: int) -> list[dict]:
+    """Every (connection, Dispatcharr profile) this provider's sync created or adopted on a VOD-relay account.
+    Read before a provider is deleted: the delete cascades these rows away, and they are the only record of
+    which profiles to remove from Dispatcharr."""
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT dispatcharr_connection_id AS connection_id, dispatcharr_profile_id AS profile_id "
+            "FROM provider_sync_profiles WHERE provider_id=?", (provider_id,)).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 def set_provider_sync_profile(provider_id: int, connection_id: int, profile_id: int) -> None:
     conn = _connect()
     try:
@@ -7449,6 +7464,24 @@ def movie_needs_enrichment(movie_id: int) -> bool:
     # requests a forced refresh.  This also keeps provider-detail fallback
     # limited to genuinely new/unresolved movies.
     return bool(movie) and not movie.get("last_enriched_at")
+
+
+def filter_ids_needing_enrichment(kind: str, ids) -> list[int]:
+    """The ids (kind is "movie" or "series") that movie_needs_enrichment / series_needs_enrichment say are due,
+    checked one after another in the calling thread. bulk_enrich_all used to ask that question per title through
+    its own asyncio.to_thread call: on a catalog of hundreds of thousands, where nearly every answer is "still
+    fresh", those instant calls kept every worker of the shared thread pool busy and starved the API's own
+    requests (vod_manager-051). One pass here costs one thread. An id whose check errors is kept, so it is
+    looked at again by enrich_movie / enrich_series, which repeat the check anyway."""
+    check = movie_needs_enrichment if kind == "movie" else series_needs_enrichment
+    due = []
+    for item_id in ids:
+        try:
+            if check(item_id):
+                due.append(item_id)
+        except Exception:
+            due.append(item_id)
+    return due
 
 
 # KNM: 2026-10-14 -- a held (needs_year_review=1) yearless movie takes its year
