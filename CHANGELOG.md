@@ -59,6 +59,14 @@ instead of opening a duplicate request.
   day.
 - ✅ **Bulk enrichment's database work runs on its own small thread pool**
   (from upstream v0.3.12), so the UI stays responsive while it runs.
+- ✅ **The background episode trickle only runs merge checks for series whose
+  TMDB id changed** in that batch, instead of re-checking the same ~1,700
+  different-language pairs every batch.
+- ✅ **Broken posters switch to TMDB.** When a movie or series card's poster
+  fails to load (a dead provider image host, or a TMDB link with no image), the
+  card fetches that title's TMDB poster (local TMDB store first, then the TMDB
+  API) and keeps it. Titles without a TMDB id, or with no TMDB poster, keep the
+  usual placeholder.
 
 ## 2026-10-24 (Synced with upstream v0.3.11)
 

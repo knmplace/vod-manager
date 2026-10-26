@@ -523,10 +523,25 @@ function posterSrc(url: string): string {
 // image icon forever instead of falling back. `fallback` lets each call
 // site keep its own existing no-poster art (a Film/Tv/ImageOff icon, or
 // nothing at all) rather than forcing one look everywhere.
-function PosterThumb({ url, className, fallback }: { url: string | null; className: string; fallback?: React.ReactNode }) {
+// KNM: 2026-10-26 -- with `item`, a failed poster asks the backend once for the
+// TMDB poster (saved server-side) before falling back.
+function PosterThumb({ url, className, fallback, item }: {
+  url: string | null; className: string; fallback?: React.ReactNode
+  item?: { kind: 'movie' | 'series'; id: number }
+}) {
   const [failed, setFailed] = useState(false)
-  if (url && !failed) {
-    return <img src={posterSrc(url)} alt="" className={className} loading="lazy" onError={() => setFailed(true)} />
+  const [replacement, setReplacement] = useState<string | null>(null)
+  const [retried, setRetried] = useState(false)
+  const onError = () => {
+    if (!item || retried) { setFailed(true); return }
+    setRetried(true)
+    api.post(`/vod/${item.kind}/${item.id}/poster-fallback/`)
+      .then((r) => r.data?.poster_url ? setReplacement(r.data.poster_url) : setFailed(true))
+      .catch(() => setFailed(true))
+  }
+  const src = replacement ?? url
+  if (src && !failed) {
+    return <img src={posterSrc(src)} alt="" className={className} loading="lazy" onError={onError} />
   }
   return <>{fallback !== undefined ? fallback : <div className={`${className} bg-muted`} />}</>
 }
@@ -3695,7 +3710,7 @@ function MovieRow({ movie, movieCategories, providers, qc, xcCredentials, select
 
   const detailContent = (
     <>
-      {mode === 'list' && <PosterThumb url={movie.poster_url} className="w-24 rounded" fallback={null} />}
+      {mode === 'list' && <PosterThumb url={movie.poster_url} item={{ kind: 'movie', id: movie.id }} className="w-24 rounded" fallback={null} />}
       <div>
         {renameForm ? (
           <div className="flex items-center gap-1.5 flex-wrap">
@@ -3936,7 +3951,7 @@ function MovieRow({ movie, movieCategories, providers, qc, xcCredentials, select
         )}
         <button className="block w-full text-left relative" onClick={() => setOpen(true)}>
           <PosterThumb
-            url={movie.poster_url}
+            url={movie.poster_url} item={{ kind: 'movie', id: movie.id }}
             className="w-full aspect-[2/3] object-cover"
             fallback={<div className="w-full aspect-[2/3] bg-secondary flex items-center justify-center"><Film size={24} className="text-muted-foreground" /></div>}
           />
@@ -3992,7 +4007,7 @@ function MovieRow({ movie, movieCategories, providers, qc, xcCredentials, select
     <div className="rounded-lg border border-border bg-card p-2.5 text-xs flex gap-3 shadow-sm hover:border-primary/30 transition-colors">
       <input type="checkbox" className="mt-1 shrink-0" checked={selected} onChange={() => {}} onClick={(e) => onToggleSelect(e.shiftKey)} title="Select for bulk placement (shift-click to select a range)" />
       <PosterThumb
-        url={movie.poster_url}
+        url={movie.poster_url} item={{ kind: 'movie', id: movie.id }}
         className="w-10 h-14 object-cover rounded-md shrink-0"
         fallback={<div className="w-10 h-14 rounded-md shrink-0 bg-secondary flex items-center justify-center"><Film size={14} className="text-muted-foreground" /></div>}
       />
@@ -4244,7 +4259,7 @@ function SeriesRow({ series, seriesCategories, qc, xcCredentials, selected, onTo
 
   const detailContent = (
     <>
-      {mode === 'list' && <PosterThumb url={series.poster_url} className="w-24 rounded" fallback={null} />}
+      {mode === 'list' && <PosterThumb url={series.poster_url} item={{ kind: 'series', id: series.id }} className="w-24 rounded" fallback={null} />}
       <div>
         {renameForm ? (
           <div className="flex items-center gap-1.5 flex-wrap">
@@ -4612,7 +4627,7 @@ function SeriesRow({ series, seriesCategories, qc, xcCredentials, selected, onTo
         )}
         <button className="block w-full text-left relative" onClick={() => setOpen(true)}>
           <PosterThumb
-            url={series.poster_url}
+            url={series.poster_url} item={{ kind: 'series', id: series.id }}
             className="w-full aspect-[2/3] object-cover"
             fallback={<div className="w-full aspect-[2/3] bg-secondary flex items-center justify-center"><Tv size={24} className="text-muted-foreground" /></div>}
           />
@@ -4653,7 +4668,7 @@ function SeriesRow({ series, seriesCategories, qc, xcCredentials, selected, onTo
     <div className="rounded-lg border border-border bg-card p-2.5 text-xs flex gap-3 shadow-sm hover:border-primary/30 transition-colors">
       <input type="checkbox" className="mt-1 shrink-0" checked={selected} onChange={() => {}} onClick={(e) => onToggleSelect(e.shiftKey)} title="Select for bulk placement (shift-click to select a range)" />
       <PosterThumb
-        url={series.poster_url}
+        url={series.poster_url} item={{ kind: 'series', id: series.id }}
         className="w-10 h-14 object-cover rounded-md shrink-0"
         fallback={<div className="w-10 h-14 rounded-md shrink-0 bg-secondary flex items-center justify-center"><Tv size={14} className="text-muted-foreground" /></div>}
       />

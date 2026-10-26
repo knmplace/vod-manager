@@ -2162,6 +2162,25 @@ async def bulk_enrich_tmdb_series_metadata(
     return merge_events
 
 
+# KNM: 2026-10-26 -- a card whose stored poster fails to load (dead provider
+# image host, bare TMDB base URL) swaps to its TMDB poster and keeps it.
+async def replace_broken_poster(kind: str, item_id: int) -> str | None:
+    item = await _to_thread(vod_db.get_movie if kind == "movie" else vod_db.get_series, item_id)
+    tmdb_id = (item or {}).get("tmdb_id")
+    if not tmdb_id:
+        return None
+    fetch = tmdb_sync.get_movie_full_details if kind == "movie" else tmdb_sync.get_series_full_details
+    try:
+        detail = await fetch(str(tmdb_id))
+    except tmdb_sync.TmdbNotFoundError:
+        return None
+    poster = (detail or {}).get("poster_url")
+    if not poster or poster == item.get("poster_url"):
+        return None
+    await _to_thread(vod_db.bulk_set_poster_url, kind, [item_id], poster)
+    return poster
+
+
 async def bulk_enrich_series_episodes(
     concurrency: int = 6, limit: int | None = None, series_ids: set[int] | None = None,
     request_spacing: float = 0, max_consecutive_failures: int | None = None,
@@ -2191,6 +2210,7 @@ async def bulk_enrich_series_episodes(
             source_count += len(rows)
 
     episode_before = await _to_thread(vod_db.get_series_episode_summaries, pending_series_ids)
+    tmdb_before = await _to_thread(vod_db.get_series_tmdb_ids, pending_series_ids)
 
     _ENRICH_PROGRESS.update({
         "running": True, "movies_total": 0, "movies_done": 0,
@@ -2223,10 +2243,15 @@ async def bulk_enrich_series_episodes(
                 })
         await write_queue.put(None)
         await writer_task
-        merge_events = await _to_thread(vod_db.auto_merge_series_by_tmdb_batch, pending_series_ids) or []
-        if pending_series_ids:
+        # KNM: 2026-10-26 -- an episode fetch rarely touches tmdb_id; sweeping
+        # the whole batch re-skipped the same 1,746 different-language pairs.
+        tmdb_after = await _to_thread(vod_db.get_series_tmdb_ids, pending_series_ids)
+        retagged_ids = {sid for sid, tid in tmdb_after.items() if tid and tid != tmdb_before.get(sid)}
+        merge_events = []
+        if retagged_ids:
+            merge_events = await _to_thread(vod_db.auto_merge_series_by_tmdb_batch, retagged_ids) or []
             merge_events.extend(await _run_scoped_collision_sweep(
-                vod_db.auto_merge_series_tmdb_collisions, pending_series_ids,
+                vod_db.auto_merge_series_tmdb_collisions, retagged_ids,
             ))
         episode_after = await _to_thread(vod_db.get_series_episode_summaries, pending_series_ids)
         episode_events = []

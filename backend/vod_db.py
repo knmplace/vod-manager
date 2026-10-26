@@ -8869,6 +8869,23 @@ def get_series_episode_summaries(series_ids: set[int] | list[int] | None) -> dic
         conn.close()
 
 
+# KNM: 2026-10-26 -- the episode trickle compares these before/after a batch so
+# its merge checks only cover series whose TMDB id actually changed.
+def get_series_tmdb_ids(series_ids: set[int] | list[int] | None) -> dict[int, str | None]:
+    ids = sorted({int(series_id) for series_id in (series_ids or [])})
+    if not ids:
+        return {}
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            f"SELECT id, tmdb_id FROM series WHERE id IN ({','.join('?' * len(ids))})", ids,
+        ).fetchall()
+        conn.close()
+        return {int(row["id"]): (str(row["tmdb_id"]) if row["tmdb_id"] else None) for row in rows}
+    finally:
+        conn.close()
+
+
 def set_series_source_enrichment(series_id: int, provider_id: int, provider_series_id: str) -> None:
     with _WRITE_LOCK:
         conn = _connect()
