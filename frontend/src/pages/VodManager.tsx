@@ -525,19 +525,24 @@ function posterSrc(url: string): string {
 // nothing at all) rather than forcing one look everywhere.
 // KNM: 2026-10-26 -- with `item`, a failed poster asks the backend once for the
 // TMDB poster (saved server-side) before falling back.
+// KNM: 2026-10-26 -- titles TMDB had no poster for; not asked again this session.
+const posterFallbackMissed = new Set<string>()
+
 function PosterThumb({ url, className, fallback, item }: {
   url: string | null; className: string; fallback?: React.ReactNode
   item?: { kind: 'movie' | 'series'; id: number }
 }) {
   const [failed, setFailed] = useState(false)
   const [replacement, setReplacement] = useState<string | null>(null)
-  const [retried, setRetried] = useState(false)
   const onError = () => {
-    if (!item || retried) { setFailed(true); return }
-    setRetried(true)
+    const key = item ? `${item.kind}:${item.id}` : ''
+    if (!item || replacement || posterFallbackMissed.has(key)) { setFailed(true); return }
     api.post(`/vod/${item.kind}/${item.id}/poster-fallback/`)
-      .then((r) => r.data?.poster_url ? setReplacement(r.data.poster_url) : setFailed(true))
-      .catch(() => setFailed(true))
+      .then((r) => {
+        if (r.data?.poster_url) setReplacement(r.data.poster_url)
+        else { posterFallbackMissed.add(key); setFailed(true) }
+      })
+      .catch(() => { posterFallbackMissed.add(key); setFailed(true) })
   }
   const src = replacement ?? url
   if (src && !failed) {
@@ -733,7 +738,7 @@ function DvrLibrarySeriesCard({ series, rows, providerId, qc, xcCredentials, del
   return (
     <div className="rounded-xl border border-border bg-card overflow-hidden shadow-sm hover:shadow-lg hover:-translate-y-0.5 hover:border-primary/40 transition-all relative">
       <button className="block w-full text-left relative" onClick={() => setOpen(true)}>
-        <PosterThumb url={series.poster_url} className="w-full aspect-[2/3] object-cover" fallback={<LibraryGlyph seed={series.id} name={series.name} />} />
+        <PosterThumb url={series.poster_url} item={{ kind: 'series', id: series.id }} className="w-full aspect-[2/3] object-cover" fallback={<LibraryGlyph seed={series.id} name={series.name} />} />
         <div className="absolute inset-x-0 bottom-0 h-2/3 bg-gradient-to-t from-black/85 via-black/35 to-transparent pointer-events-none" />
         <div className="absolute inset-x-0 bottom-0 p-2.5 text-white">
           <p className="font-bold text-[13px] leading-tight line-clamp-2 drop-shadow">{series.name}</p>
@@ -2499,7 +2504,7 @@ function DuplicateGroupRow({ group, contentType, xcCredentials, onMerge, isPendi
               onChange={() => toggleChecked(item.id)}
               title="Include this candidate in Merge selected / Ignore selected below -- uncheck it to leave it completely untouched instead"
             />
-            <PosterThumb url={item.poster_url} className="w-12 h-[72px] object-cover rounded shrink-0" fallback={null} />
+            <PosterThumb url={item.poster_url} item={{ kind: contentType, id: item.id }} className="w-12 h-[72px] object-cover rounded shrink-0" fallback={null} />
             <div className="flex-1 min-w-0">
               <label className={`flex items-center gap-2 ${isChecked ? 'cursor-pointer' : 'cursor-not-allowed'}`}>
                 <input
@@ -9831,7 +9836,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
           {blockedMoviesQuery.data?.map((movie) => (
             <div key={movie.id} className="rounded-lg border border-destructive/30 bg-destructive/5 overflow-hidden">
               <div className="flex gap-3 p-3">
-                <PosterThumb url={movie.poster_url} className="w-10 h-14 rounded object-cover shrink-0" fallback={<div className="w-10 h-14 rounded bg-muted flex items-center justify-center"><Film size={15} className="text-muted-foreground" /></div>} />
+                <PosterThumb url={movie.poster_url} item={{ kind: 'movie', id: movie.id }} className="w-10 h-14 rounded object-cover shrink-0" fallback={<div className="w-10 h-14 rounded bg-muted flex items-center justify-center"><Film size={15} className="text-muted-foreground" /></div>} />
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-semibold truncate">{movie.name}{movie.year ? ` (${movie.year})` : ''}</p>
                   <p className="text-[11px] text-destructive">Blocked {movie.stream_blocked_at ? new Date(Number(movie.stream_blocked_at) * 1000).toLocaleString() : 'after all sources failed'}</p>
@@ -12010,6 +12015,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
                             <div className="relative">
                               <PosterThumb
                                 url={m.poster_url}
+                                item={{ kind: 'movie', id: m.id }}
                                 className="w-full aspect-[2/3] object-cover"
                                 fallback={<LibraryGlyph seed={m.id} name={m.name} />}
                               />

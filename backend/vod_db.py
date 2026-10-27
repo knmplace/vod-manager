@@ -3755,6 +3755,23 @@ def episode_owned_by_portal_user(episode_id: int, dispatcharr_user_id: int) -> b
         conn.close()
 
 
+# KNM: 2026-10-26 -- portal poster fallback: a show counts as the user's when
+# any of its episodes is in their library.
+def series_owned_by_portal_user(series_id: int, dispatcharr_user_id: int) -> bool:
+    conn = _connect()
+    try:
+        row = conn.execute("""
+            SELECT 1 FROM episodes e
+            JOIN episode_sources es ON es.episode_id = e.id
+            JOIN episode_source_owners eso ON eso.episode_source_id = es.id
+            WHERE e.series_id = ? AND eso.dispatcharr_user_id = ? LIMIT 1
+        """, (series_id, dispatcharr_user_id)).fetchone()
+        conn.close()
+        return row is not None
+    finally:
+        conn.close()
+
+
 def dvr_user_disk_usage_bytes(provider_id: int, dispatcharr_user_id: int) -> dict:
     """A person's usage = sum of file_size_bytes for every movie/episode
     currently placed in any category that any of their profiles targets --

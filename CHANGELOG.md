@@ -67,6 +67,14 @@ instead of opening a duplicate request.
   card fetches that title's TMDB poster (local TMDB store first, then the TMDB
   API) and keeps it. Titles without a TMDB id, or with no TMDB poster, keep the
   usual placeholder.
+- ✅ **More poster grids get the TMDB fallback.** The remaining VOD Manager
+  movie and series thumbnails (list rows, merge and duplicate views) now use
+  it too. A title whose TMDB lookup found nothing isn't asked again until the
+  page is reloaded.
+- ✅ **The Portal gets the same poster fallback.** A viewer's broken poster
+  swaps to the TMDB poster, but only for titles in that viewer's own library.
+- ✅ **Automatic episode titles handle 250 series per hourly pass** (was 100),
+  so a large backlog clears in about half a day instead of a day and a half.
 
 ## 2026-10-24 (Synced with upstream v0.3.11)
 

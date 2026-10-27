@@ -139,3 +139,61 @@ def test_trickle_skips_merge_when_no_tmdb_id_changed(trickle_merge_env, monkeypa
     monkeypatch.setattr(vod_importer, "enrich_series_source_only", no_change)
     asyncio.run(vod_importer.bulk_enrich_series_episodes(concurrency=1))
     assert trickle_merge_env == {"batch": [], "collisions": []}
+
+
+def _owned_episode(db, user_id):
+    provider = db.upsert_provider("XC", "http://xc.invalid", "u", "p")
+    db.bulk_import_series(provider, [{"name": "Show", "year": 2020, "provider_series_id": "1"}])
+    series_id = db.list_series(limit=1)[0]["id"]
+    conn = db._connect()
+    ep = conn.execute("INSERT INTO episodes (series_id, season_number, episode_number, name, created_at) "
+                      "VALUES (?, 1, 1, 'Pilot', '')", (series_id,)).lastrowid
+    src = conn.execute("INSERT INTO episode_sources (episode_id, provider_id, provider_stream_id, added_at, last_seen_at) "
+                       "VALUES (?, ?, 's1', '', '')", (ep, provider)).lastrowid
+    conn.execute("INSERT INTO episode_source_owners (episode_source_id, dispatcharr_user_id, added_at) "
+                 "VALUES (?, ?, '')", (src, user_id))
+    conn.commit()
+    conn.close()
+    return series_id
+
+
+def test_series_owned_by_portal_user(db):
+    series_id = _owned_episode(db, user_id=7)
+    assert db.series_owned_by_portal_user(series_id, 7) is True
+    assert db.series_owned_by_portal_user(series_id, 8) is False
+
+
+@pytest.fixture()
+def portal_env(monkeypatch):
+    import portal_routes
+    owned = {("movie", 3), ("series", 1)}
+    swapped = []
+
+    async def replace(kind, item_id):
+        swapped.append((kind, item_id))
+        return TMDB_POSTER
+
+    monkeypatch.setattr(portal_routes.vod_db, "movie_owned_by_portal_user", lambda i, u: ("movie", i) in owned)
+    monkeypatch.setattr(portal_routes.vod_db, "series_owned_by_portal_user", lambda i, u: ("series", i) in owned)
+    monkeypatch.setattr(portal_routes.vod_importer, "replace_broken_poster", replace)
+    return portal_routes, swapped
+
+
+ACCOUNT = {"provider_id": 1, "dispatcharr_user_id": 7}
+
+
+def test_portal_fallback_swaps_owned_items(portal_env):
+    routes, swapped = portal_env
+    assert asyncio.run(routes.portal_poster_fallback("series", 1, ACCOUNT)) == {"poster_url": TMDB_POSTER}
+    assert asyncio.run(routes.portal_poster_fallback("movie", 3, ACCOUNT)) == {"poster_url": TMDB_POSTER}
+    assert swapped == [("series", 1), ("movie", 3)]
+
+
+def test_portal_fallback_refuses_items_not_in_library(portal_env):
+    from fastapi import HTTPException
+    routes, swapped = portal_env
+    for kind, item_id in (("movie", 99), ("series", 99), ("episode", 1)):
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(routes.portal_poster_fallback(kind, item_id, ACCOUNT))
+        assert exc.value.status_code == 404
+    assert swapped == []
