@@ -33,7 +33,7 @@ instead of opening a duplicate request.
 
 ## 2026-10-27 (Language tags at the end of category names)
 
-- ✅ **Titles from categories tagged at the end, such as "Series Korean [KR]"
+- ✅ 🔀 ([#66](https://github.com/jstevenscl/vod-manager/pull/66)) **Titles from categories tagged at the end, such as "Series Korean [KR]"
   or "Movies French [FR]", now get that language.** Only a leading tag
   ("[KR] Series") was read before, so these titles defaulted to English. They
   stayed active even when only English was enabled, and could be merged into
