@@ -275,3 +275,78 @@ def test_saving_exclusion_lists_applies_policy_and_resweeps(db, monkeypatch):
     ))
     assert _archive_state(db, "movie", movie_id)["review_excluded_import_policy"] == 1
     assert resweeps == [True, True, True]
+
+
+def _set_import_pointer(db, series_id: int, provider_id: int, source_id: str):
+    conn = db._connect()
+    conn.execute(
+        "UPDATE series SET import_provider_id=?, import_provider_series_id=? WHERE id=?",
+        (provider_id, source_id, series_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _series_source_ids(db, series_id: int) -> set:
+    conn = db._connect()
+    rows = conn.execute(
+        "SELECT provider_id, provider_series_id FROM series_sources WHERE series_id=?", (series_id,),
+    ).fetchall()
+    conn.close()
+    return {(row["provider_id"], row["provider_series_id"]) for row in rows}
+
+
+def test_backfill_does_not_resurrect_a_removed_source_onto_a_card_that_has_sources(db):
+    xc = _provider(db, "xc")
+    library = _provider(db, "library")
+    holder = db.upsert_series("Holder", 2020)
+    _series_source(db, holder, xc, "shared-es", "ES - Holder", "ES")
+    _series_source(db, holder, library, "holder-en", "EN - Holder", "EN")
+    stale = db.upsert_series("Stale pointer", 2021)
+    _series_source(db, stale, library, "stale-en", "EN - Stale pointer", "EN")
+    _set_import_pointer(db, stale, xc, "shared-es")
+
+    db.apply_import_exclusion_policy(["ES"], False, [], dry_run=False)
+    db.backfill_series_sources()
+
+    assert _series_source_ids(db, stale) == {(library, "stale-en")}
+
+
+def test_backfill_still_creates_a_source_for_a_card_with_none(db):
+    xc = _provider(db, "xc")
+    legacy = db.upsert_series("Legacy only", 2020)
+    _set_import_pointer(db, legacy, xc, "legacy-1")
+
+    db.backfill_series_sources()
+
+    assert _series_source_ids(db, legacy) == {(xc, "legacy-1")}
+
+
+def _set_policy_archived(db, table: str, item_id: int):
+    conn = db._connect()
+    conn.execute(
+        f"UPDATE {table} SET review_excluded=1, review_excluded_import_policy=1 WHERE id=?", (item_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_sync_unarchive_also_clears_the_import_policy_owner(db):
+    xc = _provider(db, "xc")
+    series_item = {"name": "Synced show", "year": 2020, "provider_series_id": "s1",
+                   "raw_name": "EN - Synced show", "_has_detail": True}
+    movie_item = {"name": "Synced movie", "year": 2020, "provider_stream_id": "m1",
+                  "container_extension": "mp4", "raw_name": "EN - Synced movie", "_has_detail": True}
+    db.bulk_import_series(xc, [dict(series_item)])
+    db.bulk_import_movies(xc, [dict(movie_item)])
+    series_id = db.get_series_by_name_year("Synced show", 2020)["id"]
+    movie_id = db.get_movie_by_name_year("Synced movie", 2020)["id"]
+    _set_policy_archived(db, "series", series_id)
+    _set_policy_archived(db, "movies", movie_id)
+
+    db.bulk_import_series(xc, [dict(series_item)])
+    db.bulk_import_movies(xc, [dict(movie_item)])
+
+    for content_type, item_id in (("series", series_id), ("movie", movie_id)):
+        state = _archive_state(db, content_type, item_id)
+        assert (state["review_excluded"], state["review_excluded_import_policy"]) == (0, 0), content_type

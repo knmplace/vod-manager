@@ -8957,7 +8957,10 @@ def backfill_series_sources() -> int:
                        (series_id, provider_id, provider_series_id, provider_category_name, raw_name, added_at, last_seen_at)
                    SELECT id, import_provider_id, import_provider_series_id, provider_category_name, raw_name, ?, ?
                    FROM series
-                   WHERE import_provider_id IS NOT NULL AND import_provider_series_id IS NOT NULL""",
+                   WHERE import_provider_id IS NOT NULL AND import_provider_series_id IS NOT NULL
+                     -- KNM: 2026-10-27 -- only cards with no source at all; a stale pointer on a card
+                     -- that has sources must not resurrect a source the import policy removed.
+                     AND NOT EXISTS (SELECT 1 FROM series_sources ss WHERE ss.series_id=series.id)""",
                 (now, now),
             )
             inserted = cur.rowcount
@@ -10108,7 +10111,8 @@ def bulk_import_movies(provider_id: int, items: list[dict], _retry_depth: int = 
                             conn.executemany("UPDATE movies SET review_excluded=1 WHERE id=?", movie_updates_archive)
                             conn.executemany("DELETE FROM movie_category_placements WHERE movie_id=?", movie_updates_archive)
                         if movie_updates_unarchive:
-                            conn.executemany("UPDATE movies SET review_excluded=0 WHERE id=?", movie_updates_unarchive)
+                            # KNM: 2026-10-27 -- release the import-policy owner too, so the flags never disagree.
+                            conn.executemany("UPDATE movies SET review_excluded=0, review_excluded_import_policy=0 WHERE id=?", movie_updates_unarchive)
 
                         for entry in pending:
                             item = entry["item"]
@@ -10513,7 +10517,8 @@ def bulk_import_series(provider_id: int, items: list[dict], _retry_depth: int = 
                             conn.executemany("UPDATE series SET review_excluded=1 WHERE id=?", series_updates_archive)
                             conn.executemany("DELETE FROM series_category_placements WHERE series_id=?", series_updates_archive)
                         if series_updates_unarchive:
-                            conn.executemany("UPDATE series SET review_excluded=0 WHERE id=?", series_updates_unarchive)
+                            # KNM: 2026-10-27 -- release the import-policy owner too, so the flags never disagree.
+                            conn.executemany("UPDATE series SET review_excluded=0, review_excluded_import_policy=0 WHERE id=?", series_updates_unarchive)
                         if series_updates_import_provider:
                             conn.executemany("UPDATE series SET import_provider_id=?, import_provider_series_id=? WHERE id=?", series_updates_import_provider)
 
@@ -10772,7 +10777,7 @@ def bulk_import_plex_movies(provider_id: int, items: list[dict]) -> dict:
                                     conn.execute("DELETE FROM movie_category_placements WHERE movie_id=?", (movie_id,))
                                     did_archive = True
                                 elif not should_archive and existing["review_excluded"] and not existing["review_excluded_manual"]:
-                                    conn.execute("UPDATE movies SET review_excluded=0 WHERE id=?", (movie_id,))
+                                    conn.execute("UPDATE movies SET review_excluded=0, review_excluded_import_policy=0 WHERE id=?", (movie_id,))  # KNM: 2026-10-27
                                     did_unarchive = True
                         elif not name.strip():
                             # Same guard as bulk_import_movies -- a blank name has no real
@@ -10970,7 +10975,7 @@ def bulk_import_plex_series(provider_id: int, items: list[dict]) -> dict:
                                 conn.execute("DELETE FROM series_category_placements WHERE series_id=?", (series_id,))
                                 did_archive = True
                             elif not should_archive and existing["review_excluded"] and not existing["review_excluded_manual"]:
-                                conn.execute("UPDATE series SET review_excluded=0 WHERE id=?", (series_id,))
+                                conn.execute("UPDATE series SET review_excluded=0, review_excluded_import_policy=0 WHERE id=?", (series_id,))  # KNM: 2026-10-27
                                 did_unarchive = True
                         elif not name.strip():
                             # Same guard as bulk_import_series -- a blank name has no real

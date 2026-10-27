@@ -31,6 +31,18 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-27 (Excluded sources stay removed; sync keeps archive flags consistent)
+
+- ✅ **A source removed by the exclusion lists no longer comes back on another
+  card after a restart.** The startup source repair rebuilt a source from a
+  card's old import link even when the card already had sources. That could
+  reattach an excluded "(ES)" source, with no name, to a different card. The
+  card then looked English, and the next pass removed its real sources. The
+  repair now only runs for cards with no source at all.
+- ✅ **A provider sync that un-archives a title also clears the
+  exclusion-list archive mark.** Before, the title became visible while still
+  marked as archived by the exclusion lists, so later passes skipped it.
+
 ## 2026-10-27 (Exclusion lists enforced on save; British titles play as English)
 
 - ✅ **Saving the import language or country exclusion list now applies it to
