@@ -61,3 +61,16 @@ def test_list_all_pool_country_suffixes_counts_real_pool(db):
     db.upsert_movie("Untagged Show", None)
     counts = {row["code"]: row["count"] for row in db.list_all_pool_country_suffixes()}
     assert counts == {"NZ": 2, "AU": 1}
+
+
+def test_should_auto_archive_uses_category_language_tag(db):
+    # KNM: 2026-10-27 -- unprefixed titles in a "[ES]" category were stored as
+    # ES (category-aware _source_language) but passed the import gate as EN.
+    assert vod_importer._should_auto_archive(
+        "Ozzy - 2016", provider_category_name="Movies Spanish [ES]",
+        lang={"exclude_prefixes": ["ES"], "exclude_non_latin": False}, country=[],
+    ) is True
+    assert vod_importer._should_auto_archive(
+        "Ozzy - 2016", provider_category_name="Movies English [EN]",
+        lang={"exclude_prefixes": ["ES"], "exclude_non_latin": False}, country=[],
+    ) is False

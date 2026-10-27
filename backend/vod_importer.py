@@ -173,7 +173,9 @@ def _should_auto_archive(
     # includes trailing provider country tags such as "Title (DE)" and
     # "Title (PL)", which otherwise default to EN and are only corrected
     # later by language recompute.
-    code = vod_db._source_language(raw_name if raw_name is not None else name)
+    # KNM: 2026-10-27 -- pass the category too, as storage does: unprefixed
+    # titles in e.g. "Movies Spanish [ES]" were stored ES but gated as EN.
+    code = vod_db._source_language(raw_name if raw_name is not None else name, provider_category_name)
     excluded_prefixes = {str(value).strip().upper() for value in lang.get("exclude_prefixes", ()) if str(value).strip()}
     if code in excluded_prefixes:
         return True

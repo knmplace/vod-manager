@@ -31,6 +31,25 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-27 (Exclusion lists enforced on save; British titles play as English)
+
+- ✅ **Saving the import language or country exclusion list now applies it to
+  content already in the catalog.** Titles that match the list are archived,
+  and titles you include again are restored and put back in their categories.
+  Before, the lists only blocked new imports, so a country excluded after
+  import (for example "(ES)" titles) stayed visible.
+- ✅ **A card that also has a clean source keeps it, and loses only its
+  excluded sources.** Before, one excluded source left on a card could still
+  reach Dispatcharr. A later provider sync adds those sources back if you
+  include the country or language again.
+- ✅ **The import check now reads the category's language tag, the same way
+  storage does.** An untagged title in "Movies Spanish [ES]" was checked as
+  English and slipped past an ES exclusion.
+- ✅ **British titles are treated as English.** "GB|" and "UK|" titles are
+  stored and played as EN, so they stay visible when only English is enabled.
+  GB and UK still appear in the language and country lists, with a "treated as
+  EN" note.
+
 ## 2026-10-27 (Language tags at the end of category names)
 
 - ✅ 🔀 ([#66](https://github.com/jstevenscl/vod-manager/pull/66)) **Titles from categories tagged at the end, such as "Series Korean [KR]"

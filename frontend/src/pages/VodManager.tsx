@@ -1463,6 +1463,17 @@ const COUNTRY_CODE_NAMES: Record<string, string> = {
   NL: 'Netherlands', IE: 'Ireland', NZ: 'New Zealand', FI: 'Finland',
   TH: 'Thailand', IS: 'Iceland', PT: 'Portugal',
 }
+// KNM: 2026-10-27 -- GB/UK-tagged titles keep their tag but are stored and
+// played as English (backend _PREFIX_LANGUAGE_ALIASES); both lists call it out.
+const TREATED_AS_EN_CODES = new Set(['GB', 'UK'])
+const TreatedAsEnBadge = () => (
+  <span
+    className="inline-flex items-center rounded-full bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground border border-border"
+    title="British titles are treated as English: they stay visible and play under EN. The GB/UK tag is kept for reference."
+  >
+    treated as EN
+  </span>
+)
 type AiProvider = 'anthropic' | 'openai' | 'gemini'
 const AI_PROVIDER_DEFAULT_MODELS: Record<AiProvider, string> = {
   anthropic: 'claude-haiku-4-5-20251001', openai: 'gpt-5-mini', gemini: 'gemini-2.5-flash',
@@ -10996,6 +11007,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
                     />
                     <span className="font-mono">{c.code}</span>
                     {LANGUAGE_CODE_NAMES[c.code] && <span className="text-muted-foreground">— {LANGUAGE_CODE_NAMES[c.code]}</span>}
+                    {TREATED_AS_EN_CODES.has(c.code) && <TreatedAsEnBadge />}
                     <span className="text-muted-foreground ml-auto">{c.count > 0 ? `${c.count} known title record${c.count === 1 ? '' : 's'}` : 'no known title records'}</span>
                   </label>
                 ))}
@@ -11214,6 +11226,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
                     />
                     <span className="font-mono">{c.code}</span>
                     {COUNTRY_CODE_NAMES[c.code] && <span className="text-muted-foreground">— {COUNTRY_CODE_NAMES[c.code]}</span>}
+                    {TREATED_AS_EN_CODES.has(c.code) && <TreatedAsEnBadge />}
                     <span className="text-muted-foreground ml-auto">{c.count > 0 ? `${c.count} title${c.count === 1 ? '' : 's'}` : 'not currently in pool'}</span>
                   </label>
                 ))}

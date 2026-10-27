@@ -20,3 +20,11 @@ def test_country_suffix_language_codes_respect_explicit_import_exclusions():
     assert not vod_importer._should_auto_archive(
         "Alba (2021) (ES)", lang=lang, raw_name="Alba (2021) (ES)"
     )
+
+
+def test_gb_and_uk_prefix_tags_are_treated_as_english():
+    # KNM: 2026-10-27 -- British titles play as EN; the GB/UK tag is display-only.
+    assert vod_db._source_language("GB| Line of Duty") == "EN"
+    assert vod_db._source_language("UK| Line of Duty") == "EN"
+    assert vod_db._source_language("Line of Duty", "Series British [GB]") == "EN"
+    assert vod_db._source_language("FR| Lupin") == "FR"

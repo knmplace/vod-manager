@@ -1007,7 +1007,7 @@ async def get_import_language_exclusion_settings():
 @router.post("/import-language-exclusion/", dependencies=_GUARDS)
 async def save_import_language_exclusion_settings(body: ImportLanguageExclusionRequest):
     save_import_language_exclusion(body.exclude_prefixes, body.exclude_non_latin)
-    return {"ok": True}
+    return {"ok": True, "applied": await _apply_saved_import_exclusions()}
 
 
 @router.get("/import-language-exclusion/prefixes/", dependencies=_GUARDS)
@@ -1058,7 +1058,7 @@ async def get_import_country_exclusion_settings():
 @router.post("/import-country-exclusion/", dependencies=_GUARDS)
 async def save_import_country_exclusion_settings(body: ImportCountryExclusionRequest):
     save_import_country_exclusion(body.exclude_country_codes)
-    return {"ok": True}
+    return {"ok": True, "applied": await _apply_saved_import_exclusions()}
 
 
 @router.get("/import-country-exclusion/codes/", dependencies=_GUARDS)
@@ -1073,6 +1073,18 @@ def _current_import_exclusion_policy() -> tuple[list[str], bool, list[str]]:
         language["exclude_non_latin"],
         get_import_country_exclusion(),
     )
+
+
+async def _apply_saved_import_exclusions() -> dict:
+    """KNM: 2026-10-27 -- saving an exclusion list now enforces it on stored
+    content right away (archive/restore, drop excluded sources), so content
+    excluded after import, or re-included later, needs no manual apply."""
+    prefixes, non_latin, countries = _current_import_exclusion_policy()
+    result = await asyncio.to_thread(
+        vod_db.apply_import_exclusion_policy, prefixes, non_latin, countries, dry_run=False,
+    )
+    await vod_importer.resweep_smart_categories()
+    return result
 
 
 def _import_exclusion_preview_token(policy: tuple[list[str], bool, list[str]]) -> str:

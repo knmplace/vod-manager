@@ -12956,6 +12956,11 @@ def _any_language_enabled(langs: set[str], enabled: set[str]) -> bool:
     return bool(langs & enabled) or MULTI_LANGUAGE in langs
 
 
+# KNM: 2026-10-27 -- "GB|"/"UK|" tags mark British (English) titles: they keep
+# their GB/UK tag in the import lists but are stored and played as EN.
+_PREFIX_LANGUAGE_ALIASES = {"GB": "EN", "UK": "EN"}
+
+
 def _source_language(raw_name: str | None, category_name: str | None = None) -> str:
     """Per-source language for movie_sources/series_sources/episode_sources,
     computed from the provider's raw_name via the same prefix-detection used
@@ -12970,7 +12975,7 @@ def _source_language(raw_name: str | None, category_name: str | None = None) -> 
     if raw_name:
         code = _name_prefix_code(raw_name)
         if code:
-            return code
+            return _PREFIX_LANGUAGE_ALIASES.get(code, code)
         suffix = _COUNTRY_SUFFIX_RE.search(raw_name)
         if suffix and suffix.group(1).upper() in _KNOWN_COUNTRY_SUFFIX_CODES:
             country = suffix.group(1).upper()
@@ -13945,8 +13950,10 @@ def apply_import_exclusion_policy(
     """Preview or apply import language/country rules to stored cards.
 
     Sources are evaluated independently. A card is archived only when it has
-    sources and every source matches at least one exclusion. Source rows are
-    never deleted. Manual archive state is untouched, and this sweep restores
+    sources and every source matches at least one exclusion; its source rows
+    are kept so re-including restores it. On a card that keeps a clean source,
+    the excluded source rows are deleted (the next provider sync re-adds them
+    if the rule is lifted). Manual cards are untouched, and this sweep restores
     only the automatic ownership flag that it previously set.
     """
     excluded_languages = {str(code).strip().upper() for code in exclude_prefixes if str(code).strip()}
@@ -13986,9 +13993,11 @@ def apply_import_exclusion_policy(
                     f"SELECT id, name, review_excluded, review_excluded_manual, "
                     f"review_excluded_language, review_excluded_import_policy FROM {table}"
                 ).fetchall()
+                provider_key = "provider_stream_id" if content_type == "movie" else "provider_series_id"
                 sources_by_card: dict[int, list] = {}
                 for source in conn.execute(
-                    f"SELECT s.{foreign_key} AS card_id, s.raw_name, s.language, "
+                    f"SELECT s.id, s.{foreign_key} AS card_id, s.provider_id, s.{provider_key} AS provider_key, "
+                    f"s.raw_name, s.language, "
                     f"COALESCE(p.provider_type, 'xc') AS provider_type "
                     f"FROM {source_table} s LEFT JOIN providers p ON p.id=s.provider_id"
                 ).fetchall():
@@ -13996,7 +14005,11 @@ def apply_import_exclusion_policy(
 
                 archived_ids = []
                 restored_ids = []
+                removable_sources = []
                 summary = {
+                    # KNM: 2026-10-27 -- excluded sources dropped from cards
+                    # that keep a clean source (re-added by sync on re-include).
+                    "sources_removed": 0,
                     "cards_evaluated": 0,
                     "cards_without_sources": 0,
                     "cards_all_sources_excluded": 0,
@@ -14016,9 +14029,12 @@ def apply_import_exclusion_policy(
                         continue
                     summary["cards_evaluated"] += 1
                     excluded_sources = 0
+                    excluded_rows = []
                     card_reasons: set[str] = set()
                     for source in sources:
                         reasons = source_reasons(source, row["name"])
+                        if reasons:
+                            excluded_rows.append(source)
                         provider_type = source["provider_type"] or "xc"
                         provider_counts = source_counts["provider_types"].setdefault(
                             provider_type, {"total": 0, "excluded": 0, "allowed": 0}
@@ -14053,6 +14069,9 @@ def apply_import_exclusion_policy(
                     if row["review_excluded_manual"]:
                         summary["manual_cards_unchanged"] += 1
                         continue
+                    if excluded_rows and not should_archive:
+                        removable_sources.extend(excluded_rows)
+                        summary["sources_removed"] += len(excluded_rows)
                     if should_archive and not row["review_excluded_import_policy"]:
                         archived_ids.append(row["id"])
                         if not row["review_excluded"]:
@@ -14071,12 +14090,21 @@ def apply_import_exclusion_policy(
                             summary["restore_samples"].append({
                                 "id": row["id"], "name": row["name"], "sources": len(sources),
                             })
-                return summary, archived_ids, restored_ids
+                return summary, archived_ids, restored_ids, removable_sources
 
-            movie_summary, movie_archive_ids, movie_restore_ids = evaluate("movie")
-            series_summary, series_archive_ids, series_restore_ids = evaluate("series")
+            movie_summary, movie_archive_ids, movie_restore_ids, movie_removals = evaluate("movie")
+            series_summary, series_archive_ids, series_restore_ids, series_removals = evaluate("series")
 
             if not dry_run:
+                by_provider: dict[int, tuple[list, list]] = {}
+                for source in movie_removals:
+                    by_provider.setdefault(source["provider_id"], ([], []))[0].append(
+                        {"id": source["id"], "movie_id": source["card_id"]})
+                for source in series_removals:
+                    by_provider.setdefault(source["provider_id"], ([], []))[1].append(
+                        {"series_id": source["card_id"], "provider_series_id": source["provider_key"]})
+                for provider_id, (movie_rows, series_rows) in by_provider.items():
+                    _remove_provider_sources(conn, provider_id, movie_rows, series_rows)
                 now = _now()
                 for table, archive_ids, restore_ids in (
                     ("movies", movie_archive_ids, movie_restore_ids),

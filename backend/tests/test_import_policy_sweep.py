@@ -202,3 +202,76 @@ def test_reapply_reports_cards_already_archived(db):
     assert again["movies"]["cards_archived"] == 0
     assert again["movies"]["cards_restored"] == 0
     assert again["movies"]["cards_already_archived"] == 2
+
+
+def _source_names(db, table: str, fk: str, card_id: int) -> list[str]:
+    conn = db._connect()
+    rows = conn.execute(f"SELECT raw_name FROM {table} WHERE {fk}=? ORDER BY raw_name", (card_id,)).fetchall()
+    conn.close()
+    return [row["raw_name"] for row in rows]
+
+
+def test_apply_removes_excluded_sources_from_mixed_cards(db):
+    # KNM: 2026-10-27 -- a card with a clean source stayed live with its
+    # excluded-country source still attached (served/streamed).
+    clean = _provider(db, "xc")
+    tagged = db.upsert_provider("tagged", "http://tagged.invalid", "u", "p")
+    series_id = db.upsert_series("30 Coins", 2020)
+    _series_source(db, series_id, clean, "58005", "30 Coins (2020)", "EN")
+    _series_source(db, series_id, tagged, "3887", "EN - 30 Coins (ES)", "EN")
+    movie_id = db.upsert_movie("Mixed movie", 2021)
+    _movie_source(db, movie_id, clean, "en", "Mixed movie", "EN")
+    _movie_source(db, movie_id, tagged, "es", "ES - Mixed movie", "ES")
+
+    preview = db.apply_import_exclusion_policy(["ES"], False, ["ES"], dry_run=True)
+    assert preview["series"]["sources_removed"] == 1
+    assert preview["movies"]["sources_removed"] == 1
+    assert len(_source_names(db, "series_sources", "series_id", series_id)) == 2
+
+    applied = db.apply_import_exclusion_policy(["ES"], False, ["ES"], dry_run=False)
+    assert applied["series"]["sources_removed"] == 1
+    assert _source_names(db, "series_sources", "series_id", series_id) == ["30 Coins (2020)"]
+    assert _source_names(db, "movie_sources", "movie_id", movie_id) == ["Mixed movie"]
+    assert _archive_state(db, "series", series_id)["review_excluded"] == 0
+    assert _archive_state(db, "movie", movie_id)["review_excluded"] == 0
+
+
+def test_apply_leaves_manual_archive_card_sources_alone(db):
+    provider_id = _provider(db, "xc")
+    movie_id = db.upsert_movie("Manual mixed", 2021)
+    _movie_source(db, movie_id, provider_id, "en", "Manual mixed", "EN")
+    _movie_source(db, movie_id, provider_id, "es", "ES - Manual mixed", "ES")
+    db.bulk_set_review_excluded("movie", [movie_id], True)
+
+    applied = db.apply_import_exclusion_policy(["ES"], False, [], dry_run=False)
+    assert applied["movies"]["sources_removed"] == 0
+    assert len(_source_names(db, "movie_sources", "movie_id", movie_id)) == 2
+
+
+def test_saving_exclusion_lists_applies_policy_and_resweeps(db, monkeypatch):
+    # KNM: 2026-10-27 -- an exclusion saved after content was already stored
+    # stayed live until someone ran preview/apply by hand.
+    provider_id = _provider(db, "xc")
+    movie_id = db.upsert_movie("Spanish movie", 2020)
+    _movie_source(db, movie_id, provider_id, "es", "Spanish movie (ES)", "EN")
+    resweeps = []
+
+    async def fake_resweep():
+        resweeps.append(True)
+
+    monkeypatch.setattr(vod_importer, "resweep_smart_categories", fake_resweep)
+    asyncio.run(vod_routes.save_import_country_exclusion_settings(
+        vod_routes.ImportCountryExclusionRequest(exclude_country_codes=["ES"])
+    ))
+    assert _archive_state(db, "movie", movie_id)["review_excluded_import_policy"] == 1
+
+    asyncio.run(vod_routes.save_import_country_exclusion_settings(
+        vod_routes.ImportCountryExclusionRequest(exclude_country_codes=[])
+    ))
+    assert _archive_state(db, "movie", movie_id)["review_excluded"] == 0
+
+    asyncio.run(vod_routes.save_import_language_exclusion_settings(
+        vod_routes.ImportLanguageExclusionRequest(exclude_prefixes=["EN"], exclude_non_latin=False)
+    ))
+    assert _archive_state(db, "movie", movie_id)["review_excluded_import_policy"] == 1
+    assert resweeps == [True, True, True]
