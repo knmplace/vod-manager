@@ -77,3 +77,34 @@ def test_title_prefix_still_wins_over_category(db):
     }])
     assert _lang(db) == "ES"
     assert db.language_recompute_dry_run_report() == {}
+
+
+# KNM: 2026-10-27 -- some providers put the category's language tag at the END
+# ("Series Korean [KR]"); only a leading "[KR]" was read, so these defaulted to EN.
+def test_series_import_reads_trailing_category_tag(db):
+    _series(db, db.upsert_provider("p", "http://x", "u", "p"), category="Series Korean [KR]")
+    assert _lang(db) == "KR"
+
+
+def test_movie_import_reads_trailing_category_tag(db):
+    pid = db.upsert_provider("p", "http://x", "u", "p")
+    db.bulk_import_movies(pid, [{
+        "name": "Movie A", "year": 2020, "provider_stream_id": "m-1", "container_extension": "mp4",
+        "raw_name": "Movie A", "provider_category_name": "Movies French [FR]",
+    }])
+    conn = db._connect()
+    lang = conn.execute("SELECT language FROM movie_sources").fetchone()["language"]
+    conn.close()
+    assert lang == "FR"
+
+
+def test_recompute_fixes_trailing_category_tag(db):
+    _series(db, db.upsert_provider("p", "http://x", "u", "p"), category="Series German [DE]")
+    _set_lang(db, "EN")
+    assert db.apply_language_recompute() == 1
+    assert _lang(db) == "DE"
+
+
+def test_trailing_non_language_tag_stays_en(db):
+    _series(db, db.upsert_provider("p", "http://x", "u", "p"), category="Series Action [4K]")
+    assert _lang(db) == "EN"

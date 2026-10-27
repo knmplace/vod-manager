@@ -31,6 +31,15 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-27 (Language tags at the end of category names)
+
+- ✅ **Titles from categories tagged at the end, such as "Series Korean [KR]"
+  or "Movies French [FR]", now get that language.** Only a leading tag
+  ("[KR] Series") was read before, so these titles defaulted to English. They
+  stayed active even when only English was enabled, and could be merged into
+  English series with the same name. Existing rows are corrected by the
+  language recompute; tags that aren't languages (such as "[4K]") are ignored.
+
 ## 2026-10-26 (Synced with upstream v0.3.12)
 
 - 🔼 **Upstream [v0.3.12](https://github.com/jstevenscl/vod-manager/releases/tag/v0.3.12)
