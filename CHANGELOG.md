@@ -54,7 +54,7 @@ instead of opening a duplicate request.
   and enriched almost nothing. It now lists never-enriched movies it can act on
   and series sources that never had episodes. **Enrich All** with force still
   walks everything.
-- ✅ **Its end-of-run auto-merge checks cover only titles that run changed**,
+- ✅ 🔀 ([#64](https://github.com/jstevenscl/vod-manager/pull/64)) **Its end-of-run auto-merge checks cover only titles that run changed**,
   instead of re-checking the same unmergeable different-language pairs every
   day.
 - ✅ **Bulk enrichment's database work runs on its own small thread pool**
@@ -62,18 +62,18 @@ instead of opening a duplicate request.
 - ✅ **The background episode trickle only runs merge checks for series whose
   TMDB id changed** in that batch, instead of re-checking the same ~1,700
   different-language pairs every batch.
-- ✅ **Broken posters switch to TMDB.** When a movie or series card's poster
+- ✅ 🔀 ([#64](https://github.com/jstevenscl/vod-manager/pull/64)) **Broken posters switch to TMDB.** When a movie or series card's poster
   fails to load (a dead provider image host, or a TMDB link with no image), the
   card fetches that title's TMDB poster (local TMDB store first, then the TMDB
   API) and keeps it. Titles without a TMDB id, or with no TMDB poster, keep the
   usual placeholder.
-- ✅ **More poster grids get the TMDB fallback.** The remaining VOD Manager
+- ✅ 🔀 ([#64](https://github.com/jstevenscl/vod-manager/pull/64)) **More poster grids get the TMDB fallback.** The remaining VOD Manager
   movie and series thumbnails (list rows, merge and duplicate views) now use
   it too. A title whose TMDB lookup found nothing isn't asked again until the
   page is reloaded.
-- ✅ **The Portal gets the same poster fallback.** A viewer's broken poster
+- ✅ 🔀 ([#64](https://github.com/jstevenscl/vod-manager/pull/64)) **The Portal gets the same poster fallback.** A viewer's broken poster
   swaps to the TMDB poster, but only for titles in that viewer's own library.
-- ✅ **Automatic episode titles handle 250 series per hourly pass** (was 100),
+- ✅ 🔀 ([#64](https://github.com/jstevenscl/vod-manager/pull/64)) **Automatic episode titles handle 250 series per hourly pass** (was 100),
   so a large backlog clears in about half a day instead of a day and a half.
 
 ## 2026-10-24 (Synced with upstream v0.3.11)
@@ -611,7 +611,7 @@ there, so this fork tracks upstream `main` and differs only where noted:
 
 ## 2026-10-07 (No episode fetches for languages you've turned off)
 
-- ✅ **Episode lists are fetched only for sources in an enabled playback
+- ✅ 🔀 ([#65](https://github.com/jstevenscl/vod-manager/pull/65)) **Episode lists are fetched only for sources in an enabled playback
   language.** When a show stayed visible because of an English source, its
   copies in disabled languages (for example a provider's Spanish "ES -"
   version) were still queued for an episode-list fetch. Playback filters those
