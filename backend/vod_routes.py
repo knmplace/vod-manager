@@ -4382,6 +4382,12 @@ async def language_mismatch_report():
     return report
 
 
+@router.post("/language-trickle/run/", dependencies=_GUARDS)
+async def run_language_trickle():
+    """Run one bounded manual cycle; the same provider gates and daily cap apply."""
+    return await vod_probe.run_language_trickle_cycle()
+
+
 @router.post("/language-mismatch/{kind}/{source_id}/decision/", dependencies=_GUARDS)
 async def language_mismatch_decision(kind: str, source_id: int, body: LanguageMismatchDecisionRequest):
     try:

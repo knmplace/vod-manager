@@ -35,6 +35,9 @@ instead of opening a duplicate request.
 
 - Added provider-aware language auditing with bounded embedded-audio probes,
   persistent per-source results, and approval/rejection history.
+- Added a report-level **Run one cycle now** action. It starts one bounded
+  provider-aware cycle without bypassing rate limits, daily limits, or provider
+  backoff.
 - Added the Language Mismatch Report under System with individual and bulk
   decisions. Approved results outside the wanted-language policy update source
   metadata and archive the parent movie/show; rejected results are not rechecked.

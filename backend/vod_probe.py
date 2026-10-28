@@ -477,22 +477,34 @@ def language_trickle_status() -> dict:
     }
 
 
+async def run_language_trickle_cycle() -> dict:
+    """Run one bounded manual/scheduled cycle without bypassing any gates."""
+    targets = await asyncio.to_thread(vod_db.next_language_probe_targets, LANGUAGE_GLOBAL_MAX)
+    tasks = []
+    claimed = []
+    for target in targets:
+        if target["source_id"] in _language_claimed_sources:
+            continue
+        _language_claimed_sources.add(target["source_id"])
+        claimed.append(target["source_id"])
+        tasks.append(asyncio.create_task(language_trickle_once(target)))
+    try:
+        results = await asyncio.gather(*tasks, return_exceptions=True) if tasks else []
+        return {"targets": len(targets), "results": [
+            {"status": r.get("status"), "source_id": r.get("result", {}).get("source_id"), "message": r.get("message")}
+            if isinstance(r, dict) else {"status": "error", "message": str(r)} for r in results
+        ], "trickle": language_trickle_status()}
+    finally:
+        for source_id in claimed:
+            _language_claimed_sources.discard(source_id)
+
+
 async def language_trickle_loop() -> None:
     """Quietly audit export-relevant sources, one bounded probe per interval."""
     await asyncio.sleep(90)
     while True:
         try:
-            targets = await asyncio.to_thread(vod_db.next_language_probe_targets, LANGUAGE_GLOBAL_MAX)
-            tasks = []
-            for target in targets:
-                if target["source_id"] in _language_claimed_sources:
-                    continue
-                _language_claimed_sources.add(target["source_id"])
-                tasks.append(asyncio.create_task(language_trickle_once(target)))
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-                for target in targets:
-                    _language_claimed_sources.discard(target["source_id"])
+            await run_language_trickle_cycle()
         except Exception:
             logger.exception("[language-probe] trickle loop failed")
         await asyncio.sleep(LANGUAGE_TRICKLE_INTERVAL)

@@ -62,6 +62,14 @@ export default function LanguageMismatchReport() {
     },
     onError: (e: any) => notify(e?.response?.data?.detail ?? 'Could not record the language decision.'),
   })
+  const runNow = useMutation({
+    mutationFn: () => api.post('/vod/language-trickle/run/').then((r) => r.data),
+    onSuccess: (result) => {
+      notify(result.targets ? `Language check cycle started for ${result.targets} provider source${result.targets === 1 ? '' : 's'}. Results will appear here when complete.` : 'No eligible language sources are waiting to be checked.')
+      qc.invalidateQueries({ queryKey: ['language-mismatch-report'] })
+    },
+    onError: (e: any) => notify(e?.response?.data?.detail ?? 'Could not start the language check cycle.'),
+  })
 
   const runBulk = async (decision: 'approved' | 'rejected', all = false) => {
     const targets = all ? rows : rows.filter((r) => selected.has(key(r)))
@@ -83,7 +91,10 @@ export default function LanguageMismatchReport() {
           <p className="text-xs text-muted-foreground mt-1">Wanted playback languages: {report.data?.enabled_languages.join(', ') || 'none'}</p>
           {report.data?.trickle && <p className="text-xs text-muted-foreground mt-1">Trickle: up to {report.data.trickle.global_concurrency} probes every {report.data.trickle.interval_seconds}s · {report.data.trickle.checked_today}/{report.data.trickle.daily_max} today · language cap {report.data.trickle.language_window_max} per {Math.round(report.data.trickle.language_window_seconds / 60)} minutes{report.data.trickle.blocked_providers ? ` · ${report.data.trickle.blocked_providers} provider paused` : ''}</p>}
         </div>
-        <button className="flex items-center gap-1.5 border border-border rounded px-2 py-1.5 text-xs hover:bg-accent disabled:opacity-50" disabled={report.isFetching} onClick={() => report.refetch()}><RefreshCw size={12} className={report.isFetching ? 'animate-spin' : ''} /> Refresh</button>
+        <span className="flex items-center gap-2">
+          <button className="flex items-center gap-1.5 border border-primary/40 text-primary rounded px-2 py-1.5 text-xs hover:bg-accent disabled:opacity-50" disabled={runNow.isPending} onClick={() => runNow.mutate()}><Languages size={12} className={runNow.isPending ? 'animate-pulse' : ''} /> Run one cycle now</button>
+          <button className="flex items-center gap-1.5 border border-border rounded px-2 py-1.5 text-xs hover:bg-accent disabled:opacity-50" disabled={report.isFetching} onClick={() => report.refetch()}><RefreshCw size={12} className={report.isFetching ? 'animate-spin' : ''} /> Refresh</button>
+        </span>
       </div>
 
       <div className="flex flex-wrap items-center gap-2 border border-border rounded-md bg-card px-3 py-2 text-xs">
