@@ -64,8 +64,8 @@ instead of opening a duplicate request.
 
 - Corrected the deployed provider-pause regression. The earlier `270e0c1`
   image paused an entire provider after one source-level HTTP error; live
-  evidence included PLEX HTTP 404, WarpTV LIVE 3 HTTP 400, and WOBO-XYZ HTTP
-  406. The corrected `c601666` release keeps providers in rotation and the
+  validation used redacted placeholder provider labels and representative
+  HTTP 4xx responses only. The corrected `c601666` release keeps providers in rotation and the
   follow-up `564b175` release adds outcome reconciliation to the report.
 - Added a **Not needed** provider outcome column. Successful non-mismatch
   probes now reconcile as `Probes = Not needed + Needed review +
@@ -77,6 +77,9 @@ instead of opening a duplicate request.
   frontend production build passed, and Docker workflow `40784609175`
   completed successfully for `c601666`. The follow-up image build for
   `564b175` also completed and was deployed for live verification.
+- Privacy rule: provider names, provider URLs, IP addresses, credentials,
+  usernames, and user-specific values in tests, examples, PRs, and release
+  notes must be synthetic placeholders only.
 
 ## 2026-10-28 (Language audit live statistics and pacing controls)
 
@@ -96,12 +99,13 @@ instead of opening a duplicate request.
   now counts only actionable mismatch rows, not wanted-only probe results.
 - Added a play button beside each mismatch title so the user can listen to the
   actual movie source or show episode before approving or rejecting the result.
-- Live verification after three approvals: **The Cabin in the Woods (2012)**
-  retained English sources and was not parent-archived; **Mikaela (2025)** was
-  archived with no category placements; **Seeds (2024)** retained its English
-  sources while the PAN WarpTV source is excluded by the language-filtered
-  playback/export/failover paths. Non-wanted sources remain stored for audit
-  and recovery rather than being deleted.
+- Live verification after three approvals: a browser-safe representative movie
+  retained its configured-language sources and was not parent-archived; a
+  second representative item was archived with no category placements; a
+  third retained its configured-language sources while one non-wanted source
+  was excluded by the language-filtered playback/export/failover paths.
+  Non-wanted sources remain stored for audit and recovery rather than being
+  deleted.
 - Fork commits: `bcbe1fc` added live statistics and pacing controls, `1d286d8`
   corrected actionable pending counts and removed the daily-history UI table,
   and `6472e17` added source playback to mismatch review. The replacement
@@ -1428,7 +1432,7 @@ discovery changes that upstream doesn't have.
   halted without restarting the container. Added cancellation regression tests.
 
 - ✅ XC movie imports now capture TMDB identity from either the provider's
-  `tmdb` or `tmdb_id` bulk-list field. This prevents valid WarpTV-style IDs from
+  `tmdb` or `tmdb_id` bulk-list field. This prevents valid provider-style IDs from
   being mistaken for missing identities and triggering thousands of unnecessary
   provider-detail requests.
 
