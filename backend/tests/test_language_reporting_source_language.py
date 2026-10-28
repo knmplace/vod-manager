@@ -26,6 +26,20 @@ def test_missing_artwork_prefixes_and_filter_use_source_language(db):
     assert [r["id"] for r in db.list_missing_artwork("movie", prefixes=["ES"])] == [movie_id]
 
 
+def test_missing_artwork_includes_bare_tmdb_urls_and_hides_adults_by_default(db):
+    bare = db.upsert_movie("Bare TMDB", 2020)
+    adult = db.upsert_movie("Adult Missing", 2020)
+    valid = db.upsert_movie("Has Poster", 2020)
+    conn = db._connect()
+    conn.execute("UPDATE movies SET poster_url='https://image.tmdb.org/t/p/w500', is_adult=0 WHERE id=?", (bare,))
+    conn.execute("UPDATE movies SET is_adult=1 WHERE id=?", (adult,))
+    conn.execute("UPDATE movies SET poster_url='https://image.tmdb.org/t/p/w500/poster.jpg' WHERE id=?", (valid,))
+    conn.commit()
+    conn.close()
+    assert {row["id"] for row in db.list_missing_artwork("movie")} == {bare}
+    assert {row["id"] for row in db.list_missing_artwork("movie", hide_adult=False)} == {bare, adult}
+
+
 def test_card_without_sources_falls_back_to_name(db):
     db.upsert_movie("AR| Legacy", 2019)
     assert {row["code"] for row in db.list_library_prefixes("movie")} == {"AR"}

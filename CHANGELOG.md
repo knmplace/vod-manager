@@ -33,6 +33,20 @@ instead of opening a duplicate request.
 
 ## 2026-10-28 (Duplicate Finder TMDB picker; upstream v0.3.13 alignment)
 
+- ✅ **Added a hidden dedicated Artwork Review page**, linked from the existing
+  Missing Artwork popup. It provides a larger table-style queue, local-first
+  TMDB suggestions with API fallback, per-title picker resolution, visible-row
+  selection, and the existing guarded bulk resolver.
+- ✅ **Bare/incomplete TMDB poster URLs are now treated as missing artwork**, so
+  older rows such as `https://image.tmdb.org/t/p/w500` can be repaired instead
+  of remaining invisible to the queue.
+- ✅ **Adult titles are hidden by default in artwork and duplicate review.** The
+  toggle only changes review visibility; it does not remove or disable playback.
+- Fork validation: 31 focused backend tests passed, Python compilation passed,
+  frontend production build passed, and `git diff --check` passed.
+- 🔼 These artwork-queue and adult-review changes are ready to send upstream
+  in a focused pull request after fork deployment validation.
+
 - ✅ **Duplicate Finder identity repair now searches local TMDB data before
   requiring the TMDB API.** Open a candidate missing a TMDB ID or year, search
   by name, select the correct movie/show, and save its TMDB ID and year without
