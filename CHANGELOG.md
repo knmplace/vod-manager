@@ -40,6 +40,16 @@ instead of opening a duplicate request.
 - ✅ **Fixed the picker search flow.** Editing the search box no longer sends a
   request for every keystroke, and the duplicate scan refreshes after a save so
   a server-side merge is reflected immediately.
+- [PR #67](https://github.com/jstevenscl/vod-manager/pull/67) also sends the Metadata Review expansion upstream: every active movie
+  and show without a usable TMDB ID is now listed, including rows where the
+  provider supplied a year. The same local-first picker can select and save the
+  correct identity there; archived rows remain excluded.
+- Fork validation for PR #67: 15 metadata review/queue tests passed, 44
+  TMDB/store/import tests passed, the frontend production build passed, and
+  `git diff --check` passed.
+- [PR #67](https://github.com/jstevenscl/vod-manager/pull/67) contains both the
+  Duplicate Finder picker and the Metadata Review identity repair changes in
+  one upstream submission.
 - ✅ **Aligned the application version with upstream v0.3.13.**
 - 🔼 **Upstream v0.3.13 includes the original poster fallback, disabled-language
   episode gate, and trailing category-language fixes from fork PRs #64–#66.**
