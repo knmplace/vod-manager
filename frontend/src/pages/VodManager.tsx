@@ -452,6 +452,7 @@ interface MissingArtworkItem {
   id: number
   name: string
   year: number | null
+  tmdb_id?: string | null
 }
 
 interface DuplicateGroupItem {
@@ -2124,6 +2125,17 @@ function MissingArtworkRow({ contentType, item, qc, selected, onToggleSelect }: 
   const [expanded, setExpanded] = useState(false)
   const [searchOverride, setSearchOverride] = useState('')
   const [manualPosterUrl, setManualPosterUrl] = useState('')
+  const [autoMatchMessage, setAutoMatchMessage] = useState<string | null>(null)
+  const [autoAppliedKey, setAutoAppliedKey] = useState<string | null>(null)
+
+  const normalizeTitle = (value: string) => value
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\s*\(\d{4}\)\s*$/, '')
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
 
   // Same reasoning as NeedsReviewRow's search override -- a mangled/
   // punctuation-stripped stored title (the actual cause of most missing
@@ -2145,11 +2157,37 @@ function MissingArtworkRow({ contentType, item, qc, selected, onToggleSelect }: 
       qc.invalidateQueries({ queryKey: ['vod-missing-artwork'] })
       qc.invalidateQueries({ queryKey: contentType === 'movie' ? ['vod-movies'] : ['vod-series'] })
     },
+    onError: (error: any) => {
+      setAutoMatchMessage(`Automatic exact-match save failed: ${error?.response?.data?.detail ?? error.message}`)
+    },
   })
 
-  // Same "purely a recommendation" contract as Needs Review's Ask AI --
-  // whichever provider is configured in Settings picks among the same TMDB
-  // candidates shown above; nothing is ever applied without an explicit click.
+  // A deterministic match is safe to apply without another click only when
+  // the normalized title and year agree, the candidate has a poster, and an
+  // existing TMDB id is either absent or already agrees. A conflicting id,
+  // missing year, or multiple plausible candidates stays manual so an
+  // original/remake cannot be silently mixed up.
+  useEffect(() => {
+    const candidates = suggestionsQuery.data ?? []
+    const exact = candidates.filter((candidate) => normalizeTitle(candidate.name) === normalizeTitle(item.name) && !!candidate.poster_url)
+    const match = item.year != null
+      ? exact.find((candidate) => candidate.year === item.year && (!item.tmdb_id || item.tmdb_id === candidate.tmdb_id))
+      : undefined
+    if (!match) return
+    const key = `${match.tmdb_id}:${match.year ?? ''}:${item.year ?? ''}`
+    if (autoAppliedKey === key || resolve.isPending) return
+    setAutoAppliedKey(key)
+    setAutoMatchMessage(`Auto-applied exact TMDB match: ${match.name}${match.year ? ` (${match.year})` : ''}.`)
+    resolve.mutate({
+      poster_url: match.poster_url!,
+      tmdb_id: match.tmdb_id,
+      name: match.name !== item.name ? match.name : undefined,
+      year: match.year ?? undefined,
+    })
+  }, [suggestionsQuery.data, item.name, item.year, item.tmdb_id, autoAppliedKey, resolve.isPending])
+
+  // Ask AI remains an optional recommendation for cases that are not
+  // deterministic exact title/year matches; it never overrides the picker.
   const aiSuggest = useMutation({
     mutationFn: () => api.get(`/vod/missing-artwork/${contentType}/${item.id}/ai-suggest/`, {
       params: searchOverride ? { q: searchOverride } : {},
@@ -2159,8 +2197,12 @@ function MissingArtworkRow({ contentType, item, qc, selected, onToggleSelect }: 
   return (
     <li className="border-b border-border/50 py-2">
       <div className="flex items-center justify-between gap-2">
-        <span className="min-w-0 truncate flex items-center gap-1.5">
-          <input type="checkbox" checked={selected} onChange={onToggleSelect} title="Select for bulk action" />
+        <span
+          className="min-w-0 truncate flex items-center gap-1.5 cursor-pointer"
+          onClick={() => setExpanded((e) => !e)}
+          title="Open artwork suggestions"
+        >
+          <input type="checkbox" checked={selected} onChange={(e) => { e.stopPropagation(); onToggleSelect() }} onClick={(e) => e.stopPropagation()} title="Select for bulk action" />
           <ImageOff size={12} className="text-muted-foreground shrink-0" />
           {item.name} {item.year && !item.name.trim().endsWith(`(${item.year})`) && <span className="text-muted-foreground">({item.year})</span>}
         </span>
@@ -2171,6 +2213,7 @@ function MissingArtworkRow({ contentType, item, qc, selected, onToggleSelect }: 
 
       {expanded && (
         <div className="mt-2 space-y-2">
+          {autoMatchMessage && <p className="text-xs text-green-500 border border-green-500/30 rounded px-2 py-1">{autoMatchMessage}</p>}
           <div className="flex items-center gap-1.5">
             <span className="text-muted-foreground">search TMDB as:</span>
             <input
