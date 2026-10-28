@@ -79,7 +79,7 @@ export default function LanguageMismatchReport() {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-lg font-semibold flex items-center gap-2"><Languages size={18} /> Language Mismatch Report</h1>
-          <p className="text-xs text-muted-foreground mt-1">Embedded audio tags are compared with the configured source language. Approved single-language mismatches update the source and archive it when that language is excluded. Reject records the decision and prevents automatic re-checking.</p>
+          <p className="text-xs text-muted-foreground mt-1">Embedded audio tags are compared with the configured wanted-language policy. Approved single-language results update the source metadata and archive the parent when the observed language is outside that policy. Reject records the decision and prevents automatic re-checking.</p>
           <p className="text-xs text-muted-foreground mt-1">Wanted playback languages: {report.data?.enabled_languages.join(', ') || 'none'}</p>
           {report.data?.trickle && <p className="text-xs text-muted-foreground mt-1">Trickle: up to {report.data.trickle.global_concurrency} probes every {report.data.trickle.interval_seconds}s · {report.data.trickle.checked_today}/{report.data.trickle.daily_max} today · language cap {report.data.trickle.language_window_max} per {Math.round(report.data.trickle.language_window_seconds / 60)} minutes{report.data.trickle.blocked_providers ? ` · ${report.data.trickle.blocked_providers} provider paused` : ''}</p>}
         </div>

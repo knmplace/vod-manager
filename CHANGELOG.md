@@ -36,8 +36,8 @@ instead of opening a duplicate request.
 - Added provider-aware language auditing with bounded embedded-audio probes,
   persistent per-source results, and approval/rejection history.
 - Added the Language Mismatch Report under System with individual and bulk
-  decisions. Approved excluded-language mismatches update the source language
-  and archive the parent movie/show; rejected results are not rechecked.
+  decisions. Approved results outside the wanted-language policy update source
+  metadata and archive the parent movie/show; rejected results are not rechecked.
 - Added up to three-provider concurrency, one probe per provider, 60-second
   same-provider spacing, 10 per provider per 15 minutes, 100 per day, and
   provider pause after 429/connection-limit/provider errors.
