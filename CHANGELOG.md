@@ -60,6 +60,24 @@ instead of opening a duplicate request.
 - Validation: 31 focused backend tests passed, Python compilation passed, and
   the frontend production build passed.
 
+## 2026-10-28 (Language audit deployment follow-up)
+
+- Corrected the deployed provider-pause regression. The earlier `270e0c1`
+  image paused an entire provider after one source-level HTTP error; live
+  evidence included PLEX HTTP 404, WarpTV LIVE 3 HTTP 400, and WOBO-XYZ HTTP
+  406. The corrected `c601666` release keeps providers in rotation and the
+  follow-up `564b175` release adds outcome reconciliation to the report.
+- Added a **Not needed** provider outcome column. Successful non-mismatch
+  probes now reconcile as `Probes = Not needed + Needed review +
+  Errors/deferred`.
+- Added the final live validation evidence: the corrected image ran with zero
+  new language provider-pause events after deployment. Monitoring can still
+  be enabled or disabled without losing history or pending decisions.
+- Validation: 30 focused backend tests passed, Python compilation passed,
+  frontend production build passed, and Docker workflow `40784609175`
+  completed successfully for `c601666`. The follow-up image build for
+  `564b175` also completed and was deployed for live verification.
+
 ## 2026-10-28 (Language audit live statistics and pacing controls)
 
 - Marked upstream PR #69 as **on hold** while the fork adds the live operational
