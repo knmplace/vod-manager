@@ -19,6 +19,18 @@ add its second status marker and link to the pull request: 🔀 = open/under
 review, 🔼 = included in an upstream release, ⛔ = closed without being
 included.
 
+## Current upstream work
+
+| Area | Upstream PR | Status |
+| --- | --- | --- |
+| TMDB identity picker and Metadata Review | [#67](https://github.com/jstevenscl/vod-manager/pull/67) | Open |
+| Artwork Review and safe poster matching | [#68](https://github.com/jstevenscl/vod-manager/pull/68) | Open |
+| Language Mismatch Report and embedded-audio audit | [#69](https://github.com/jstevenscl/vod-manager/pull/69) | Open / on hold |
+
+These submissions are focused upstream changes. Fork-only release notes remain
+below; PR branches contain no provider identities, private URLs, local network
+addresses, credentials, usernames, or user-specific deployment information.
+
 ### Upstream PR hygiene
 
 Upstream submissions are prepared from a clean branch based on the current
@@ -119,7 +131,7 @@ instead of opening a duplicate request.
 - Validation: 29 focused backend tests passed, Python compilation passed,
   frontend production build passed, and `git diff --check` passed.
 
-### Artwork review branch
+### Artwork review — [upstream PR #68](https://github.com/jstevenscl/vod-manager/pull/68)
 
 - Before: missing-artwork work was limited to the popup, exact matches were not
   consistently applied automatically, and a saved poster could leave the queue
@@ -134,7 +146,7 @@ instead of opening a duplicate request.
 - Validation: 21 focused artwork/bulk-review tests passed, Python compilation
   passed, frontend production build passed, and `git diff --check` passed.
 
-### Language mismatch branch
+### Language mismatch audit — [upstream PR #69](https://github.com/jstevenscl/vod-manager/pull/69)
 
 - Before: configured source language could be trusted even when the embedded file
   audio tags disagreed, with no durable review decision or bounded background audit.
@@ -200,7 +212,7 @@ instead of opening a duplicate request.
 - Validation: 9 focused backend tests passed, Python compilation, frontend
   production build, and `git diff --check` passed.
 
-## 2026-10-28 (Duplicate Finder TMDB picker; upstream v0.3.13 alignment)
+## 2026-10-28 (Duplicate Finder TMDB picker; [upstream PR #67](https://github.com/jstevenscl/vod-manager/pull/67); upstream v0.3.13 alignment)
 
 - ✅ **Added a hidden dedicated Artwork Review page**, linked from the existing
   Missing Artwork popup. It provides a larger table-style queue, local-first
