@@ -1614,7 +1614,7 @@ interface BulkAiJobStatus {
   error: string | null
 }
 
-function useBulkAiJob(startEndpoint: string, progressEndpointPrefix: string) {
+function useBulkAiJob(startEndpoint: string, progressEndpointPrefix: string, cancelEndpointPrefix?: string) {
   const [jobId, setJobId] = useState<string | null>(null)
   const startMutation = useMutation({
     mutationFn: (body: object) => api.post(startEndpoint, body).then((r) => r.data as { job_id: string }),
@@ -1641,6 +1641,11 @@ function useBulkAiJob(startEndpoint: string, progressEndpointPrefix: string) {
     progressError: progressQuery.error
       ? ((progressQuery.error as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? 'Could not read AI job progress. The job may have expired; start it again.')
       : null,
+    cancel: () => {
+      const id = jobId
+      setJobId(null)
+      if (id && cancelEndpointPrefix) void api.post(`${cancelEndpointPrefix}${id}/cancel/`)
+    },
     reset: () => setJobId(null),
   }
 }
@@ -5806,14 +5811,19 @@ function MissingArtworkModal({ contentType, qc, onClose, onOpenDedicated }: {
     enabled: !showExcluded && selectedIds.size > 0,
   })
 
-  const bulkAi = useBulkAiJob('/vod/missing-artwork/bulk-resolve/', '/vod/missing-artwork/bulk-resolve/')
+  const bulkAi = useBulkAiJob('/vod/missing-artwork/bulk-resolve/', '/vod/missing-artwork/bulk-resolve/', '/vod/missing-artwork/bulk-resolve/')
   useEffect(() => {
     if (bulkAi.job && !bulkAi.job.running) invalidateAfterBulk()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bulkAi.job?.running])
 
+  const closeModal = () => {
+    bulkAi.cancel()
+    onClose()
+  }
+
   return (
-    <Modal onClose={onClose} maxWidth="max-w-2xl">
+    <Modal onClose={closeModal} maxWidth="max-w-2xl">
       <div className="flex items-center justify-between px-4 py-2.5 border-b border-border gap-2">
         <span className="text-sm font-medium shrink-0">
           Missing Artwork — {contentType === 'movie' ? 'Movies' : 'TV Shows'} ({query.data?.total ?? '…'})

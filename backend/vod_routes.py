@@ -3672,6 +3672,14 @@ async def bulk_resolve_missing_artwork_progress(job_id: str):
     return job
 
 
+@router.post("/missing-artwork/bulk-resolve/{job_id}/cancel/", dependencies=_GUARDS)
+async def cancel_missing_artwork_bulk_resolve(job_id: str):
+    if vod_bulk_ai_service.get_bulk_ai_job(job_id) is None:
+        raise HTTPException(404, detail="job not found")
+    vod_bulk_ai_service.cancel_bulk_ai_job(job_id)
+    return vod_bulk_ai_service.get_bulk_ai_job(job_id)
+
+
 # ── Movies ───────────────────────────────────────────────────────────────────
 
 def _check_in_library(in_library: str | None) -> None:

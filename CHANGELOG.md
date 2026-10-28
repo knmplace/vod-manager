@@ -106,6 +106,17 @@ instead of opening a duplicate request.
 - Validation: 26 focused backend tests passed, Python compilation, frontend
   production build, and `git diff --check` passed.
 
+## 2026-10-28 (Missing Artwork modal cancellation)
+
+- The Missing Artwork modal's window X now cancels its active bulk-AI artwork
+  job, stops polling, and prevents additional titles from being processed.
+- Before: closing the modal only hid the UI while the server job could continue
+  resolving selected artwork in the background.
+- After: closing the modal requests cancellation and the server stops before the
+  next item; any single request already in progress is allowed to finish safely.
+- Validation: 9 focused backend tests passed, Python compilation, frontend
+  production build, and `git diff --check` passed.
+
 ## 2026-10-28 (Duplicate Finder TMDB picker; upstream v0.3.13 alignment)
 
 - ✅ **Added a hidden dedicated Artwork Review page**, linked from the existing
