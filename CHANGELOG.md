@@ -38,6 +38,9 @@ instead of opening a duplicate request.
 - Added a report-level **Run one cycle now** action. It starts one bounded
   provider-aware cycle without bypassing rate limits, daily limits, or provider
   backoff.
+- Added a visible decision legend: ✓ applies the proposal; × keeps the
+  configured language, leaves catalog state unchanged, records the decision,
+  and prevents rechecking.
 - Added the Language Mismatch Report under System with individual and bulk
   decisions. Approved results outside the wanted-language policy update source
   metadata and archive the parent movie/show; rejected results are not rechecked.
