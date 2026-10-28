@@ -44,6 +44,12 @@ instead of opening a duplicate request.
   toggle only changes review visibility; it does not remove or disable playback.
 - Fork validation: 31 focused backend tests passed, Python compilation passed,
   frontend production build passed, and `git diff --check` passed.
+- Follow-up before/after validation: before this fix, the row badge/title did
+  not expand and no deterministic exact-match auto-apply existed; after it,
+  32 focused backend tests pass, including poster URL + TMDB identity saving,
+  and the frontend production build and `git diff --check` pass again.
+- Clicking a candidate poster now sends its poster URL, TMDB ID, title, and
+  year to the resolver; the selection is persisted, not merely previewed.
 - 🔼 These artwork-queue and adult-review changes are ready to send upstream
   in a focused pull request after fork deployment validation.
 

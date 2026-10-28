@@ -40,6 +40,18 @@ def test_missing_artwork_includes_bare_tmdb_urls_and_hides_adults_by_default(db)
     assert {row["id"] for row in db.list_missing_artwork("movie", hide_adult=False)} == {bare, adult}
 
 
+def test_missing_artwork_resolution_saves_poster_and_identity(db):
+    movie_id = db.upsert_movie("Aussie Road Train Truckers", 2025)
+    result = db.resolve_missing_artwork(
+        "movie", movie_id, "https://image.tmdb.org/t/p/w185/poster.jpg", "12345",
+        "Aussie Road Train Truckers", 2025,
+    )
+    saved = db.get_movie(movie_id)
+    assert result == {"resolved_id": movie_id}
+    assert saved["poster_url"].endswith("/poster.jpg")
+    assert saved["tmdb_id"] == "12345" and saved["year"] == 2025
+
+
 def test_card_without_sources_falls_back_to_name(db):
     db.upsert_movie("AR| Legacy", 2019)
     assert {row["code"] for row in db.list_library_prefixes("movie")} == {"AR"}
