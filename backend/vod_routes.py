@@ -4364,6 +4364,10 @@ class LanguageTrickleSettingsRequest(BaseModel):
     daily_limit: Optional[int] = None
 
 
+class LanguageTrickleEnabledRequest(BaseModel):
+    enabled: bool
+
+
 @router.post("/sources/check-quality/", dependencies=_GUARDS)
 async def check_source_quality(body: SourceQualityRequest):
     """On-demand resolution + file size for ONE source. One source per call by design: no bulk / season form."""
@@ -4408,6 +4412,12 @@ async def language_trickle_settings():
 @router.post("/language-trickle/settings/", dependencies=_GUARDS)
 async def save_language_trickle_settings(body: LanguageTrickleSettingsRequest):
     config.save_language_trickle_settings(body.probes_per_cycle, body.interval_seconds, body.daily_limit)
+    return config.get_language_trickle_settings()
+
+
+@router.post("/language-trickle/enabled/", dependencies=_GUARDS)
+async def save_language_trickle_enabled(body: LanguageTrickleEnabledRequest):
+    config.save_language_trickle_enabled(body.enabled)
     return config.get_language_trickle_settings()
 
 

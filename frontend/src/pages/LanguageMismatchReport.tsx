@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Check, Languages, Loader2, RefreshCw, X } from 'lucide-react'
+import { Check, Languages, Loader2, Power, RefreshCw, X } from 'lucide-react'
 import api from '@/lib/api'
 import { notify } from '@/lib/confirm'
 import { buildHlsPreviewSourceUrl, buildPreviewSourceUrl, buildTranscodedPreviewSourceUrl, PlayButton, type XcCredentials } from './VodManager'
@@ -27,7 +27,7 @@ type Mismatch = {
 }
 
 type Stats = { eligible: { movies: number; series: number; total: number }; pending_review: number; wanted_languages: string[]; history: { day: string; probes: number; mismatches: number; outside_wanted: number; wanted_only: number; errors: number }[]; provider_history: { provider: string; type: 'M' | 'S'; probes: number; mismatches: number; outside_wanted: number; wanted_only: number; errors: number }[] }
-type Report = { enabled_languages: string[]; count: number; results: Mismatch[]; stats?: Stats; trickle?: { interval_seconds: number; daily_max: number | null; checked_today: number; probes_per_cycle: number; language_window_max: number | null; language_window_seconds: number; blocked_providers: number } }
+type Report = { enabled_languages: string[]; count: number; results: Mismatch[]; stats?: Stats; trickle?: { enabled: boolean; interval_seconds: number; daily_max: number | null; checked_today: number; probes_per_cycle: number; language_window_max: number | null; language_window_seconds: number; blocked_providers: number } }
 
 const NAMES: Record<string, string> = {
   EN: 'English', HI: 'Hindi', FR: 'French', ES: 'Spanish', DE: 'German', IT: 'Italian',
@@ -58,6 +58,11 @@ export default function LanguageMismatchReport() {
     mutationFn: () => api.post('/vod/language-trickle/settings/', { probes_per_cycle: Number(form.probes_per_cycle), interval_seconds: Number(form.interval_seconds), daily_limit: form.daily_limit === '' ? null : Number(form.daily_limit) }).then((r) => r.data),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['language-trickle-settings'] }); qc.invalidateQueries({ queryKey: ['language-mismatch-report'] }); notify('Language probe pacing saved.') },
     onError: (e: any) => notify(e?.response?.data?.detail ?? 'Could not save language probe pacing.'),
+  })
+  const toggleEnabled = useMutation({
+    mutationFn: (enabled: boolean) => api.post('/vod/language-trickle/enabled/', { enabled }).then((r) => r.data),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['language-trickle-settings'] }); qc.invalidateQueries({ queryKey: ['language-mismatch-report'] }); notify('Language mismatch monitoring state saved.') },
+    onError: (e: any) => notify(e?.response?.data?.detail ?? 'Could not change language mismatch monitoring state.'),
   })
   const rows = report.data?.results ?? []
   const key = (r: Mismatch) => `${r.kind}:${r.source_id}`
@@ -103,9 +108,11 @@ export default function LanguageMismatchReport() {
           <h1 className="text-lg font-semibold flex items-center gap-2"><Languages size={18} /> Language Mismatch Report</h1>
           <p className="text-xs text-muted-foreground mt-1">Embedded audio tags are compared with the configured wanted-language policy. Approved single-language results update the source metadata and archive the parent when the observed language is outside that policy. Reject records the decision and prevents automatic re-checking.</p>
           <p className="text-xs text-muted-foreground mt-1">Wanted playback languages: {report.data?.enabled_languages.join(', ') || 'none'}</p>
+          {report.data?.trickle && <p className="text-xs text-muted-foreground mt-1">Monitoring is {report.data.trickle.enabled ? 'enabled' : 'disabled'}.</p>}
           {report.data?.trickle && <p className="text-xs text-muted-foreground mt-1">Trickle: {report.data.trickle.probes_per_cycle} probes every {report.data.trickle.interval_seconds}s · {report.data.trickle.checked_today}/{report.data.trickle.daily_max ?? 'no cap'} today · provider window uncapped{report.data.trickle.blocked_providers ? ` · ${report.data.trickle.blocked_providers} provider paused` : ''}</p>}
         </div>
         <span className="flex items-center gap-2">
+          {report.data?.trickle && <button className={`flex items-center gap-1.5 border rounded px-2 py-1.5 text-xs hover:bg-accent disabled:opacity-50 ${report.data.trickle.enabled ? 'border-amber-500/40 text-amber-400' : 'border-emerald-500/40 text-emerald-400'}`} disabled={toggleEnabled.isPending} onClick={() => toggleEnabled.mutate(!report.data!.trickle!.enabled)}><Power size={12} /> {report.data.trickle.enabled ? 'Disable monitoring' : 'Enable monitoring'}</button>}
           <button className="flex items-center gap-1.5 border border-primary/40 text-primary rounded px-2 py-1.5 text-xs hover:bg-accent disabled:opacity-50" disabled={runNow.isPending} onClick={() => runNow.mutate()}><Languages size={12} className={runNow.isPending ? 'animate-pulse' : ''} /> Run one cycle now</button>
           <button className="flex items-center gap-1.5 border border-border rounded px-2 py-1.5 text-xs hover:bg-accent disabled:opacity-50" disabled={report.isFetching} onClick={() => report.refetch()}><RefreshCw size={12} className={report.isFetching ? 'animate-spin' : ''} /> Refresh</button>
         </span>

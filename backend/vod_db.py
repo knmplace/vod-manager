@@ -8366,6 +8366,26 @@ def record_language_probe_run(kind: str, source_id: int, provider_id: int | None
         conn.close()
 
 
+def language_probe_count_today() -> int:
+    """Count completed language probes today from durable history.
+
+    The worker's in-memory counter resets on restart; the persisted run table
+    must remain authoritative for the daily cap and the report display.
+    """
+    now = datetime.datetime.now().astimezone()
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    conn = _connect()
+    try:
+        return int(conn.execute(
+            "SELECT COUNT(*) FROM language_probe_runs "
+            "WHERE CAST(checked_at AS REAL) >= ? "
+            "AND status NOT IN ('deferred', 'error')",
+            (start,),
+        ).fetchone()[0])
+    finally:
+        conn.close()
+
+
 def language_audit_stats(history_limit: int = 31) -> dict:
     """Return live backlog totals plus probe outcomes grouped by local day."""
     enabled = sorted(get_enabled_languages())
@@ -8399,7 +8419,7 @@ def language_audit_stats(history_limit: int = 31) -> dict:
             )
         """).fetchone()[0]
         rows = conn.execute("""
-            SELECT substr(checked_at, 1, 10) AS day,
+            SELECT date(CAST(checked_at AS REAL), 'unixepoch', 'localtime') AS day,
                    COUNT(*) AS probes,
                    SUM(CASE WHEN mismatch=1 THEN 1 ELSE 0 END) AS mismatches,
                    SUM(CASE WHEN mismatch=1 AND wanted_match=0 THEN 1 ELSE 0 END) AS outside_wanted,
@@ -8504,7 +8524,11 @@ def next_language_probe_target() -> dict | None:
     return targets[0] if targets else None
 
 
-def next_language_probe_targets(limit: int = 3, distinct_providers: bool = True) -> list[dict]:
+def next_language_probe_targets(
+    limit: int = 3,
+    distinct_providers: bool = True,
+    exclude_provider_ids: set[int] | None = None,
+) -> list[dict]:
     """Return up to ``limit`` pending sources.
 
     The normal single-target path can request one source per provider. The
@@ -8514,21 +8538,28 @@ def next_language_probe_targets(limit: int = 3, distinct_providers: bool = True)
     """
     conn = _connect()
     try:
-        rows = conn.execute("""
+        excluded = sorted(int(pid) for pid in (exclude_provider_ids or set()))
+        provider_filter = ""
+        params: list[int] = []
+        if excluded:
+            placeholders = ",".join("?" for _ in excluded)
+            provider_filter = f" AND p.id NOT IN ({placeholders})"
+            params.extend(excluded)
+        rows = conn.execute(f"""
             SELECT 'movie' AS kind, ms.id AS source_id, ms.provider_id
             FROM movie_sources ms JOIN movies m ON m.id=ms.movie_id JOIN providers p ON p.id=ms.provider_id
-            WHERE p.is_active=1 AND m.review_excluded=0 AND ms.language_probe_decision IS NULL
+            WHERE p.is_active=1 AND m.review_excluded=0 AND ms.language_probe_decision IS NULL{provider_filter}
               AND ms.language_probed_at IS NULL
               AND EXISTS (SELECT 1 FROM movie_category_placements cp WHERE cp.movie_id=m.id)
             UNION ALL
             SELECT 'episode' AS kind, es.id AS source_id, es.provider_id
             FROM episode_sources es JOIN episodes e ON e.id=es.episode_id
             JOIN series s ON s.id=e.series_id JOIN providers p ON p.id=es.provider_id
-            WHERE p.is_active=1 AND s.review_excluded=0 AND es.language_probe_decision IS NULL
+            WHERE p.is_active=1 AND s.review_excluded=0 AND es.language_probe_decision IS NULL{provider_filter}
               AND es.language_probed_at IS NULL
               AND EXISTS (SELECT 1 FROM series_category_placements cp WHERE cp.series_id=s.id)
             ORDER BY source_id LIMIT 200
-        """).fetchall()
+        """, params + params).fetchall()
         max_items = max(1, int(limit))
         if distinct_providers:
             chosen = []
