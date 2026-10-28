@@ -35,6 +35,7 @@ import httpx
 import vod_db
 import vod_downloader
 import xc_server
+import config
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ _GLOBAL_MAX = 2
 # connection gates, one in-flight probe per provider, and circuit breaking still
 # apply; the daily/window values only limit this audit worker.
 LANGUAGE_TRICKLE_INTERVAL = 60.0
-LANGUAGE_TRICKLE_DAILY_MAX = 500
+LANGUAGE_TRICKLE_DAILY_MAX = 500  # legacy default retained for compatibility; runtime setting may be None
 LANGUAGE_GLOBAL_MAX = 15
 LANGUAGE_WINDOW_SECONDS = 900.0
 LANGUAGE_WINDOW_MAX: int | None = None
@@ -448,7 +449,9 @@ async def language_trickle_once(target: dict | None = None) -> dict:
     day = time.strftime("%Y-%m-%d", time.localtime())
     if day != _language_trickle_day:
         _language_trickle_day, _language_trickle_count = day, 0
-    if _language_trickle_count >= LANGUAGE_TRICKLE_DAILY_MAX:
+    settings = config.get_language_trickle_settings()
+    daily_limit = settings.get("language_trickle_daily_limit")
+    if daily_limit is not None and _language_trickle_count >= int(daily_limit):
         return {"status": "daily_limit", "checked_today": _language_trickle_count}
     if target is None:
         target = await asyncio.to_thread(vod_db.next_language_probe_target)
@@ -457,6 +460,18 @@ async def language_trickle_once(target: dict | None = None) -> dict:
     try:
         result = await probe_language_source(target["kind"], target["source_id"], spacing=0)
         _language_trickle_count += 1
+        observed = result.get("observed_languages") or []
+        configured = result.get("configured_language")
+        wanted = config.get_enabled_languages()
+        # The report treats any multi-track result or a changed single-track
+        # result as needing review, even when the configured language is one of
+        # several observed tracks.
+        mismatch = bool(observed and observed != [configured])
+        wanted_match = bool(observed and set(observed).issubset(set(wanted)))
+        await asyncio.to_thread(vod_db.record_language_probe_run,
+                                target["kind"], target["source_id"], target.get("provider_id"),
+                                result.get("status") or "observed", configured, observed,
+                                wanted, mismatch, wanted_match, result.get("error"))
         if result.get("mismatch"):
             import notices
             if not await asyncio.to_thread(vod_db.has_open_notice_kind, "language_mismatch"):
@@ -466,6 +481,9 @@ async def language_trickle_once(target: dict | None = None) -> dict:
                 )
         return {"status": "checked", "checked_today": _language_trickle_count, "result": result}
     except ProbeRefused as exc:
+        await asyncio.to_thread(vod_db.record_language_probe_run,
+                                target["kind"], target["source_id"], target.get("provider_id"),
+                                "deferred", None, [], config.get_enabled_languages(), False, False, str(exc))
         return {"status": "deferred", "checked_today": _language_trickle_count, "retry_after": exc.retry_after, "message": str(exc)}
     except Exception as exc:
         logger.exception("[language-probe] trickle check failed for %s", target)
@@ -474,11 +492,12 @@ async def language_trickle_once(target: dict | None = None) -> dict:
 
 def language_trickle_status() -> dict:
     day = time.strftime("%Y-%m-%d", time.localtime())
+    settings = config.get_language_trickle_settings()
     return {
-        "interval_seconds": LANGUAGE_TRICKLE_INTERVAL,
-        "daily_max": LANGUAGE_TRICKLE_DAILY_MAX,
+        "interval_seconds": settings["language_trickle_interval_seconds"],
+        "daily_max": settings["language_trickle_daily_limit"],
         "checked_today": _language_trickle_count if _language_trickle_day == day else 0,
-        "global_concurrency": LANGUAGE_GLOBAL_MAX,
+        "probes_per_cycle": settings["language_trickle_probes_per_cycle"],
         "language_window_max": LANGUAGE_WINDOW_MAX,
         "language_window_seconds": LANGUAGE_WINDOW_SECONDS,
         "blocked_providers": len(_language_provider_blocks),
@@ -487,7 +506,9 @@ def language_trickle_status() -> dict:
 
 async def run_language_trickle_cycle() -> dict:
     """Run one bounded manual/scheduled cycle without bypassing any gates."""
-    targets = await asyncio.to_thread(vod_db.next_language_probe_targets, LANGUAGE_GLOBAL_MAX, False)
+    settings = config.get_language_trickle_settings()
+    targets = await asyncio.to_thread(vod_db.next_language_probe_targets,
+                                      settings["language_trickle_probes_per_cycle"], False)
     provider_queues: dict[int, list[dict]] = {}
     for target in targets:
         provider_queues.setdefault(target["provider_id"], []).append(target)
@@ -537,7 +558,7 @@ async def language_trickle_loop() -> None:
             await run_language_trickle_cycle()
         except Exception:
             logger.exception("[language-probe] trickle loop failed")
-        await asyncio.sleep(LANGUAGE_TRICKLE_INTERVAL)
+        await asyncio.sleep(config.get_language_trickle_settings()["language_trickle_interval_seconds"])
 
 
 # ── background season / series checks ───────────────────────────────────────

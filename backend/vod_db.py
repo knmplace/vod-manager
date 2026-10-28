@@ -1147,6 +1147,25 @@ def _migrate(conn: sqlite3.Connection) -> None:
         created_at      TEXT NOT NULL,
         acknowledged_at TEXT
     )""")
+    # One append-only row per language probe.  Source rows keep the latest
+    # result for review; this table keeps the daily operational history used by
+    # the live report and prevents resolved items from disappearing from the
+    # day's totals.
+    conn.execute("""CREATE TABLE IF NOT EXISTS language_probe_runs (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind                TEXT NOT NULL,
+        source_id           INTEGER NOT NULL,
+        provider_id         INTEGER,
+        checked_at          TEXT NOT NULL,
+        status              TEXT NOT NULL,
+        configured_language TEXT,
+        observed_languages  TEXT,
+        wanted_languages    TEXT,
+        mismatch            INTEGER NOT NULL DEFAULT 0,
+        wanted_match        INTEGER NOT NULL DEFAULT 0,
+        error               TEXT
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_language_probe_runs_checked ON language_probe_runs(checked_at)")
     # In Library badge (library_presence.py): what the user's media
     # servers hold, replaced per server on each scan. Episode rows carry their show's
     # ids/title/year. server='import' rows are items a Radarr/Sonarr import just added.
@@ -8321,6 +8340,93 @@ def set_source_language_probe(kind: str, source_id: int, languages: list[str] | 
              confidence, datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"), source_id),
         )
         _commit_with_retry(conn)
+    finally:
+        conn.close()
+
+
+def record_language_probe_run(kind: str, source_id: int, provider_id: int | None,
+                              status: str, configured_language: str | None,
+                              observed_languages: list[str] | None,
+                              wanted_languages: list[str], mismatch: bool,
+                              wanted_match: bool, error: str | None = None) -> None:
+    conn = _connect()
+    try:
+        conn.execute("""INSERT INTO language_probe_runs
+            (kind, source_id, provider_id, checked_at, status,
+             configured_language, observed_languages, wanted_languages,
+             mismatch, wanted_match, error)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
+            kind, source_id, provider_id, _now(), status, configured_language,
+            json.dumps(sorted(set(observed_languages or []))),
+            json.dumps(sorted(set(wanted_languages))), int(bool(mismatch)),
+            int(bool(wanted_match)), error,
+        ))
+        _commit_with_retry(conn)
+    finally:
+        conn.close()
+
+
+def language_audit_stats(history_limit: int = 31) -> dict:
+    """Return live backlog totals plus probe outcomes grouped by local day."""
+    enabled = sorted(get_enabled_languages())
+    conn = _connect()
+    try:
+        movie_eligible = conn.execute("""
+            SELECT COUNT(*) FROM movie_sources ms
+            JOIN movies m ON m.id=ms.movie_id JOIN providers p ON p.id=ms.provider_id
+            WHERE p.is_active=1 AND m.review_excluded=0
+              AND ms.language_probe_decision IS NULL AND ms.language_probed_at IS NULL
+              AND EXISTS (SELECT 1 FROM movie_category_placements cp WHERE cp.movie_id=m.id)
+        """).fetchone()[0]
+        series_eligible = conn.execute("""
+            SELECT COUNT(DISTINCT s.id) FROM episode_sources es
+            JOIN episodes e ON e.id=es.episode_id JOIN series s ON s.id=e.series_id
+            JOIN providers p ON p.id=es.provider_id
+            WHERE p.is_active=1 AND s.review_excluded=0
+              AND es.language_probe_decision IS NULL AND es.language_probed_at IS NULL
+              AND EXISTS (SELECT 1 FROM series_category_placements cp WHERE cp.series_id=s.id)
+        """).fetchone()[0]
+        pending = conn.execute("""
+            SELECT COUNT(*) FROM (
+              SELECT ms.id FROM movie_sources ms JOIN movies m ON m.id=ms.movie_id JOIN providers p ON p.id=ms.provider_id
+              WHERE p.is_active=1 AND m.review_excluded=0 AND ms.language_probe_status='observed'
+                AND ms.language_probe_decision IS NULL
+              UNION ALL
+              SELECT es.id FROM episode_sources es JOIN episodes e ON e.id=es.episode_id
+                JOIN series s ON s.id=e.series_id JOIN providers p ON p.id=es.provider_id
+              WHERE p.is_active=1 AND s.review_excluded=0 AND es.language_probe_status='observed'
+                AND es.language_probe_decision IS NULL
+            )
+        """).fetchone()[0]
+        rows = conn.execute("""
+            SELECT substr(checked_at, 1, 10) AS day,
+                   COUNT(*) AS probes,
+                   SUM(CASE WHEN mismatch=1 THEN 1 ELSE 0 END) AS mismatches,
+                   SUM(CASE WHEN mismatch=1 AND wanted_match=0 THEN 1 ELSE 0 END) AS outside_wanted,
+                   SUM(CASE WHEN wanted_match=1 THEN 1 ELSE 0 END) AS wanted_only,
+                   SUM(CASE WHEN status IN ('error', 'deferred') THEN 1 ELSE 0 END) AS errors
+            FROM language_probe_runs
+            GROUP BY day ORDER BY day DESC LIMIT ?
+        """, (max(1, int(history_limit)),)).fetchall()
+        provider_rows = conn.execute("""
+            SELECT COALESCE(p.name, 'Unknown provider') AS provider,
+                   CASE WHEN r.kind='movie' THEN 'M' ELSE 'S' END AS type,
+                   COUNT(*) AS probes,
+                   SUM(CASE WHEN r.mismatch=1 THEN 1 ELSE 0 END) AS mismatches,
+                   SUM(CASE WHEN r.mismatch=1 AND r.wanted_match=0 THEN 1 ELSE 0 END) AS outside_wanted,
+                   SUM(CASE WHEN r.wanted_match=1 THEN 1 ELSE 0 END) AS wanted_only,
+                   SUM(CASE WHEN r.status IN ('error', 'deferred') THEN 1 ELSE 0 END) AS errors
+            FROM language_probe_runs r LEFT JOIN providers p ON p.id=r.provider_id
+            GROUP BY provider, type ORDER BY provider, type
+        """).fetchall()
+        return {
+            "eligible": {"movies": int(movie_eligible), "series": int(series_eligible),
+                         "total": int(movie_eligible + series_eligible)},
+            "pending_review": int(pending),
+            "wanted_languages": enabled,
+            "history": [dict(r) for r in rows],
+            "provider_history": [dict(r) for r in provider_rows],
+        }
     finally:
         conn.close()
 

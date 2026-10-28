@@ -202,6 +202,26 @@ def test_language_trickle_runs_up_to_source_limit_per_cycle(monkeypatch):
     assert len(result["results"]) == 15
 
 
+def test_language_trickle_settings_allow_unlimited_daily_budget(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "config.json")
+    config.save_language_trickle_settings(15, 180, None)
+    assert config.get_language_trickle_settings() == {
+        "language_trickle_probes_per_cycle": 15,
+        "language_trickle_interval_seconds": 180,
+        "language_trickle_daily_limit": None,
+    }
+
+
+def test_language_audit_stats_keep_daily_probe_history(db):
+    db.record_language_probe_run("movie", 10, 20, "observed", "EN", ["EN"], ["EN"], False, True)
+    db.record_language_probe_run("episode", 11, 21, "observed", "EN", ["HI"], ["EN"], True, False)
+    stats = db.language_audit_stats()
+    assert stats["history"][0]["probes"] == 2
+    assert stats["history"][0]["mismatches"] == 1
+    assert stats["history"][0]["outside_wanted"] == 1
+    assert stats["history"][0]["wanted_only"] == 1
+
+
 def test_language_mismatch_report_approval_updates_tag_and_archives_excluded_source(db, tmp_path):
     pid = db.upsert_provider("report-language", "", "", "", provider_type="library")
     mid = db.upsert_movie("Report Hindi Movie", 2026)

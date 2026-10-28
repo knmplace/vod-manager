@@ -4358,6 +4358,12 @@ class LanguageMismatchDecisionRequest(BaseModel):
     decision: str                   # approved or rejected
 
 
+class LanguageTrickleSettingsRequest(BaseModel):
+    probes_per_cycle: int
+    interval_seconds: int
+    daily_limit: Optional[int] = None
+
+
 @router.post("/sources/check-quality/", dependencies=_GUARDS)
 async def check_source_quality(body: SourceQualityRequest):
     """On-demand resolution + file size for ONE source. One source per call by design: no bulk / season form."""
@@ -4382,6 +4388,7 @@ async def check_source_language(body: SourceLanguageProbeRequest):
 async def language_mismatch_report():
     report = await asyncio.to_thread(vod_db.list_language_mismatches)
     report["trickle"] = vod_probe.language_trickle_status()
+    report["stats"] = await asyncio.to_thread(vod_db.language_audit_stats)
     if report["count"] and not await asyncio.to_thread(vod_db.has_open_notice_kind, "language_mismatch"):
         await asyncio.to_thread(
             notices.add, "language_mismatch", "warn", "Language mismatch approval needed",
@@ -4390,9 +4397,20 @@ async def language_mismatch_report():
     return report
 
 
+@router.get("/language-trickle/settings/", dependencies=_GUARDS)
+async def language_trickle_settings():
+    return config.get_language_trickle_settings()
+
+
+@router.post("/language-trickle/settings/", dependencies=_GUARDS)
+async def save_language_trickle_settings(body: LanguageTrickleSettingsRequest):
+    config.save_language_trickle_settings(body.probes_per_cycle, body.interval_seconds, body.daily_limit)
+    return config.get_language_trickle_settings()
+
+
 @router.post("/language-trickle/run/", dependencies=_GUARDS)
 async def run_language_trickle():
-    """Run one bounded manual cycle; the same provider gates and daily cap apply."""
+    """Run one bounded manual cycle; the same provider gates and optional cap apply."""
     return await vod_probe.run_language_trickle_cycle()
 
 

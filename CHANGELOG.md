@@ -46,6 +46,26 @@ instead of opening a duplicate request.
   submission; no duplicate PR was created for that work. PRs #68 and #69 are
   independent of #67 and each other.
 
+## 2026-10-28 (Language audit live statistics and pacing controls)
+
+- Marked upstream PR #69 as **on hold** while the fork adds the live operational
+  statistics and user-controlled pacing described below; a replacement focused
+  PR will be submitted after validation.
+- Added live eligible, checked-today, pending-review, estimated-rate, and daily
+  history totals to the Language Mismatch Report. History is retained per probe
+  so resolved rows do not disappear from the day's operational summary.
+- Added explicit `M`/`S` type markers and provider/type breakdowns so users can
+  distinguish movie versus show checks and verify whether multiple providers
+  are being audited.
+- Widened the movie/show source preview card so provider, audio, and source
+  actions remain readable instead of being compressed into a narrow modal.
+- Replaced the fixed daily language-probe budget with saved controls for probes
+  per cycle, seconds between cycles, and an optional daily cap. Leaving the cap
+  blank means no daily cap; provider gates, one-in-flight-per-provider, and
+  provider backoff remain enforced.
+- Validation: 29 focused backend tests passed, Python compilation passed,
+  frontend production build passed, and `git diff --check` passed.
+
 ### Artwork review branch
 
 - Before: missing-artwork work was limited to the popup, exact matches were not

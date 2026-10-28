@@ -860,6 +860,34 @@ _REFRESH_DEFAULTS = {
     "episode_trickle_spacing_seconds":  3,
 }
 
+# Lightweight language-audit pacing.  The daily limit is deliberately nullable:
+# None means the user has chosen no daily cap and provider backoff remains the
+# safety mechanism.
+_LANGUAGE_TRICKLE_DEFAULTS = {
+    "language_trickle_probes_per_cycle": 15,
+    "language_trickle_interval_seconds": 120,
+    "language_trickle_daily_limit": None,
+}
+
+
+def get_language_trickle_settings() -> dict:
+    data = _read_raw()
+    return {k: data.get(k, v) for k, v in _LANGUAGE_TRICKLE_DEFAULTS.items()}
+
+
+def save_language_trickle_settings(
+    probes_per_cycle: int,
+    interval_seconds: int,
+    daily_limit: int | None,
+) -> None:
+    if daily_limit is not None and int(daily_limit) < 1:
+        daily_limit = None
+    _update_raw(lambda data: data.update({
+        "language_trickle_probes_per_cycle": min(100, max(1, int(probes_per_cycle))),
+        "language_trickle_interval_seconds": min(3600, max(60, int(interval_seconds))),
+        "language_trickle_daily_limit": min(1000000, int(daily_limit)) if daily_limit is not None else None,
+    }))
+
 
 def get_refresh_settings() -> dict:
     data = _read_raw()
