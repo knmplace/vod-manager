@@ -8527,7 +8527,6 @@ def next_language_probe_target() -> dict | None:
 def next_language_probe_targets(
     limit: int = 3,
     distinct_providers: bool = True,
-    exclude_provider_ids: set[int] | None = None,
 ) -> list[dict]:
     """Return up to ``limit`` pending sources.
 
@@ -8538,29 +8537,33 @@ def next_language_probe_targets(
     """
     conn = _connect()
     try:
-        excluded = sorted(int(pid) for pid in (exclude_provider_ids or set()))
+        max_items = max(1, int(limit))
         provider_filter = ""
         params: list[int] = []
-        if excluded:
-            placeholders = ",".join("?" for _ in excluded)
-            provider_filter = f" AND p.id NOT IN ({placeholders})"
-            params.extend(excluded)
+        per_provider_limit = 1 if distinct_providers else max_items
         rows = conn.execute(f"""
-            SELECT 'movie' AS kind, ms.id AS source_id, ms.provider_id
-            FROM movie_sources ms JOIN movies m ON m.id=ms.movie_id JOIN providers p ON p.id=ms.provider_id
-            WHERE p.is_active=1 AND m.review_excluded=0 AND ms.language_probe_decision IS NULL{provider_filter}
-              AND ms.language_probed_at IS NULL
-              AND EXISTS (SELECT 1 FROM movie_category_placements cp WHERE cp.movie_id=m.id)
-            UNION ALL
-            SELECT 'episode' AS kind, es.id AS source_id, es.provider_id
-            FROM episode_sources es JOIN episodes e ON e.id=es.episode_id
-            JOIN series s ON s.id=e.series_id JOIN providers p ON p.id=es.provider_id
-            WHERE p.is_active=1 AND s.review_excluded=0 AND es.language_probe_decision IS NULL{provider_filter}
-              AND es.language_probed_at IS NULL
-              AND EXISTS (SELECT 1 FROM series_category_placements cp WHERE cp.series_id=s.id)
-            ORDER BY source_id LIMIT 200
-        """, params + params).fetchall()
-        max_items = max(1, int(limit))
+            WITH candidates AS (
+                SELECT 'movie' AS kind, ms.id AS source_id, ms.provider_id
+                FROM movie_sources ms JOIN movies m ON m.id=ms.movie_id JOIN providers p ON p.id=ms.provider_id
+                WHERE p.is_active=1 AND m.review_excluded=0 AND ms.language_probe_decision IS NULL{provider_filter}
+                  AND ms.language_probed_at IS NULL
+                  AND EXISTS (SELECT 1 FROM movie_category_placements cp WHERE cp.movie_id=m.id)
+                UNION ALL
+                SELECT 'episode' AS kind, es.id AS source_id, es.provider_id
+                FROM episode_sources es JOIN episodes e ON e.id=es.episode_id
+                JOIN series s ON s.id=e.series_id JOIN providers p ON p.id=es.provider_id
+                WHERE p.is_active=1 AND s.review_excluded=0 AND es.language_probe_decision IS NULL{provider_filter}
+                  AND es.language_probed_at IS NULL
+                  AND EXISTS (SELECT 1 FROM series_category_placements cp WHERE cp.series_id=s.id)
+            ), ranked AS (
+                SELECT kind, source_id, provider_id,
+                       ROW_NUMBER() OVER (PARTITION BY provider_id ORDER BY source_id) AS provider_rank
+                FROM candidates
+            )
+            SELECT kind, source_id, provider_id FROM ranked
+            WHERE provider_rank <= ?
+            ORDER BY provider_rank, provider_id, source_id
+        """, params + params + [per_provider_limit]).fetchall()
         if distinct_providers:
             chosen = []
             providers = set()

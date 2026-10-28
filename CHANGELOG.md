@@ -51,9 +51,10 @@ instead of opening a duplicate request.
 - Added separate Enable/Disable monitoring controls for the language mismatch
   audit. Disabling scheduled probing preserves probe history, decisions, and
   pending review rows; the manual "Run one cycle now" action remains available.
-- Fixed provider starvation after a provider is paused for the day. The sweep
-  now skips only paused providers and continues through other active,
-  placed, non-archived sources until each eligible source has been probed.
+- Fixed provider starvation after an individual source error. Providers stay
+  in rotation, candidates are selected round-robin across active providers,
+  and the sweep continues through active, placed, non-archived sources until
+  each eligible source has been probed.
 - Fixed persisted checked-today counts and daily history grouping after
   restarts; deferred/error attempts no longer consume the daily probe count.
 - Validation: 31 focused backend tests passed, Python compilation passed, and

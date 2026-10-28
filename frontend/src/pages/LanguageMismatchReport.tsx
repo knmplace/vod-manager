@@ -27,7 +27,7 @@ type Mismatch = {
 }
 
 type Stats = { eligible: { movies: number; series: number; total: number }; pending_review: number; wanted_languages: string[]; history: { day: string; probes: number; mismatches: number; outside_wanted: number; wanted_only: number; errors: number }[]; provider_history: { provider: string; type: 'M' | 'S'; probes: number; mismatches: number; outside_wanted: number; wanted_only: number; errors: number }[] }
-type Report = { enabled_languages: string[]; count: number; results: Mismatch[]; stats?: Stats; trickle?: { enabled: boolean; interval_seconds: number; daily_max: number | null; checked_today: number; probes_per_cycle: number; language_window_max: number | null; language_window_seconds: number; blocked_providers: number } }
+type Report = { enabled_languages: string[]; count: number; results: Mismatch[]; stats?: Stats; trickle?: { enabled: boolean; interval_seconds: number; daily_max: number | null; checked_today: number; probes_per_cycle: number; language_window_max: number | null; language_window_seconds: number } }
 
 const NAMES: Record<string, string> = {
   EN: 'English', HI: 'Hindi', FR: 'French', ES: 'Spanish', DE: 'German', IT: 'Italian',
@@ -109,7 +109,7 @@ export default function LanguageMismatchReport() {
           <p className="text-xs text-muted-foreground mt-1">Embedded audio tags are compared with the configured wanted-language policy. Approved single-language results update the source metadata and archive the parent when the observed language is outside that policy. Reject records the decision and prevents automatic re-checking.</p>
           <p className="text-xs text-muted-foreground mt-1">Wanted playback languages: {report.data?.enabled_languages.join(', ') || 'none'}</p>
           {report.data?.trickle && <p className="text-xs text-muted-foreground mt-1">Monitoring is {report.data.trickle.enabled ? 'enabled' : 'disabled'}.</p>}
-          {report.data?.trickle && <p className="text-xs text-muted-foreground mt-1">Trickle: {report.data.trickle.probes_per_cycle} probes every {report.data.trickle.interval_seconds}s · {report.data.trickle.checked_today}/{report.data.trickle.daily_max ?? 'no cap'} today · provider window uncapped{report.data.trickle.blocked_providers ? ` · ${report.data.trickle.blocked_providers} provider paused` : ''}</p>}
+          {report.data?.trickle && <p className="text-xs text-muted-foreground mt-1">Trickle: {report.data.trickle.probes_per_cycle} probes every {report.data.trickle.interval_seconds}s · {report.data.trickle.checked_today}/{report.data.trickle.daily_max ?? 'no cap'} today · rotates across active providers</p>}
         </div>
         <span className="flex items-center gap-2">
           {report.data?.trickle && <button className={`flex items-center gap-1.5 border rounded px-2 py-1.5 text-xs hover:bg-accent disabled:opacity-50 ${report.data.trickle.enabled ? 'border-amber-500/40 text-amber-400' : 'border-emerald-500/40 text-emerald-400'}`} disabled={toggleEnabled.isPending} onClick={() => toggleEnabled.mutate(!report.data!.trickle!.enabled)}><Power size={12} /> {report.data.trickle.enabled ? 'Disable monitoring' : 'Enable monitoring'}</button>}
@@ -131,7 +131,7 @@ export default function LanguageMismatchReport() {
           <label className="text-xs">Seconds between cycles<input className="block mt-1 w-32 rounded border border-border bg-background px-2 py-1" type="number" min="60" max="3600" value={form.interval_seconds} onChange={(e) => setForm({ ...form, interval_seconds: Number(e.target.value) })} /></label>
           <label className="text-xs">Daily cap<input className="block mt-1 w-28 rounded border border-border bg-background px-2 py-1" type="number" min="1" placeholder="None" value={form.daily_limit} onChange={(e) => setForm({ ...form, daily_limit: e.target.value })} /></label>
           <button className="border border-primary/40 text-primary rounded px-2 py-1.5 text-xs hover:bg-accent disabled:opacity-50" disabled={saveSettings.isPending} onClick={() => saveSettings.mutate()}>Save pacing</button>
-          <span className="text-[11px] text-muted-foreground">Leave Daily cap blank for no cap. Provider backoff still pauses a provider after errors or rate limits.</span>
+          <span className="text-[11px] text-muted-foreground">Leave Daily cap blank for no cap. Individual source errors are recorded while the sweep continues rotating across active providers.</span>
         </div>
       </div>
 

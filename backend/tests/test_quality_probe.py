@@ -3,7 +3,6 @@ ffprobe isn't needed here: the frame-size read is stubbed, the HTTP side runs ag
 
 import asyncio
 import threading
-import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -79,7 +78,6 @@ def clean(monkeypatch):
     for d in (vod_probe._last_end, vod_probe._recent, vod_downloader._cooldown_until, vod_downloader._pushbacks,
               vod_downloader._provider_active):
         d.clear()
-    vod_probe._language_provider_blocks.clear()
     vod_probe._language_claimed_sources.clear()
     vod_probe._language_trickle_day = ""
     vod_probe._language_trickle_count = 0
@@ -203,38 +201,6 @@ def test_language_trickle_runs_up_to_source_limit_per_cycle(monkeypatch):
     assert len(result["results"]) == 15
 
 
-def test_language_trickle_skips_providers_paused_for_today(monkeypatch):
-    today = time.strftime("%Y-%m-%d", time.localtime())
-    calls = []
-    targets = [{"kind": "movie", "source_id": 200, "provider_id": 2}]
-
-    def next_targets(limit, distinct, excluded):
-        calls.append((limit, distinct, excluded))
-        return targets[:limit]
-
-    async def fake_probe(kind, source_id, force=False, spacing=None):
-        return {
-            "source_id": source_id, "mismatch": False, "status": "observed",
-            "configured_language": "EN", "observed_languages": ["EN"], "error": None,
-        }
-
-    monkeypatch.setattr(vod_probe.vod_db, "next_language_probe_targets", next_targets)
-    monkeypatch.setattr(vod_probe.vod_db, "record_language_probe_run", lambda *args, **kwargs: None)
-    monkeypatch.setattr(vod_probe, "probe_language_source", fake_probe)
-    monkeypatch.setattr(vod_probe, "_language_provider_blocks", {1: f"{today}:HTTP 404"})
-    monkeypatch.setattr(vod_probe, "_language_trickle_day", "")
-    monkeypatch.setattr(vod_probe, "_language_trickle_count", 0)
-    monkeypatch.setattr(config, "get_language_trickle_settings", lambda: {
-        "language_trickle_enabled": True, "language_trickle_probes_per_cycle": 15,
-        "language_trickle_interval_seconds": 120, "language_trickle_daily_limit": None,
-    })
-
-    result = asyncio.run(vod_probe.run_language_trickle_cycle())
-
-    assert calls == [(15, False, {1})]
-    assert result["results"] == [{"status": "checked", "source_id": 200, "message": None}]
-
-
 def test_language_trickle_settings_allow_unlimited_daily_budget(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "config.json")
     config.save_language_trickle_settings(15, 180, None)
@@ -289,7 +255,7 @@ def test_language_mismatch_report_approval_updates_tag_and_archives_excluded_sou
     assert not db.list_language_mismatches()["results"]
 
 
-def test_language_provider_error_pauses_provider_until_next_day(monkeypatch):
+def test_language_provider_error_does_not_pause_provider(monkeypatch):
     provider = {"id": 901, "name": "limited-provider", "provider_type": "xc"}
     source = {"provider_id": 901, "provider_stream_id": "x", "container_extension": "mp4"}
     async def fail_fetch(*args, **kwargs):
@@ -305,7 +271,7 @@ def test_language_provider_error_pauses_provider_until_next_day(monkeypatch):
 
     with pytest.raises(vod_probe.ProbeRefused, match="HTTP 429"):
         asyncio.run(vod_probe._probe_remote_language("movie", source, provider, spacing=0))
-    with pytest.raises(vod_probe.ProbeRefused, match="paused"):
+    with pytest.raises(vod_probe.ProbeRefused, match="HTTP 429"):
         asyncio.run(vod_probe._probe_remote_language("movie", source, provider, spacing=0))
 
 

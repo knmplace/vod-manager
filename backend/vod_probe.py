@@ -8,8 +8,8 @@ Providers are protected on every side, because a probe is a real connection to s
   * a probe only starts when the same connection gate downloads and playback use has a free slot
     (never while a download or a viewer holds the provider's connection)
   * a pause between probes on one provider, plus a ceiling per provider per few minutes
-  * a provider that pushes back (403/429/458/509, "max connections") puts the whole provider on the downloader's
-    cooldown, so downloads and further probes both back off
+  * provider errors are recorded per source while the audit continues rotating
+    through other providers; normal connection capacity gates still apply
   * a hard time limit, and a byte cap whatever the server sends
   * a result already on file is returned without touching the provider
 There is deliberately no season or series-wide probe: each episode is its own click, and the limits above apply
@@ -48,8 +48,8 @@ _WINDOW_MAX = 8                       # probes per provider per window
 _GLOBAL_MAX = 2
 
 # Language trickle defaults: experimental observation mode. Provider-level
-# connection gates, one in-flight probe per provider, and circuit breaking still
-# apply; the daily/window values only limit this audit worker.
+# connection gates and one in-flight probe per provider still apply; the
+# daily/window values only limit this audit worker.
 LANGUAGE_TRICKLE_INTERVAL = 60.0
 LANGUAGE_TRICKLE_DAILY_MAX = 500  # legacy default retained for compatibility; runtime setting may be None
 LANGUAGE_GLOBAL_MAX = 15
@@ -62,7 +62,6 @@ _last_end: dict[int, float] = {}
 _recent: dict[int, collections.deque] = {}
 _language_trickle_day = ""
 _language_trickle_count = 0
-_language_provider_blocks: dict[int, str] = {}
 _language_claimed_sources: set[int] = set()
 
 
@@ -359,12 +358,6 @@ async def _probe_remote_language(kind: str, src: dict, provider: dict, spacing: 
     """Read only the bounded stream header and inspect embedded audio tags."""
     global _running_total
     pid = provider["id"]
-    current_day = time.strftime("%Y-%m-%d", time.localtime())
-    blocked = _language_provider_blocks.get(pid)
-    if blocked and blocked.startswith(current_day + ":"):
-        raise ProbeRefused(f"{provider['name']} is paused for this language run: {blocked.split(':', 1)[1]}", 900, "provider_blocked")
-    if blocked:
-        _language_provider_blocks.pop(pid, None)
     if _running_total >= LANGUAGE_GLOBAL_MAX:
         raise ProbeRefused("Other checks are running. Try again in a moment.", 10, "busy")
     _gate(pid, provider["name"], spacing, LANGUAGE_WINDOW_SECONDS, LANGUAGE_WINDOW_MAX)
@@ -386,20 +379,10 @@ async def _probe_remote_language(kind: str, src: dict, provider: dict, spacing: 
             fh.write(data)
         return await _ffprobe_audio_languages(tmp)
     except ProbeRefused as exc:
-        if exc.kind in ("pushback", "capacity", "provider_error", "other"):
-            _language_provider_blocks[pid] = f"{current_day}:{exc}"
-            logger.warning("[language-probe] pausing provider %s for the rest of %s: %s",
-                           provider["name"], current_day, exc)
         raise
     except asyncio.TimeoutError:
-        _language_provider_blocks[pid] = f"{current_day}:timeout"
-        logger.warning("[language-probe] pausing provider %s for the rest of %s after timeout",
-                       provider["name"], current_day)
         raise ProbeRefused(f"{provider['name']} took too long to answer. Try again later.", 60)
     except (httpx.HTTPError, OSError) as exc:
-        _language_provider_blocks[pid] = f"{current_day}:connection error"
-        logger.warning("[language-probe] pausing provider %s for the rest of %s after connection error: %s",
-                       provider["name"], current_day, vod_downloader._safe(exc) or type(exc).__name__)
         raise ProbeRefused(f"Couldn't reach {provider['name']}: {vod_downloader._safe(exc) or type(exc).__name__}.", 30)
     finally:
         _in_flight.discard(pid)
@@ -507,28 +490,16 @@ def language_trickle_status() -> dict:
         "probes_per_cycle": settings["language_trickle_probes_per_cycle"],
         "language_window_max": LANGUAGE_WINDOW_MAX,
         "language_window_seconds": LANGUAGE_WINDOW_SECONDS,
-        "blocked_providers": len(_language_provider_blocks),
     }
 
 
 async def run_language_trickle_cycle() -> dict:
     """Run one bounded manual/scheduled cycle without bypassing any gates."""
     settings = config.get_language_trickle_settings()
-    day = time.strftime("%Y-%m-%d", time.localtime())
-    blocked_provider_ids = {
-        pid for pid, reason in _language_provider_blocks.items()
-        if reason.startswith(day + ":")
-    }
-    if blocked_provider_ids:
-        targets = await asyncio.to_thread(
-            vod_db.next_language_probe_targets,
-            settings["language_trickle_probes_per_cycle"], False, blocked_provider_ids,
-        )
-    else:
-        targets = await asyncio.to_thread(
-            vod_db.next_language_probe_targets,
-            settings["language_trickle_probes_per_cycle"], False,
-        )
+    targets = await asyncio.to_thread(
+        vod_db.next_language_probe_targets,
+        settings["language_trickle_probes_per_cycle"], False,
+    )
     provider_queues: dict[int, list[dict]] = {}
     for target in targets:
         provider_queues.setdefault(target["provider_id"], []).append(target)
@@ -544,11 +515,6 @@ async def run_language_trickle_cycle() -> dict:
         for target in queue:
             result = await language_trickle_once(target)
             results.append(result)
-            # A provider pushback, timeout, or capacity error pauses that
-            # provider for the day; do not immediately hammer its remaining
-            # queued sources in the same cycle.
-            if result.get("status") in ("deferred", "error"):
-                break
         return results
 
     try:
