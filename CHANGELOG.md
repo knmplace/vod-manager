@@ -59,6 +59,9 @@ instead of opening a duplicate request.
   are being audited.
 - Widened the movie/show source preview card so provider, audio, and source
   actions remain readable instead of being compressed into a narrow modal.
+- Removed the daily-history table from the report UI while retaining the
+  underlying audit history for operational reporting. The Pending review card
+  now counts only actionable mismatch rows, not wanted-only probe results.
 - Replaced the fixed daily language-probe budget with saved controls for probes
   per cycle, seconds between cycles, and an optional daily cap. Leaving the cap
   blank means no daily cap; provider gates, one-in-flight-per-provider, and
