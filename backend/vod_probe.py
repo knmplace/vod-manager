@@ -487,17 +487,39 @@ def language_trickle_status() -> dict:
 
 async def run_language_trickle_cycle() -> dict:
     """Run one bounded manual/scheduled cycle without bypassing any gates."""
-    targets = await asyncio.to_thread(vod_db.next_language_probe_targets, LANGUAGE_GLOBAL_MAX)
-    tasks = []
+    targets = await asyncio.to_thread(vod_db.next_language_probe_targets, LANGUAGE_GLOBAL_MAX, False)
+    provider_queues: dict[int, list[dict]] = {}
+    for target in targets:
+        provider_queues.setdefault(target["provider_id"], []).append(target)
     claimed = []
     for target in targets:
         if target["source_id"] in _language_claimed_sources:
             continue
         _language_claimed_sources.add(target["source_id"])
         claimed.append(target["source_id"])
-        tasks.append(asyncio.create_task(language_trickle_once(target)))
+
+    async def run_provider_queue(queue: list[dict]) -> list[dict]:
+        results = []
+        for target in queue:
+            result = await language_trickle_once(target)
+            results.append(result)
+            # A provider pushback, timeout, or capacity error pauses that
+            # provider for the day; do not immediately hammer its remaining
+            # queued sources in the same cycle.
+            if result.get("status") in ("deferred", "error"):
+                break
+        return results
+
     try:
-        results = await asyncio.gather(*tasks, return_exceptions=True) if tasks else []
+        queues = [
+            [target for target in queue if target["source_id"] in claimed]
+            for queue in provider_queues.values()
+        ]
+        batches = await asyncio.gather(
+            *(run_provider_queue(queue) for queue in queues if queue),
+            return_exceptions=True,
+        ) if queues else []
+        results = [result for batch in batches for result in (batch if isinstance(batch, list) else [batch])]
         return {"targets": len(targets), "results": [
             {"status": r.get("status"), "source_id": r.get("result", {}).get("source_id"), "message": r.get("message")}
             if isinstance(r, dict) else {"status": "error", "message": str(r)} for r in results

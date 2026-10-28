@@ -86,17 +86,19 @@ instead of opening a duplicate request.
 - Added the Language Mismatch Report under System with individual and bulk
   decisions. Approved results outside the wanted-language policy update source
   metadata and archive the parent movie/show; rejected results are not rechecked.
-- Added experimental up-to-15-provider concurrency, one probe per provider,
-  a 500-per-day audit budget, and an uncapped 15-minute provider window for
-  observation. Provider pause/backoff after 429, connection-limit, timeout, or
-  provider errors remains active and is now logged explicitly.
+- Added experimental up-to-15-source probes per cycle, distributed across
+  providers when possible and serialized within each provider, plus a 500-per-
+  day audit budget and an uncapped 15-minute provider window for observation.
+  Provider pause/backoff after 429, connection-limit, timeout, or provider
+  errors remains active and is now logged explicitly.
 - Validation: 25 focused backend tests, Python compilation, frontend build,
   and git diff check passed.
 
 ## 2026-10-28 (Language audit observation-rate increase)
 
-- Increased the language-audit trickle from 3 to 15 concurrent provider probes
-  and from 100 to 500 checks per day.
+- Increased the language-audit trickle from 3 to 15 source probes per cycle and
+  from 100 to 500 checks per day. Sources are distributed across providers when
+  possible and serialized within each provider.
 - Removed the separate 10-per-provider/15-minute language cap for this
   observation period. Existing provider connection gates, one in-flight probe
   per provider, and circuit-breaker pauses remain enforced.

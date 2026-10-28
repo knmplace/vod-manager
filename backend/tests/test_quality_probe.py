@@ -184,6 +184,24 @@ def test_language_trickle_uses_experimental_limits_and_saved_playback_policy(db,
     assert db.list_language_mismatches()["enabled_languages"] == ["ES", "IT"]
 
 
+def test_language_trickle_runs_up_to_source_limit_per_cycle(monkeypatch):
+    targets = [
+        {"kind": "movie", "source_id": i, "provider_id": 1 if i < 8 else 2}
+        for i in range(15)
+    ]
+
+    async def fake_probe(kind, source_id, force=False, spacing=None):
+        return {"source_id": source_id, "mismatch": False}
+
+    monkeypatch.setattr(vod_probe.vod_db, "next_language_probe_targets", lambda limit, distinct: targets[:limit])
+    monkeypatch.setattr(vod_probe, "probe_language_source", fake_probe)
+
+    result = asyncio.run(vod_probe.run_language_trickle_cycle())
+
+    assert result["targets"] == 15
+    assert len(result["results"]) == 15
+
+
 def test_language_mismatch_report_approval_updates_tag_and_archives_excluded_source(db, tmp_path):
     pid = db.upsert_provider("report-language", "", "", "", provider_type="library")
     mid = db.upsert_movie("Report Hindi Movie", 2026)

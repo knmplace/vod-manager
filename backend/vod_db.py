@@ -8392,12 +8392,18 @@ def list_language_mismatches(limit: int = 1000) -> dict:
 
 def next_language_probe_target() -> dict | None:
     """Return one unreviewed, unprobed source that is currently export-relevant."""
-    targets = next_language_probe_targets(1)
+    targets = next_language_probe_targets(1, distinct_providers=True)
     return targets[0] if targets else None
 
 
-def next_language_probe_targets(limit: int = 3) -> list[dict]:
-    """Return up to ``limit`` pending sources from distinct providers."""
+def next_language_probe_targets(limit: int = 3, distinct_providers: bool = True) -> list[dict]:
+    """Return up to ``limit`` pending sources.
+
+    The normal single-target path can request one source per provider. The
+    trickle worker requests a larger batch and then runs each provider's queue
+    serially, so one provider is never probed concurrently while the cycle can
+    still make progress on up to the global source limit.
+    """
     conn = _connect()
     try:
         rows = conn.execute("""
@@ -8415,16 +8421,41 @@ def next_language_probe_targets(limit: int = 3) -> list[dict]:
               AND EXISTS (SELECT 1 FROM series_category_placements cp WHERE cp.series_id=s.id)
             ORDER BY source_id LIMIT 200
         """).fetchall()
-        chosen = []
-        providers = set()
-        for row in rows:
-            item = dict(row)
-            if item["provider_id"] in providers:
-                continue
-            providers.add(item["provider_id"])
-            chosen.append(item)
-            if len(chosen) >= max(1, int(limit)):
-                break
+        max_items = max(1, int(limit))
+        if distinct_providers:
+            chosen = []
+            providers = set()
+            for row in rows:
+                item = dict(row)
+                if item["provider_id"] in providers:
+                    continue
+                providers.add(item["provider_id"])
+                chosen.append(item)
+                if len(chosen) >= max_items:
+                    break
+        else:
+            # Round-robin provider buckets so a large catalog from one
+            # provider does not starve sources from the others.
+            buckets: dict[int, list[dict]] = {}
+            provider_order: list[int] = []
+            for row in rows:
+                item = dict(row)
+                pid = item["provider_id"]
+                if pid not in buckets:
+                    buckets[pid] = []
+                    provider_order.append(pid)
+                buckets[pid].append(item)
+            chosen = []
+            while len(chosen) < max_items:
+                added = False
+                for pid in provider_order:
+                    if buckets[pid]:
+                        chosen.append(buckets[pid].pop(0))
+                        added = True
+                        if len(chosen) >= max_items:
+                            break
+                if not added:
+                    break
         return chosen
     finally:
         conn.close()
