@@ -50,6 +50,12 @@ instead of opening a duplicate request.
   and the frontend production build and `git diff --check` pass again.
 - Clicking a candidate poster now sends its poster URL, TMDB ID, title, and
   year to the resolver; the selection is persisted, not merely previewed.
+- Follow-up UX validation: before this fix a successful selection saved in the
+  backend but gave no visible confirmation and could leave the queue stale;
+  after it, successful saves show a confirmation notification and refresh the
+  popup/page queue, artwork counts, and library results. Regression result:
+  19 focused backend tests passed in this run; frontend production build and
+  `git diff --check` passed.
 - 🔼 These artwork-queue and adult-review changes are ready to send upstream
   in a focused pull request after fork deployment validation.
 

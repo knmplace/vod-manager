@@ -2154,7 +2154,10 @@ function MissingArtworkRow({ contentType, item, qc, selected, onToggleSelect }: 
     mutationFn: (body: { poster_url: string; tmdb_id?: string; name?: string; year?: number }) =>
       api.post(`/vod/missing-artwork/${contentType}/${item.id}/resolve/`, body),
     onSuccess: () => {
+      notify(`Artwork saved for “${item.name}”. The poster${item.tmdb_id ? '' : ' and TMDB identity'} was applied; the queue is refreshing.`)
       qc.invalidateQueries({ queryKey: ['vod-missing-artwork'] })
+      qc.invalidateQueries({ queryKey: ['vod-missing-artwork-page'] })
+      qc.invalidateQueries({ queryKey: ['vod-missing-artwork-counts'] })
       qc.invalidateQueries({ queryKey: contentType === 'movie' ? ['vod-movies'] : ['vod-series'] })
     },
     onError: (error: any) => {
