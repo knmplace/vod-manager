@@ -31,6 +31,47 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-28 (Upstream PR preparation — not submitted)
+
+- Prepared two local upstream-based branches without pushing or opening PRs:
+  - `pr/artwork-review-queue` — dedicated artwork review and safe poster matching.
+  - `pr/language-mismatch-audit` — provider-aware language probing and mismatch review.
+- The branches start from upstream `main` at `v0.3.13`; fork-only changelog, Beads,
+  version, deployment, and private-environment changes were excluded.
+- Existing upstream PR #67 remains the TMDB identity-picker and Metadata Review
+  submission; no duplicate PR was created for that work.
+
+### Artwork review branch
+
+- Before: missing-artwork work was limited to the popup, exact matches were not
+  consistently applied automatically, and a saved poster could leave the queue
+  visually stale.
+- After: the dedicated table review can use local-first TMDB suggestions, safely
+  apply exact title/year/identity matches, persist the selected poster URL and
+  identity, show save confirmation, and refresh the queue and counts. Ambiguous
+  results remain user-controlled.
+- Expected result: fewer manual reviews for deterministic matches while uncertain
+  matches remain protected from automatic changes.
+- Validation: 13 artwork/poster regression tests passed, Python compilation
+  passed, frontend production build passed, and `git diff --check` passed.
+
+### Language mismatch branch
+
+- Before: configured source language could be trusted even when the embedded file
+  audio tags disagreed, with no durable review decision or bounded background audit.
+- After: bounded provider-aware probes record observed tags and method, expose a
+  System > Language Mismatch Report, support approve/keep-configured decisions,
+  bulk actions, notification navigation, manual one-cycle execution, provider
+  pacing/backoff, and no-repeat decision history.
+- Expected result: wanted-language policy is checked against the actual embedded
+  audio metadata without opening a normal playable session; approved safe changes
+  update metadata or archive out-of-policy content, while rejected items remain
+  unchanged and are not rechecked.
+- Validation: the initial failing upstream-base test exposed a fork-only archive
+  column dependency; that was removed from the prepared branch. After correction,
+  25 focused backend tests passed, Python compilation passed, frontend production
+  build passed, and `git diff --check` passed.
+
 ## 2026-10-28 (Language audit and provider-aware probe)
 
 - Added provider-aware language auditing with bounded embedded-audio probes,
