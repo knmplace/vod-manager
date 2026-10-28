@@ -8438,7 +8438,7 @@ def language_audit_stats(history_limit: int = 31) -> dict:
                    SUM(CASE WHEN r.mismatch=1 AND r.wanted_match=0 THEN 1 ELSE 0 END) AS outside_wanted,
                    SUM(CASE WHEN r.wanted_match=1 THEN 1 ELSE 0 END) AS wanted_only,
                    SUM(CASE WHEN r.status IN ('error', 'deferred') THEN 1 ELSE 0 END) AS errors
-            FROM language_probe_runs r LEFT JOIN providers p ON p.id=r.provider_id
+            FROM language_probe_runs r JOIN providers p ON p.id=r.provider_id AND p.is_active=1
             GROUP BY provider, type ORDER BY provider, type
         """).fetchall()
         return {

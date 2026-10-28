@@ -232,6 +232,17 @@ def test_language_audit_stats_keep_daily_probe_history(db):
     assert stats["history"][0]["not_needed"] == 1
 
 
+def test_language_audit_provider_history_excludes_inactive_providers(db):
+    active = db.upsert_provider("active-language-provider", "", "", "", provider_type="library")
+    inactive = db.upsert_provider("inactive-language-provider", "", "", "", provider_type="library")
+    db.set_provider_active(inactive, False)
+    db.record_language_probe_run("movie", 21, active, "observed", "EN", ["EN"], ["EN"], False, True)
+    db.record_language_probe_run("movie", 22, inactive, "observed", "EN", ["EN"], ["EN"], False, True)
+    providers = {row["provider"] for row in db.language_audit_stats()["provider_history"]}
+    assert "active-language-provider" in providers
+    assert "inactive-language-provider" not in providers
+
+
 def test_language_mismatch_report_approval_updates_tag_and_archives_excluded_source(db, tmp_path):
     pid = db.upsert_provider("report-language", "", "", "", provider_type="library")
     mid = db.upsert_movie("Report Hindi Movie", 2026)

@@ -31,6 +31,10 @@ These submissions are focused upstream changes. Fork-only release notes remain
 below; PR branches contain no provider identities, private URLs, local network
 addresses, credentials, usernames, or user-specific deployment information.
 
+Provider breakdowns in the Language Mismatch Report use only active providers
+currently configured in the Providers list; inactive or stale historical
+provider records are omitted.
+
 ### Upstream PR hygiene
 
 Upstream submissions are prepared from a clean branch based on the current
