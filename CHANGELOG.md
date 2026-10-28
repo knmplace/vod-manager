@@ -34,7 +34,7 @@ instead of opening a duplicate request.
 ## 2026-10-28 (Upstream PR preparation — not submitted)
 
 - Prepared two local upstream-based branches without pushing or opening PRs:
-  - `pr/artwork-review-queue` at `59c9198` — dedicated artwork review and safe poster matching.
+  - `pr/artwork-review-queue` at `f7fc694` — dedicated artwork review, safe poster matching, and close-to-cancel behavior.
   - `pr/language-mismatch-audit` at `fa6f5e1` — provider-aware language probing and mismatch review.
 - The branches start from upstream `main` at `v0.3.13`; fork-only changelog, Beads,
   version, deployment, and private-environment changes were excluded.
@@ -49,10 +49,11 @@ instead of opening a duplicate request.
 - After: the dedicated table review can use local-first TMDB suggestions, safely
   apply exact title/year/identity matches, persist the selected poster URL and
   identity, show save confirmation, and refresh the queue and counts. Ambiguous
-  results remain user-controlled.
+  results remain user-controlled. Closing the popup with X now cancels an active
+  bulk-AI artwork job before the next item is processed.
 - Expected result: fewer manual reviews for deterministic matches while uncertain
   matches remain protected from automatic changes.
-- Validation: 13 artwork/poster regression tests passed, Python compilation
+- Validation: 21 focused artwork/bulk-review tests passed, Python compilation
   passed, frontend production build passed, and `git diff --check` passed.
 
 ### Language mismatch branch
@@ -85,7 +86,6 @@ instead of opening a duplicate request.
 - Added the Language Mismatch Report under System with individual and bulk
   decisions. Approved results outside the wanted-language policy update source
   metadata and archive the parent movie/show; rejected results are not rechecked.
-- Added up to three-provider concurrency, one probe per provider, 60-second
 - Added experimental up-to-15-provider concurrency, one probe per provider,
   a 500-per-day audit budget, and an uncapped 15-minute provider window for
   observation. Provider pause/backoff after 429, connection-limit, timeout, or
