@@ -31,15 +31,20 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
-## 2026-10-28 (Upstream PR preparation — not submitted)
+## 2026-10-28 (Upstream PRs submitted)
 
-- Prepared two local upstream-based branches without pushing or opening PRs:
-  - `pr/artwork-review-queue` at `f7fc694` — dedicated artwork review, safe poster matching, and close-to-cancel behavior.
-  - `pr/language-mismatch-audit` at `fa6f5e1` — provider-aware language probing and mismatch review.
+- Submitted two focused upstream-based PRs:
+  - [PR #68](https://github.com/jstevenscl/vod-manager/pull/68), branch
+    `pr/artwork-review-queue` at `f7fc694` — dedicated artwork review, safe
+    poster matching, and close-to-cancel behavior.
+  - [PR #69](https://github.com/jstevenscl/vod-manager/pull/69), branch
+    `pr/language-mismatch-audit` at `dc11940` — provider-aware language
+    probing, 15-source cycles, and mismatch review.
 - The branches start from upstream `main` at `v0.3.13`; fork-only changelog, Beads,
   version, deployment, and private-environment changes were excluded.
 - Existing upstream PR #67 remains the TMDB identity-picker and Metadata Review
-  submission; no duplicate PR was created for that work.
+  submission; no duplicate PR was created for that work. PRs #68 and #69 are
+  independent of #67 and each other.
 
 ### Artwork review branch
 
@@ -69,9 +74,9 @@ instead of opening a duplicate request.
   update metadata or archive out-of-policy content, while rejected items remain
   unchanged and are not rechecked.
 - Validation: the initial failing upstream-base test exposed a fork-only archive
-  column dependency; that was removed from the prepared branch. After correction,
-  25 focused backend tests passed, Python compilation passed, frontend production
-  build passed, and `git diff --check` passed.
+  column dependency; that was removed from the submitted branch. After the
+  15-source cycle correction, 27 focused backend tests passed, Python compilation
+  passed, frontend production build passed, and `git diff --check` passed.
 
 ## 2026-10-28 (Language audit and provider-aware probe)
 
@@ -91,7 +96,7 @@ instead of opening a duplicate request.
   day audit budget and an uncapped 15-minute provider window for observation.
   Provider pause/backoff after 429, connection-limit, timeout, or provider
   errors remains active and is now logged explicitly.
-- Validation: 25 focused backend tests, Python compilation, frontend build,
+- Validation: 27 focused backend tests, Python compilation, frontend build,
   and git diff check passed.
 
 ## 2026-10-28 (Language audit observation-rate increase)
@@ -107,6 +112,9 @@ instead of opening a duplicate request.
   remains the existing EN/ES fallback.
 - Validation: 26 focused backend tests passed, Python compilation, frontend
   production build, and `git diff --check` passed.
+- Follow-up monitoring: inspect the language-mismatch application logs after
+  deployment for provider 429s, connection-limit responses, timeouts, provider
+  pauses, or other backoff/error signals under the higher observation rate.
 
 ## 2026-10-28 (Missing Artwork modal cancellation)
 
