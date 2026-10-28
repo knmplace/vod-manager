@@ -8452,7 +8452,8 @@ def list_language_mismatches(limit: int = 1000) -> dict:
         rows = []
         movie_rows = conn.execute("""
             SELECT 'movie' AS kind, ms.id AS source_id, m.id AS item_id,
-                   m.name AS title, m.year, m.tmdb_id, ms.language AS configured_language,
+                   m.name AS title, m.year, m.tmdb_id, ms.container_extension,
+                   ms.language AS configured_language,
                    ms.language_probe_languages, ms.language_probe_status,
                    ms.language_probe_confidence, ms.language_probed_at,
                    p.name AS provider_name
@@ -8465,7 +8466,8 @@ def list_language_mismatches(limit: int = 1000) -> dict:
         """, (limit,)).fetchall()
         series_rows = conn.execute("""
             SELECT 'episode' AS kind, es.id AS source_id, s.id AS item_id,
-                   s.name AS title, s.year, s.tmdb_id, es.language AS configured_language,
+                   s.name AS title, s.year, s.tmdb_id, es.container_extension,
+                   es.language AS configured_language,
                    es.language_probe_languages, es.language_probe_status,
                    es.language_probe_confidence, es.language_probed_at,
                    p.name AS provider_name, e.season_number, e.episode_number,

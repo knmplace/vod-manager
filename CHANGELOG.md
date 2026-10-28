@@ -62,6 +62,8 @@ instead of opening a duplicate request.
 - Removed the daily-history table from the report UI while retaining the
   underlying audit history for operational reporting. The Pending review card
   now counts only actionable mismatch rows, not wanted-only probe results.
+- Added a play button beside each mismatch title so the user can listen to the
+  actual movie source or show episode before approving or rejecting the result.
 - Replaced the fixed daily language-probe budget with saved controls for probes
   per cycle, seconds between cycles, and an optional daily cap. Leaving the cap
   blank means no daily cap; provider gates, one-in-flight-per-provider, and

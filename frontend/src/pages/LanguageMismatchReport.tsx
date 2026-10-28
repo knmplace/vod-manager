@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, Languages, Loader2, RefreshCw, X } from 'lucide-react'
 import api from '@/lib/api'
 import { notify } from '@/lib/confirm'
+import { buildHlsPreviewSourceUrl, buildPreviewSourceUrl, buildTranscodedPreviewSourceUrl, PlayButton, type XcCredentials } from './VodManager'
 
 type Mismatch = {
   kind: 'movie' | 'episode'
@@ -11,6 +12,7 @@ type Mismatch = {
   title: string
   year: number | null
   tmdb_id: string | null
+  container_extension: string | null
   provider_name: string
   configured_language: string | null
   observed_languages: string[]
@@ -47,6 +49,7 @@ export default function LanguageMismatchReport() {
     refetchInterval: 30_000,
   })
   const settings = useQuery({ queryKey: ['language-trickle-settings'], queryFn: () => api.get('/vod/language-trickle/settings/').then((r) => r.data) })
+  const credentials = useQuery<XcCredentials>({ queryKey: ['vod-xc-credentials'], queryFn: () => api.get('/vod/xc-credentials/').then((r) => r.data), retry: false })
   const [form, setForm] = useState({ probes_per_cycle: 15, interval_seconds: 120, daily_limit: '' })
   useEffect(() => {
     if (settings.data) setForm({ probes_per_cycle: settings.data.language_trickle_probes_per_cycle, interval_seconds: settings.data.language_trickle_interval_seconds, daily_limit: settings.data.language_trickle_daily_limit == null ? '' : String(settings.data.language_trickle_daily_limit) })
@@ -153,7 +156,7 @@ export default function LanguageMismatchReport() {
               const id = key(row); const disabled = !row.safe_to_apply
               return <tr key={id} className="border-t border-border/60 align-top">
                 <td className="p-2"><input type="checkbox" disabled={disabled} checked={selected.has(id)} onChange={(e) => setSelected((old) => { const n = new Set(old); e.target.checked ? n.add(id) : n.delete(id); return n })} /></td>
-              <td className="p-2"><div className="font-medium"><span className="mr-1 rounded border border-border px-1 text-[10px]">{row.kind === 'episode' ? 'S' : 'M'}</span>{row.title} {row.year ? `(${row.year})` : ''}</div><div className="text-muted-foreground">{row.kind === 'episode' ? `S${row.season_number}E${row.episode_number} · ${row.episode_name ?? ''}` : 'Movie'}{row.tmdb_id ? ` · TMDB ${row.tmdb_id}` : ''}</div></td>
+                <td className="p-2"><div className="font-medium flex items-center gap-1"><span className="mr-1 rounded border border-border px-1 text-[10px]">{row.kind === 'episode' ? 'S' : 'M'}</span>{row.title} {row.year ? `(${row.year})` : ''}<PlayButton url={buildPreviewSourceUrl(row.kind === 'episode' ? 'series' : 'movie', row.source_id, row.container_extension || 'mp4', credentials.data)} transcodedUrl={buildTranscodedPreviewSourceUrl(row.kind === 'episode' ? 'series' : 'movie', row.source_id, credentials.data)} hlsUrl={buildHlsPreviewSourceUrl(row.kind === 'episode' ? 'series' : 'movie', row.source_id, credentials.data)} title={`${row.title}${row.year ? ` (${row.year})` : ''}${row.kind === 'episode' ? ` S${row.season_number}E${row.episode_number}` : ''}`} /></div><div className="text-muted-foreground">{row.kind === 'episode' ? `S${row.season_number}E${row.episode_number} · ${row.episode_name ?? ''}` : 'Movie'}{row.tmdb_id ? ` · TMDB ${row.tmdb_id}` : ''}</div></td>
                 <td className="p-2">{row.provider_name}</td>
                 <td className="p-2">{languageLabel(row.configured_language)}</td>
                 <td className="p-2">{row.observed_languages.map(languageLabel).join(', ')}</td>

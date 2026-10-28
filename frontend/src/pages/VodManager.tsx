@@ -297,7 +297,7 @@ interface DispatcharrAccountProfile {
   max_streams?: number
 }
 
-interface XcCredentials { username: string; password: string }
+export interface XcCredentials { username: string; password: string }
 
 interface LockoutSettings {
   lockout_max_attempts: number
@@ -860,7 +860,7 @@ function SeasonBlock({ label, defaultOpen, children }: { label: string; defaultO
 // Forces one specific provider's copy — belongs on each Sources row (testing
 // a particular provider's file), not on a category placement, which plays
 // identically regardless of which category you look at it from.
-function buildPreviewSourceUrl(kind: 'movie' | 'series', sourceId: number, ext: string, creds?: XcCredentials) {
+export function buildPreviewSourceUrl(kind: 'movie' | 'series', sourceId: number, ext: string, creds?: XcCredentials) {
   if (!creds) return null
   const path = kind === 'movie' ? 'movie-source' : 'series-source'
   return `${window.location.origin}/preview/${path}/${creds.username}/${creds.password}/${sourceId}.${ext}`
@@ -872,7 +872,7 @@ function buildPreviewSourceUrl(kind: 'movie' | 'series', sourceId: number, ext: 
 // _transcode_vod_stream) — startSecs instead starts a fresh stream partway
 // into the file (ffmpeg -ss before -i, a fast input-side seek), so jumping
 // past an intro to verify a title doesn't mean watching the whole thing.
-function buildTranscodedPreviewSourceUrl(kind: 'movie' | 'series', sourceId: number, creds?: XcCredentials, startSecs = 0) {
+export function buildTranscodedPreviewSourceUrl(kind: 'movie' | 'series', sourceId: number, creds?: XcCredentials, startSecs = 0) {
   if (!creds) return null
   const path = kind === 'movie' ? 'movie-source-transcoded' : 'series-source-transcoded'
   const url = `${window.location.origin}/preview/${path}/${creds.username}/${creds.password}/${sourceId}.mp4`
@@ -886,7 +886,7 @@ function buildTranscodedPreviewSourceUrl(kind: 'movie' | 'series', sourceId: num
 // in-progress live/event HLS playlist). Slower to start than the plain
 // transcode above (ffmpeg has to produce a first segment before anything
 // plays), so this is offered as a separate choice, not a replacement.
-function buildHlsPreviewSourceUrl(kind: 'movie' | 'series', sourceId: number, creds?: XcCredentials) {
+export function buildHlsPreviewSourceUrl(kind: 'movie' | 'series', sourceId: number, creds?: XcCredentials) {
   if (!creds) return null
   const path = kind === 'movie' ? 'movie-source-hls' : 'series-source-hls'
   return `${window.location.origin}/preview/${path}/${creds.username}/${creds.password}/${sourceId}/index.m3u8`
@@ -962,7 +962,7 @@ function CopyUrlButton({ url }: { url: string | null }) {
   )
 }
 
-function PlayButton({ url, transcodedUrl, hlsUrl, title }: { url: string | null; transcodedUrl?: string | null; hlsUrl?: string | null; title: string }) {
+export function PlayButton({ url, transcodedUrl, hlsUrl, title }: { url: string | null; transcodedUrl?: string | null; hlsUrl?: string | null; title: string }) {
   const [open, setOpen] = useState(false)
   if (!url) return null
   return (
