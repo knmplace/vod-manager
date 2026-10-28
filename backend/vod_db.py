@@ -1520,8 +1520,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # that don't exist yet on a brand-new DB at that earlier point.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_movies_metadata_review_flag ON movies(id) WHERE review_excluded=0 AND needs_year_review=1")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_movies_metadata_review_missing ON movies(id) WHERE review_excluded=0 AND tmdb_id IS NULL AND year IS NULL")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_movies_metadata_review_no_tmdb ON movies(id) WHERE review_excluded=0 AND tmdb_id IS NULL")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_series_metadata_review_flag ON series(id) WHERE review_excluded=0 AND needs_year_review=1")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_series_metadata_review_missing ON series(id) WHERE review_excluded=0 AND tmdb_id IS NULL AND year IS NULL")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_series_metadata_review_no_tmdb ON series(id) WHERE review_excluded=0 AND tmdb_id IS NULL")
     # KNM: 2026-10-14 -- heal movies enriched before _release_year_fields
     # existed: held, yearless, but TMDB already gave a release date. A no-op
     # once caught up.
@@ -12352,12 +12354,22 @@ def _metadata_review_sql(table: str) -> str:
     # stealing the flagged branch (a tmdb_id=NULL lookup matches every
     # un-enriched row) away from the small partial review index; the missing
     # branch needs the literal term for its partial index, so it's pinned.
+    # KNM: 2026-10-28 -- every active card with no usable TMDB id is actionable,
+    # even when the provider supplied a year. Keep the narrower missing-year
+    # branch for its existing index-plan coverage, then add the broader no-ID
+    # branch for year-bearing cards.
     return f"""SELECT * FROM (
                 SELECT * FROM {table} WHERE review_excluded=0 AND needs_year_review=1
                   AND (+tmdb_id IS NULL OR (year IS NULL AND {enriched_col} IS NOT NULL))
                 UNION
                 SELECT * FROM {table} INDEXED BY idx_{table}_metadata_review_missing
                   WHERE review_excluded=0 AND tmdb_id IS NULL AND year IS NULL
+                UNION
+                SELECT * FROM {table} INDEXED BY idx_{table}_metadata_review_no_tmdb
+                  WHERE review_excluded=0 AND tmdb_id IS NULL AND year IS NOT NULL
+                UNION
+                SELECT * FROM {table}
+                  WHERE review_excluded=0 AND tmdb_id IS NOT NULL AND TRIM(tmdb_id)=''
                 UNION
                 SELECT * FROM {table} WHERE review_excluded=0 AND tmdb_id IS NULL
                   AND id IN ({_ambiguous_auto_match_ids(table)})

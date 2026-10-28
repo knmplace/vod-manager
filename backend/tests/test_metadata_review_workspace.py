@@ -21,7 +21,7 @@ def test_actionable_gap_without_year_review_flag_is_included(db):
     assert "No Identity At All" in names
 
 
-def test_row_with_year_or_tmdb_id_is_excluded(db):
+def test_row_with_year_but_no_tmdb_id_is_included(db):
     provider_id = db.upsert_provider("XC-Test", "http://example.com", "user", "pass")
     db.bulk_import_movies(provider_id, [
         {"name": "Has A Year", "year": 2020, "provider_stream_id": "1", "container_extension": "mkv"},
@@ -29,7 +29,7 @@ def test_row_with_year_or_tmdb_id_is_excluded(db):
 
     review = db.list_metadata_review("movie")
     names = {m["name"] for m in review["movies"]}
-    assert "Has A Year" not in names
+    assert "Has A Year" in names
 
 
 def test_archived_row_is_excluded(db):

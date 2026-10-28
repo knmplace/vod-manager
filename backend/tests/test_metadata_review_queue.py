@@ -30,8 +30,9 @@ def test_metadata_review_only_keeps_missing_tmdb_identity(db):
     queue = db.list_metadata_review()
 
     # A TMDB-backed row with only a missing/ambiguous year is not an identity
-    # review item. It is eligible for the TMDB enrichment/merge path instead.
-    assert {row["name"] for row in queue["movies"]} == {"No Identity"}
+    # review item. A no-ID row is actionable even when the provider supplied a
+    # year, because the same TMDB picker can resolve both fields.
+    assert {row["name"] for row in queue["movies"]} == {"No Identity", "No TMDB"}
     assert queue["series"] == []
 
 

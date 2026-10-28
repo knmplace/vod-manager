@@ -19,7 +19,7 @@ def test_metadata_review_rows(db):
 
     names = [r["name"] for r in db.list_metadata_review("movie")["movies"]]
 
-    assert names == ["Flagged", "No Year"]
+    assert names == ["Flagged", "Clean", "No Year"]
 
 
 def test_metadata_review_query_uses_partial_indexes(db):

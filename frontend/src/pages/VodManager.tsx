@@ -10003,7 +10003,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
       <SectionCard title="Metadata Review" icon={<Search size={14} />}>
         <p className="text-xs text-muted-foreground">
           {metadataQueue === 'identity'
-            ? 'Fix titles the provider left without both a TMDB identity and release year, plus the held ambiguous-year queue.'
+            ? 'Fix active movies and shows the provider left without a usable TMDB identity, whether or not a year is present, plus the held ambiguous-year queue.'
             : 'Correct stored TMDB IDs that TMDB confirmed no longer exist. Search TMDB, choose the exact match, or clear the invalid ID.'}
         </p>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 pt-1">
@@ -10043,7 +10043,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
           </div>
         </div>
         <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground rounded border border-border/60 bg-muted/20 px-2.5 py-2">
-          <span><strong className="text-foreground">Missing identity:</strong> no usable TMDB ID and no release year, or an ambiguous year held for review. A same-title row elsewhere is only a candidate until the year/identity is safe to copy.</span>
+          <span><strong className="text-foreground">Missing identity:</strong> no usable TMDB ID, with or without a year, or an ambiguous year held for review. A same-title row elsewhere is only a candidate until the year/identity is safe to copy.</span>
           <span><strong className="text-foreground">Incorrect TMDB IDs:</strong> stored IDs TMDB returned as not found.</span>
         </div>
         {metadataQueue === 'identity' && <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer">
