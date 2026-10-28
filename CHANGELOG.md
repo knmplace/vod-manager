@@ -34,8 +34,8 @@ instead of opening a duplicate request.
 ## 2026-10-28 (Upstream PR preparation — not submitted)
 
 - Prepared two local upstream-based branches without pushing or opening PRs:
-  - `pr/artwork-review-queue` — dedicated artwork review and safe poster matching.
-  - `pr/language-mismatch-audit` — provider-aware language probing and mismatch review.
+  - `pr/artwork-review-queue` at `59c9198` — dedicated artwork review and safe poster matching.
+  - `pr/language-mismatch-audit` at `fa6f5e1` — provider-aware language probing and mismatch review.
 - The branches start from upstream `main` at `v0.3.13`; fork-only changelog, Beads,
   version, deployment, and private-environment changes were excluded.
 - Existing upstream PR #67 remains the TMDB identity-picker and Metadata Review
