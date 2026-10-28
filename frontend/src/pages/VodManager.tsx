@@ -457,7 +457,7 @@ interface MissingArtworkItem {
 interface DuplicateGroupItem {
   id: number
   name: string
-  year: number
+  year: number | null
   tmdb_id: string | null
   poster_url: string | null
   source_count: number
@@ -2327,6 +2327,116 @@ function DuplicateInlinePreview({ kind, itemId, xcCredentials }: {
   )
 }
 
+function DuplicateIdentityPicker({ contentType, item }: {
+  contentType: 'movie' | 'series'
+  item: DuplicateGroupItem
+}) {
+  const qc = useQueryClient()
+  const [open, setOpen] = useState(false)
+  const [searchOverride, setSearchOverride] = useState('')
+  const [manualYear, setManualYear] = useState(item.year == null ? '' : String(item.year))
+  const [manualTmdbId, setManualTmdbId] = useState(item.tmdb_id ?? '')
+
+  const suggestionsQuery = useQuery<TmdbSuggestion[]>({
+    queryKey: ['vod-duplicate-identity-suggestions', contentType, item.id, searchOverride],
+    queryFn: () => api.get(`/vod/needs-review/${contentType}/${item.id}/suggestions/`, {
+      params: searchOverride ? { q: searchOverride } : {},
+    }).then((r) => r.data),
+    enabled: open,
+    retry: false,
+  })
+
+  const saveIdentity = useMutation({
+    mutationFn: (value: { year?: number; tmdb_id?: string }) => {
+      if (value.year != null) {
+        return api.post(`/vod/needs-review/${contentType}/${item.id}/resolve/`, value)
+      }
+      return api.post(`/vod/${contentType === 'movie' ? 'movies' : 'series'}/${item.id}/tmdb-id/set/`, {
+        tmdb_id: Number(value.tmdb_id),
+      })
+    },
+    onSuccess: () => {
+      setOpen(false)
+      qc.invalidateQueries({ queryKey: ['vod-duplicates'] })
+      qc.invalidateQueries({ queryKey: ['vod-movies'] })
+      qc.invalidateQueries({ queryKey: ['vod-series'] })
+      qc.invalidateQueries({ queryKey: ['vod-needs-review'] })
+    },
+  })
+
+  const apply = (tmdbId: string, year: number | null) => {
+    const effectiveYear = year ?? (manualYear ? Number(manualYear) : null)
+    saveIdentity.mutate(effectiveYear != null ? { tmdb_id: tmdbId, year: effectiveYear } : { tmdb_id: tmdbId })
+  }
+
+  if (!(!item.tmdb_id || item.year == null) && !open) return null
+
+  return (
+    <div className="mt-1">
+      <button
+        className="text-[11px] text-primary hover:underline"
+        onClick={() => setOpen((value) => !value)}
+      >
+        {open ? 'Hide TMDB/year fixer' : item.tmdb_id ? 'Fix missing year' : 'Find TMDB match'}
+      </button>
+      {open && (
+        <div className="mt-1.5 rounded border border-primary/30 bg-primary/5 p-2 space-y-1.5">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <input
+              autoFocus
+              className={inputCls('flex-1 min-w-36')}
+              placeholder={item.name}
+              value={searchOverride}
+              onChange={(e) => setSearchOverride(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') setSearchOverride((e.target as HTMLInputElement).value.trim()) }}
+            />
+            <span className="text-[11px] text-muted-foreground">local first, then TMDB</span>
+          </div>
+          {suggestionsQuery.isLoading && <p className="text-muted-foreground">Searching TMDB…</p>}
+          {suggestionsQuery.isError && <p className="text-destructive">TMDB search failed — check the API key.</p>}
+          {!!suggestionsQuery.data?.length && (
+            <div className="space-y-1.5">
+              {suggestionsQuery.data.map((suggestion) => (
+                <button
+                  key={suggestion.tmdb_id}
+                  className="flex items-start gap-2 w-full rounded border border-border bg-background px-2 py-1.5 text-left hover:bg-accent disabled:opacity-50"
+                  disabled={saveIdentity.isPending}
+                  onClick={() => apply(suggestion.tmdb_id, suggestion.year)}
+                >
+                  <PosterThumb url={suggestion.poster_url} className="w-8 h-12 object-cover rounded shrink-0" fallback={<div className="w-8 h-12 rounded bg-muted shrink-0" />} />
+                  <span className="min-w-0 space-y-0.5">
+                    <span className="block font-medium">{suggestion.name}{suggestion.year != null && ` (${suggestion.year})`}</span>
+                    <span className="block text-muted-foreground">TMDB #{suggestion.tmdb_id}{suggestion.vote_average != null && ` · ★ ${suggestion.vote_average.toFixed(1)}`}</span>
+                    {suggestion.overview && <span className="block text-muted-foreground line-clamp-2">{suggestion.overview}</span>}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+          {suggestionsQuery.data && suggestionsQuery.data.length === 0 && <p className="text-muted-foreground">No matches found.</p>}
+          <div className="flex items-center gap-1.5 flex-wrap border-t border-border/60 pt-1.5">
+            <span className="text-[11px] text-muted-foreground">or enter manually:</span>
+            <input className={inputCls('w-16')} type="number" placeholder="year" value={manualYear} onChange={(e) => setManualYear(e.target.value)} />
+            <input className={inputCls('w-24')} type="number" placeholder="TMDB ID" value={manualTmdbId} onChange={(e) => setManualTmdbId(e.target.value)} />
+            <Button
+              size="sm"
+              disabled={!manualTmdbId && !manualYear || saveIdentity.isPending}
+              onClick={() => {
+                if (manualTmdbId) apply(manualTmdbId, manualYear ? Number(manualYear) : null)
+                else if (manualYear) saveIdentity.mutate({ year: Number(manualYear) })
+              }}
+            >
+              {saveIdentity.isPending ? <Loader2 size={12} className="animate-spin" /> : 'Save'}
+            </Button>
+          </div>
+          {saveIdentity.isError && <p className="text-destructive">Could not save this identity.</p>}
+          <p className="text-[10px] text-muted-foreground">Selecting a result saves its TMDB ID and year when TMDB provides one. A matching ID may merge this card into the existing catalog card.</p>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function DuplicateGroupRow({ group, contentType, xcCredentials, onMerge, isPending, onIgnore, isIgnorePending, tmdbDetails }: {
   group: DuplicateGroup
   contentType: 'movie' | 'series'
@@ -2580,6 +2690,7 @@ function DuplicateGroupRow({ group, contentType, xcCredentials, onMerge, isPendi
                   />
                 )}
               </span>
+              <DuplicateIdentityPicker contentType={contentType} item={item} />
               {previewIds.has(item.id) && <DuplicateInlinePreview kind={contentType} itemId={item.id} xcCredentials={xcCredentials} />}
             </div>
           </div>
