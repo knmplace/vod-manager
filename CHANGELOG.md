@@ -31,6 +31,19 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-28 (Language audit and provider-aware probe)
+
+- Added provider-aware language auditing with bounded embedded-audio probes,
+  persistent per-source results, and approval/rejection history.
+- Added the Language Mismatch Report under System with individual and bulk
+  decisions. Approved excluded-language mismatches update the source language
+  and archive the parent movie/show; rejected results are not rechecked.
+- Added up to three-provider concurrency, one probe per provider, 60-second
+  same-provider spacing, 10 per provider per 15 minutes, 100 per day, and
+  provider pause after 429/connection-limit/provider errors.
+- Validation: 25 focused backend tests, Python compilation, frontend build,
+  and git diff check passed.
+
 ## 2026-10-28 (Duplicate Finder TMDB picker; upstream v0.3.13 alignment)
 
 - ✅ **Added a hidden dedicated Artwork Review page**, linked from the existing
