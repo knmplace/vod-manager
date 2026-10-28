@@ -8422,6 +8422,7 @@ def language_audit_stats(history_limit: int = 31) -> dict:
             SELECT date(CAST(checked_at AS REAL), 'unixepoch', 'localtime') AS day,
                    COUNT(*) AS probes,
                    SUM(CASE WHEN mismatch=1 THEN 1 ELSE 0 END) AS mismatches,
+                   SUM(CASE WHEN status NOT IN ('error', 'deferred') AND mismatch=0 THEN 1 ELSE 0 END) AS not_needed,
                    SUM(CASE WHEN mismatch=1 AND wanted_match=0 THEN 1 ELSE 0 END) AS outside_wanted,
                    SUM(CASE WHEN wanted_match=1 THEN 1 ELSE 0 END) AS wanted_only,
                    SUM(CASE WHEN status IN ('error', 'deferred') THEN 1 ELSE 0 END) AS errors
@@ -8433,6 +8434,7 @@ def language_audit_stats(history_limit: int = 31) -> dict:
                    CASE WHEN r.kind='movie' THEN 'M' ELSE 'S' END AS type,
                    COUNT(*) AS probes,
                    SUM(CASE WHEN r.mismatch=1 THEN 1 ELSE 0 END) AS mismatches,
+                   SUM(CASE WHEN r.status NOT IN ('error', 'deferred') AND r.mismatch=0 THEN 1 ELSE 0 END) AS not_needed,
                    SUM(CASE WHEN r.mismatch=1 AND r.wanted_match=0 THEN 1 ELSE 0 END) AS outside_wanted,
                    SUM(CASE WHEN r.wanted_match=1 THEN 1 ELSE 0 END) AS wanted_only,
                    SUM(CASE WHEN r.status IN ('error', 'deferred') THEN 1 ELSE 0 END) AS errors

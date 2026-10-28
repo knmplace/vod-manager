@@ -229,6 +229,7 @@ def test_language_audit_stats_keep_daily_probe_history(db):
     assert stats["history"][0]["mismatches"] == 1
     assert stats["history"][0]["outside_wanted"] == 1
     assert stats["history"][0]["wanted_only"] == 1
+    assert stats["history"][0]["not_needed"] == 1
 
 
 def test_language_mismatch_report_approval_updates_tag_and_archives_excluded_source(db, tmp_path):
