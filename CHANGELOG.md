@@ -64,6 +64,18 @@ instead of opening a duplicate request.
   now counts only actionable mismatch rows, not wanted-only probe results.
 - Added a play button beside each mismatch title so the user can listen to the
   actual movie source or show episode before approving or rejecting the result.
+- Live verification after three approvals: **The Cabin in the Woods (2012)**
+  retained English sources and was not parent-archived; **Mikaela (2025)** was
+  archived with no category placements; **Seeds (2024)** retained its English
+  sources while the PAN WarpTV source is excluded by the language-filtered
+  playback/export/failover paths. Non-wanted sources remain stored for audit
+  and recovery rather than being deleted.
+- Fork commits: `bcbe1fc` added live statistics and pacing controls, `1d286d8`
+  corrected actionable pending counts and removed the daily-history UI table,
+  and `6472e17` added source playback to mismatch review. The replacement
+  upstream language PR remains on hold until live deployment validation.
+- Beads update attempted for `vod-44p`, but the configured embedded Beads
+  store currently reports read-only; no Beads data was modified manually.
 - Replaced the fixed daily language-probe budget with saved controls for probes
   per cycle, seconds between cycles, and an optional daily cap. Leaving the cap
   blank means no daily cap; provider gates, one-in-flight-per-provider, and
