@@ -31,6 +31,21 @@ synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
 
+## 2026-10-28 (Duplicate Finder TMDB picker; upstream v0.3.13 alignment)
+
+- ✅ **Duplicate Finder identity repair now searches local TMDB data before
+  requiring the TMDB API.** Open a candidate missing a TMDB ID or year, search
+  by name, select the correct movie/show, and save its TMDB ID and year without
+  leaving Duplicate Finder. Manual year/ID entry remains available.
+- ✅ **Fixed the picker search flow.** Editing the search box no longer sends a
+  request for every keystroke, and the duplicate scan refreshes after a save so
+  a server-side merge is reflected immediately.
+- ✅ **Aligned the application version with upstream v0.3.13.**
+- 🔼 **Upstream v0.3.13 includes the original poster fallback, disabled-language
+  episode gate, and trailing category-language fixes from fork PRs #64–#66.**
+  Fork-only exclusion ownership/source cleanup, GB/UK-as-English handling,
+  enrichment optimizations, and this Duplicate Finder picker remain preserved.
+
 ## 2026-10-27 (Excluded sources stay removed; sync keeps archive flags consistent)
 
 - ✅ **A source removed by the exclusion lists no longer comes back on another

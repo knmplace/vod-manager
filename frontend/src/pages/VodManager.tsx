@@ -2327,12 +2327,14 @@ function DuplicateInlinePreview({ kind, itemId, xcCredentials }: {
   )
 }
 
-function DuplicateIdentityPicker({ contentType, item }: {
+function DuplicateIdentityPicker({ contentType, item, onSaved }: {
   contentType: 'movie' | 'series'
   item: DuplicateGroupItem
+  onSaved: () => void
 }) {
   const qc = useQueryClient()
   const [open, setOpen] = useState(false)
+  const [searchText, setSearchText] = useState('')
   const [searchOverride, setSearchOverride] = useState('')
   const [manualYear, setManualYear] = useState(item.year == null ? '' : String(item.year))
   const [manualTmdbId, setManualTmdbId] = useState(item.tmdb_id ?? '')
@@ -2357,6 +2359,7 @@ function DuplicateIdentityPicker({ contentType, item }: {
     },
     onSuccess: () => {
       setOpen(false)
+      onSaved()
       qc.invalidateQueries({ queryKey: ['vod-duplicates'] })
       qc.invalidateQueries({ queryKey: ['vod-movies'] })
       qc.invalidateQueries({ queryKey: ['vod-series'] })
@@ -2386,14 +2389,15 @@ function DuplicateIdentityPicker({ contentType, item }: {
               autoFocus
               className={inputCls('flex-1 min-w-36')}
               placeholder={item.name}
-              value={searchOverride}
-              onChange={(e) => setSearchOverride(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') setSearchOverride((e.target as HTMLInputElement).value.trim()) }}
+              value={searchText}
+              onChange={(e) => setSearchText(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') setSearchOverride(searchText.trim()) }}
+              onBlur={() => setSearchOverride(searchText.trim())}
             />
             <span className="text-[11px] text-muted-foreground">local first, then TMDB</span>
           </div>
           {suggestionsQuery.isLoading && <p className="text-muted-foreground">Searching TMDB…</p>}
-          {suggestionsQuery.isError && <p className="text-destructive">TMDB search failed — check the API key.</p>}
+          {suggestionsQuery.isError && <p className="text-destructive">TMDB search failed: {(suggestionsQuery.error as any)?.response?.data?.detail ?? 'check the API key or local TMDB store.'}</p>}
           {!!suggestionsQuery.data?.length && (
             <div className="space-y-1.5">
               {suggestionsQuery.data.map((suggestion) => (
@@ -2429,7 +2433,7 @@ function DuplicateIdentityPicker({ contentType, item }: {
               {saveIdentity.isPending ? <Loader2 size={12} className="animate-spin" /> : 'Save'}
             </Button>
           </div>
-          {saveIdentity.isError && <p className="text-destructive">Could not save this identity.</p>}
+          {saveIdentity.isError && <p className="text-destructive">Could not save this identity: {(saveIdentity.error as any)?.response?.data?.detail ?? 'unknown error'}</p>}
           <p className="text-[10px] text-muted-foreground">Selecting a result saves its TMDB ID and year when TMDB provides one. A matching ID may merge this card into the existing catalog card.</p>
         </div>
       )}
@@ -2437,7 +2441,7 @@ function DuplicateIdentityPicker({ contentType, item }: {
   )
 }
 
-function DuplicateGroupRow({ group, contentType, xcCredentials, onMerge, isPending, onIgnore, isIgnorePending, tmdbDetails }: {
+function DuplicateGroupRow({ group, contentType, xcCredentials, onMerge, isPending, onIgnore, isIgnorePending, tmdbDetails, onIdentitySaved }: {
   group: DuplicateGroup
   contentType: 'movie' | 'series'
   xcCredentials?: XcCredentials
@@ -2446,6 +2450,7 @@ function DuplicateGroupRow({ group, contentType, xcCredentials, onMerge, isPendi
   onIgnore: (itemIds: number[]) => void
   isIgnorePending: boolean
   tmdbDetails?: Record<string, { year: number | null; title: string | null }>
+  onIdentitySaved: () => void
 }) {
   // A shared tmdb_id across 2+ candidates means TMDB itself confirms
   // they're the same real title. A CONFLICTING (different) tmdb_id never
@@ -2690,7 +2695,7 @@ function DuplicateGroupRow({ group, contentType, xcCredentials, onMerge, isPendi
                   />
                 )}
               </span>
-              <DuplicateIdentityPicker contentType={contentType} item={item} />
+              <DuplicateIdentityPicker contentType={contentType} item={item} onSaved={onIdentitySaved} />
               {previewIds.has(item.id) && <DuplicateInlinePreview kind={contentType} itemId={item.id} xcCredentials={xcCredentials} />}
             </div>
           </div>
@@ -12883,6 +12888,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
                 onIgnore={(itemIds) => ignoreDuplicateGroup.mutate(itemIds)}
                 isIgnorePending={ignoreDuplicateGroup.isPending}
                 tmdbDetails={duplicatesTmdbDetailsQuery.data}
+                onIdentitySaved={() => duplicatesQuery.refetch()}
               />
             ))}
           </div>
