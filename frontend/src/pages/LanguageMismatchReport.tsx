@@ -24,7 +24,7 @@ type Mismatch = {
   proposed_archive: boolean
 }
 
-type Report = { enabled_languages: string[]; count: number; results: Mismatch[]; trickle?: { interval_seconds: number; daily_max: number; checked_today: number; global_concurrency: number; language_window_max: number; language_window_seconds: number; blocked_providers: number } }
+type Report = { enabled_languages: string[]; count: number; results: Mismatch[]; trickle?: { interval_seconds: number; daily_max: number; checked_today: number; global_concurrency: number; language_window_max: number | null; language_window_seconds: number; blocked_providers: number } }
 
 const NAMES: Record<string, string> = {
   EN: 'English', HI: 'Hindi', FR: 'French', ES: 'Spanish', DE: 'German', IT: 'Italian',
@@ -89,7 +89,7 @@ export default function LanguageMismatchReport() {
           <h1 className="text-lg font-semibold flex items-center gap-2"><Languages size={18} /> Language Mismatch Report</h1>
           <p className="text-xs text-muted-foreground mt-1">Embedded audio tags are compared with the configured wanted-language policy. Approved single-language results update the source metadata and archive the parent when the observed language is outside that policy. Reject records the decision and prevents automatic re-checking.</p>
           <p className="text-xs text-muted-foreground mt-1">Wanted playback languages: {report.data?.enabled_languages.join(', ') || 'none'}</p>
-          {report.data?.trickle && <p className="text-xs text-muted-foreground mt-1">Trickle: up to {report.data.trickle.global_concurrency} probes every {report.data.trickle.interval_seconds}s · {report.data.trickle.checked_today}/{report.data.trickle.daily_max} today · language cap {report.data.trickle.language_window_max} per {Math.round(report.data.trickle.language_window_seconds / 60)} minutes{report.data.trickle.blocked_providers ? ` · ${report.data.trickle.blocked_providers} provider paused` : ''}</p>}
+          {report.data?.trickle && <p className="text-xs text-muted-foreground mt-1">Trickle: up to {report.data.trickle.global_concurrency} probes every {report.data.trickle.interval_seconds}s · {report.data.trickle.checked_today}/{report.data.trickle.daily_max} today · provider window uncapped{report.data.trickle.blocked_providers ? ` · ${report.data.trickle.blocked_providers} provider paused` : ''}</p>}
         </div>
         <span className="flex items-center gap-2">
           <button className="flex items-center gap-1.5 border border-primary/40 text-primary rounded px-2 py-1.5 text-xs hover:bg-accent disabled:opacity-50" disabled={runNow.isPending} onClick={() => runNow.mutate()}><Languages size={12} className={runNow.isPending ? 'animate-pulse' : ''} /> Run one cycle now</button>

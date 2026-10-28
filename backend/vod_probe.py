@@ -46,12 +46,14 @@ _WINDOW_SECONDS = 600.0
 _WINDOW_MAX = 8                       # probes per provider per window
 _GLOBAL_MAX = 2
 
-# Language trickle defaults: deliberately quieter than normal import traffic.
+# Language trickle defaults: experimental observation mode. Provider-level
+# connection gates, one in-flight probe per provider, and circuit breaking still
+# apply; the daily/window values only limit this audit worker.
 LANGUAGE_TRICKLE_INTERVAL = 60.0
-LANGUAGE_TRICKLE_DAILY_MAX = 100
-LANGUAGE_GLOBAL_MAX = 3
+LANGUAGE_TRICKLE_DAILY_MAX = 500
+LANGUAGE_GLOBAL_MAX = 15
 LANGUAGE_WINDOW_SECONDS = 900.0
-LANGUAGE_WINDOW_MAX = 10
+LANGUAGE_WINDOW_MAX: int | None = None
 
 _in_flight: set[int] = set()          # provider ids with a probe running right now
 _running_total = 0
@@ -119,7 +121,7 @@ def language_result_of(src: dict) -> dict:
 
 
 def _gate(pid: int, name: str, spacing: float | None = None,
-          window_seconds: float = _WINDOW_SECONDS, window_max: int = _WINDOW_MAX) -> None:
+          window_seconds: float = _WINDOW_SECONDS, window_max: int | None = _WINDOW_MAX) -> None:
     """Raises ProbeRefused unless this provider can take a probe right now."""
     now = time.time()
     if pid in _in_flight:
@@ -135,7 +137,7 @@ def _gate(pid: int, name: str, spacing: float | None = None,
     recent = _recent.setdefault(pid, collections.deque())
     while recent and time.monotonic() - recent[0] > window_seconds:
         recent.popleft()
-    if len(recent) >= window_max:
+    if window_max is not None and window_max > 0 and len(recent) >= window_max:
         wait = int(window_seconds - (time.monotonic() - recent[0])) + 1
         raise ProbeRefused(f"That's a lot of checks on {name} in a short time. Try again in {wait // 60 + 1} min.", wait, "window")
 
@@ -385,12 +387,18 @@ async def _probe_remote_language(kind: str, src: dict, provider: dict, spacing: 
     except ProbeRefused as exc:
         if exc.kind in ("pushback", "capacity", "provider_error", "other"):
             _language_provider_blocks[pid] = f"{current_day}:{exc}"
+            logger.warning("[language-probe] pausing provider %s for the rest of %s: %s",
+                           provider["name"], current_day, exc)
         raise
     except asyncio.TimeoutError:
         _language_provider_blocks[pid] = f"{current_day}:timeout"
+        logger.warning("[language-probe] pausing provider %s for the rest of %s after timeout",
+                       provider["name"], current_day)
         raise ProbeRefused(f"{provider['name']} took too long to answer. Try again later.", 60)
     except (httpx.HTTPError, OSError) as exc:
         _language_provider_blocks[pid] = f"{current_day}:connection error"
+        logger.warning("[language-probe] pausing provider %s for the rest of %s after connection error: %s",
+                       provider["name"], current_day, vod_downloader._safe(exc) or type(exc).__name__)
         raise ProbeRefused(f"Couldn't reach {provider['name']}: {vod_downloader._safe(exc) or type(exc).__name__}.", 30)
     finally:
         _in_flight.discard(pid)

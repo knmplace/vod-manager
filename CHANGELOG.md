@@ -86,10 +86,25 @@ instead of opening a duplicate request.
   decisions. Approved results outside the wanted-language policy update source
   metadata and archive the parent movie/show; rejected results are not rechecked.
 - Added up to three-provider concurrency, one probe per provider, 60-second
-  same-provider spacing, 10 per provider per 15 minutes, 100 per day, and
-  provider pause after 429/connection-limit/provider errors.
+- Added experimental up-to-15-provider concurrency, one probe per provider,
+  a 500-per-day audit budget, and an uncapped 15-minute provider window for
+  observation. Provider pause/backoff after 429, connection-limit, timeout, or
+  provider errors remains active and is now logged explicitly.
 - Validation: 25 focused backend tests, Python compilation, frontend build,
   and git diff check passed.
+
+## 2026-10-28 (Language audit observation-rate increase)
+
+- Increased the language-audit trickle from 3 to 15 concurrent provider probes
+  and from 100 to 500 checks per day.
+- Removed the separate 10-per-provider/15-minute language cap for this
+  observation period. Existing provider connection gates, one in-flight probe
+  per provider, and circuit-breaker pauses remain enforced.
+- The report continues to use the saved wanted playback-language setting
+  dynamically; it is not hardcoded to English. The initial unsaved default
+  remains the existing EN/ES fallback.
+- Validation: 26 focused backend tests passed, Python compilation, frontend
+  production build, and `git diff --check` passed.
 
 ## 2026-10-28 (Duplicate Finder TMDB picker; upstream v0.3.13 alignment)
 

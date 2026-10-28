@@ -13,6 +13,7 @@ import vod_downloader
 import vod_probe
 import vod_routes
 import xc_server
+import config
 
 TOTAL = 20_000_000
 hits: list[str] = []
@@ -170,6 +171,17 @@ def test_language_probe_caches_unknown_result(db, tmp_path, monkeypatch):
     assert first["status"] == "unknown" and first["checked"]
     assert second["status"] == "unknown" and second["checked"]
     assert len(calls) == 1
+
+
+def test_language_trickle_uses_experimental_limits_and_saved_playback_policy(db, monkeypatch):
+    assert vod_probe.LANGUAGE_GLOBAL_MAX == 15
+    assert vod_probe.LANGUAGE_TRICKLE_DAILY_MAX == 500
+    assert vod_probe.LANGUAGE_WINDOW_MAX is None
+
+    monkeypatch.setattr(config, "CONFIG_FILE", db.DB_PATH.with_name("config.json"))
+    config.save_enabled_languages(["IT", "ES"])
+    assert config.get_enabled_languages() == ["IT", "ES"]
+    assert db.list_language_mismatches()["enabled_languages"] == ["ES", "IT"]
 
 
 def test_language_mismatch_report_approval_updates_tag_and_archives_excluded_source(db, tmp_path):
