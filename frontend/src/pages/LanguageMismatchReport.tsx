@@ -43,6 +43,7 @@ function languageLabel(code: string | null | undefined) {
 export default function LanguageMismatchReport() {
   const qc = useQueryClient()
   const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [selectionAnchor, setSelectionAnchor] = useState<string | null>(null)
   const [providerFilter, setProviderFilter] = useState('all')
   const [observedFilter, setObservedFilter] = useState('all')
   const [showTop, setShowTop] = useState(false)
@@ -110,6 +111,32 @@ export default function LanguageMismatchReport() {
     if (!safeTargets.length) { notify(decision === 'approved' ? 'No single-language results are selected for approval.' : 'No mismatches are selected.'); return }
     for (const row of safeTargets) await decide.mutateAsync({ row, decision })
     setSelected(new Set())
+    setSelectionAnchor(null)
+  }
+
+  const toggleRowSelection = (row: Mismatch, index: number, event: React.ChangeEvent<HTMLInputElement>) => {
+    const id = key(row)
+    const shiftKey = (event.nativeEvent as Event & { shiftKey?: boolean }).shiftKey === true
+    setSelected((old) => {
+      const next = new Set(old)
+      const anchorIndex = shiftKey && selectionAnchor
+        ? filteredRows.findIndex((candidate) => key(candidate) === selectionAnchor)
+        : -1
+      if (anchorIndex >= 0) {
+        const start = Math.min(anchorIndex, index)
+        const end = Math.max(anchorIndex, index)
+        for (let i = start; i <= end; i += 1) {
+          const rangeId = key(filteredRows[i])
+          event.target.checked ? next.add(rangeId) : next.delete(rangeId)
+        }
+      } else if (event.target.checked) {
+        next.add(id)
+      } else {
+        next.delete(id)
+      }
+      return next
+    })
+    setSelectionAnchor(id)
   }
 
   if (report.isLoading) return <div className="flex items-center gap-2 text-muted-foreground"><Loader2 size={15} className="animate-spin" /> Loading language mismatch report…</div>
@@ -157,7 +184,7 @@ export default function LanguageMismatchReport() {
         <span className="text-muted-foreground">· {selected.size} selected</span>
         <label className="text-[11px] text-muted-foreground">Provider<select className="ml-1 rounded border border-border bg-background px-2 py-1 text-xs text-foreground" value={providerFilter} onChange={(e) => setProviderFilter(e.target.value)}><option value="all">All reported providers</option>{providerOptions.map((provider) => <option key={provider} value={provider}>{provider}</option>)}</select></label>
         <label className="text-[11px] text-muted-foreground">Observed<select className="ml-1 rounded border border-border bg-background px-2 py-1 text-xs text-foreground" value={observedFilter} onChange={(e) => setObservedFilter(e.target.value)}><option value="all">All reported languages</option>{observedOptions.map((observed) => <option key={observed} value={observed}>{observed}</option>)}</select></label>
-        <button className="border border-border rounded px-2 py-1 hover:bg-accent" onClick={() => setSelected((old) => old.size === filteredRows.length ? new Set() : new Set(filteredRows.map(key)))}>{selected.size === filteredRows.length && filteredRows.length ? 'Clear selection' : 'Select all shown'}</button>
+        <button className="border border-border rounded px-2 py-1 hover:bg-accent" onClick={() => { setSelected((old) => old.size === filteredRows.length ? new Set() : new Set(filteredRows.map(key))); setSelectionAnchor(null) }}>{selected.size === filteredRows.length && filteredRows.length ? 'Clear selection' : 'Select all shown'}</button>
         <button className="border border-emerald-500/40 text-emerald-400 rounded px-2 py-1 hover:bg-emerald-500/10 disabled:opacity-50" disabled={decide.isPending || !selected.size} onClick={() => runBulk('approved')}>Approve selected</button>
         <button className="border border-amber-500/40 text-amber-400 rounded px-2 py-1 hover:bg-amber-500/10 disabled:opacity-50" disabled={decide.isPending || !selected.size} onClick={() => runBulk('rejected')}>Keep selected</button>
         <button className="border border-emerald-500/40 text-emerald-400 rounded px-2 py-1 hover:bg-emerald-500/10 disabled:opacity-50" disabled={decide.isPending || !rows.length} onClick={() => runBulk('approved', true)}>Approve all proposed</button>
@@ -179,7 +206,7 @@ export default function LanguageMismatchReport() {
             <tbody>{filteredRows.map((row) => {
               const id = key(row); const disabled = !row.safe_to_apply
               return <tr key={id} className="border-t border-border/60 align-top">
-                <td className="p-2"><input type="checkbox" checked={selected.has(id)} onChange={(e) => setSelected((old) => { const n = new Set(old); e.target.checked ? n.add(id) : n.delete(id); return n })} /></td>
+                <td className="p-2"><input type="checkbox" checked={selected.has(id)} onChange={(e) => toggleRowSelection(row, filteredRows.indexOf(row), e)} /></td>
                 <td className="p-2"><div className="font-medium flex items-center gap-1"><span className="mr-1 rounded border border-border px-1 text-[10px]">{row.kind === 'episode' ? 'S' : 'M'}</span>{row.title} {row.year ? `(${row.year})` : ''}<PlayButton url={buildPreviewSourceUrl(row.kind === 'episode' ? 'series' : 'movie', row.source_id, row.container_extension || 'mp4', credentials.data)} transcodedUrl={buildTranscodedPreviewSourceUrl(row.kind === 'episode' ? 'series' : 'movie', row.source_id, credentials.data)} hlsUrl={buildHlsPreviewSourceUrl(row.kind === 'episode' ? 'series' : 'movie', row.source_id, credentials.data)} title={`${row.title}${row.year ? ` (${row.year})` : ''}${row.kind === 'episode' ? ` S${row.season_number}E${row.episode_number}` : ''}`} /></div><div className="text-muted-foreground">{row.kind === 'episode' ? `S${row.season_number}E${row.episode_number} · ${row.episode_name ?? ''}` : 'Movie'}{row.tmdb_id ? ` · TMDB ${row.tmdb_id}` : ''}</div></td>
                 <td className="p-2">{row.provider_name}</td>
                 <td className="p-2">{languageLabel(row.configured_language)}</td>
