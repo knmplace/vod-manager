@@ -495,7 +495,7 @@ def language_trickle_status() -> dict:
         activity = {"attempts": 0, "completed": 0, "deferred": 0, "errors": 0}
         checked_today = _language_trickle_count if _language_trickle_day == day else 0
     return {
-        "enabled": bool(settings.get("language_trickle_enabled", True)),
+        "enabled": bool(settings.get("language_trickle_enabled", False)),
         "interval_seconds": settings["language_trickle_interval_seconds"],
         "daily_max": settings["language_trickle_daily_limit"],
         "checked_today": max(checked_today, _language_trickle_count if _language_trickle_day == day else 0),
@@ -556,7 +556,7 @@ async def language_trickle_loop() -> None:
     await asyncio.sleep(90)
     while True:
         try:
-            if config.get_language_trickle_settings().get("language_trickle_enabled", True):
+            if config.get_language_trickle_settings().get("language_trickle_enabled", False):
                 await run_language_trickle_cycle()
         except Exception:
             logger.exception("[language-probe] trickle loop failed")

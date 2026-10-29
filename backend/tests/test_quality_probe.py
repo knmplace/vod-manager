@@ -205,7 +205,7 @@ def test_language_trickle_settings_allow_unlimited_daily_budget(monkeypatch, tmp
     monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "config.json")
     config.save_language_trickle_settings(15, 180, None)
     assert config.get_language_trickle_settings() == {
-        "language_trickle_enabled": True,
+        "language_trickle_enabled": False,
         "language_trickle_probes_per_cycle": 15,
         "language_trickle_interval_seconds": 180,
         "language_trickle_daily_limit": None,

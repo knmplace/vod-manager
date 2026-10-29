@@ -864,7 +864,7 @@ _REFRESH_DEFAULTS = {
 # None means the user has chosen no daily cap and provider backoff remains the
 # safety mechanism.
 _LANGUAGE_TRICKLE_DEFAULTS = {
-    "language_trickle_enabled": True,
+    "language_trickle_enabled": False,
     "language_trickle_probes_per_cycle": 15,
     "language_trickle_interval_seconds": 120,
     "language_trickle_daily_limit": None,

@@ -38,6 +38,10 @@ addresses, credentials, usernames, or user-specific deployment information.
 - Added page-level selection with bulk approve/keep/retry/delete actions.
 - Added a floating return-to-top control after the page is substantially
   scrolled.
+- Language mismatch monitoring is now disabled by default; it must be enabled
+  explicitly from the report controls.
+- Clarified mismatch decisions with a separate Approve archive result and
+  one-line per-record descriptions for Approve and Keep.
 - Probe Issues now shows each source's configured language. Plex episode imports
   now populate that field consistently with movie and other provider imports.
 
