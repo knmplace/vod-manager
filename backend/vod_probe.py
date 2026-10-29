@@ -116,6 +116,8 @@ def language_result_of(src: dict) -> dict:
         "confidence": src.get("language_probe_confidence"),
         "method": src.get("language_probe_method"),
         "error": src.get("language_probe_error"),
+        "failures": int(src.get("language_probe_failures") or 0),
+        "quarantined": bool(src.get("language_probe_quarantined_at")),
         "probed_at": src.get("language_probed_at"),
     }
 
@@ -466,10 +468,18 @@ async def language_trickle_once(target: dict | None = None) -> dict:
                 )
         return {"status": "checked", "checked_today": max(_language_trickle_count, current_count + 1), "result": result}
     except ProbeRefused as exc:
+        failure = None
+        if exc.kind == "provider_error":
+            failure = await asyncio.to_thread(
+                vod_db.record_language_probe_failure,
+                target["kind"], target["source_id"], str(exc),
+            )
         await asyncio.to_thread(vod_db.record_language_probe_run,
                                 target["kind"], target["source_id"], target.get("provider_id"),
                                 "deferred", None, [], config.get_enabled_languages(), False, False, str(exc))
-        return {"status": "deferred", "checked_today": current_count, "retry_after": exc.retry_after, "message": str(exc)}
+        return {"status": "quarantined" if failure and failure["quarantined"] else "deferred",
+                "checked_today": current_count, "retry_after": exc.retry_after,
+                "message": str(exc), "failures": failure["failures"] if failure else 0}
     except Exception as exc:
         logger.exception("[language-probe] trickle check failed for %s", target)
         return {"status": "error", "checked_today": current_count, "message": str(exc)}

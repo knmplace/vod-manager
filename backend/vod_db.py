@@ -1308,6 +1308,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("movie_sources", "language_probed_at", "TEXT"),
         ("movie_sources", "language_probe_decision", "TEXT"),
         ("movie_sources", "language_probe_decided_at", "TEXT"),
+        ("movie_sources", "language_probe_failures", "INTEGER NOT NULL DEFAULT 0"),
+        ("movie_sources", "language_probe_last_failed_at", "TEXT"),
+        ("movie_sources", "language_probe_quarantined_at", "TEXT"),
         ("episode_sources", "probe_width", "INTEGER"),
         ("episode_sources", "probe_height", "INTEGER"),
         ("episode_sources", "probe_codec", "TEXT"),
@@ -1320,6 +1323,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("episode_sources", "language_probed_at", "TEXT"),
         ("episode_sources", "language_probe_decision", "TEXT"),
         ("episode_sources", "language_probe_decided_at", "TEXT"),
+        ("episode_sources", "language_probe_failures", "INTEGER NOT NULL DEFAULT 0"),
+        ("episode_sources", "language_probe_last_failed_at", "TEXT"),
+        ("episode_sources", "language_probe_quarantined_at", "TEXT"),
         ("dvr_user_limits", "retention_max_age_days", "INTEGER"),
         ("dvr_user_limits", "retention_max_episodes_per_show", "INTEGER"),
         ("dvr_recording_profiles", "backfill_mode", "TEXT"),
@@ -2853,15 +2859,16 @@ def _source_order_by(source_alias: str, provider_alias: str) -> str:
     provider_category_name, last_seen_at, consecutive_failures);
     provider_alias is the joined providers table alias (has priority)."""
     quality = _QUALITY_TIER_SQL_TEMPLATE.format(a=source_alias)
+    language_failed = f"(CASE WHEN COALESCE({source_alias}.language_probe_failures, 0) > 0 THEN 1 ELSE 0 END) ASC"
     failing = f"(CASE WHEN {source_alias}.consecutive_failures >= {_FAILING_SOURCE_THRESHOLD} THEN 1 ELSE 0 END) ASC"
     mode = get_stream_priority_mode()
     if mode == "quality":
-        return f"{failing}, {quality} DESC, {source_alias}.last_seen_at DESC"
+        return f"{language_failed}, {failing}, {quality} DESC, {source_alias}.last_seen_at DESC"
     if mode == "quality_then_provider":
-        return f"{failing}, {quality} DESC, {provider_alias}.priority DESC, {source_alias}.last_seen_at DESC"
+        return f"{language_failed}, {failing}, {quality} DESC, {provider_alias}.priority DESC, {source_alias}.last_seen_at DESC"
     if mode == "provider_then_quality":
-        return f"{failing}, {provider_alias}.priority DESC, {quality} DESC, {source_alias}.last_seen_at DESC"
-    return f"{failing}, {provider_alias}.priority DESC, {source_alias}.last_seen_at DESC"
+        return f"{language_failed}, {failing}, {provider_alias}.priority DESC, {quality} DESC, {source_alias}.last_seen_at DESC"
+    return f"{language_failed}, {failing}, {provider_alias}.priority DESC, {source_alias}.last_seen_at DESC"
 
 
 def find_pool_backfill_match(title: str, program: dict) -> dict | None:
@@ -8184,7 +8191,7 @@ def _best_source_cte() -> str:
         ) AS rn
         FROM movie_sources ms
         JOIN providers pr ON pr.id = ms.provider_id
-        WHERE pr.is_active = 1 AND {lang_clause}
+        WHERE pr.is_active = 1 AND ms.language_probe_quarantined_at IS NULL AND {lang_clause}
     )
 """
 
@@ -8249,7 +8256,8 @@ def get_language_probe_source(kind: str, source_id: int) -> dict | None:
                    src.language_probe_status, src.language_probe_error,
                    src.language_probe_method, src.language_probe_confidence,
                    src.language_probed_at, src.language_probe_decision,
-                   src.language_probe_decided_at,
+                   src.language_probe_decided_at, src.language_probe_failures,
+                   src.language_probe_last_failed_at, src.language_probe_quarantined_at,
                    p.name AS provider_name, p.provider_type,
                    parent.id AS parent_id, parent.name AS parent_name
             FROM {table} src
@@ -8334,12 +8342,119 @@ def set_source_language_probe(kind: str, source_id: int, languages: list[str] | 
             f"""UPDATE {table}
                 SET language_probe_languages=?, language_probe_status=?,
                     language_probe_error=?, language_probe_method=?,
-                    language_probe_confidence=?, language_probed_at=?
+                    language_probe_confidence=?, language_probed_at=?,
+                    language_probe_failures=0, language_probe_last_failed_at=NULL,
+                    language_probe_quarantined_at=NULL
                 WHERE id=?""",
             (json.dumps(sorted(set(languages or []))), status, error, method,
              confidence, datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"), source_id),
         )
         _commit_with_retry(conn)
+    finally:
+        conn.close()
+
+
+def record_language_probe_failure(kind: str, source_id: int, error: str,
+                                  quarantine_after: int = 2) -> dict:
+    """Record a provider/source failure and quarantine it after the threshold.
+
+    A first provider error remains eligible but sorts behind sources with no
+    language-probe failures. The second provider error removes it from normal
+    probe/playback selection while preserving the row for manual action.
+    """
+    table = "movie_sources" if kind == "movie" else "episode_sources"
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                f"SELECT language_probe_failures FROM {table} WHERE id=?", (source_id,)
+            ).fetchone()
+            failures = int(row[0] or 0) + 1 if row else 0
+            quarantined = now if failures >= max(1, int(quarantine_after)) else None
+            conn.execute(
+                f"""UPDATE {table}
+                    SET language_probe_error=?, language_probe_status='error',
+                        language_probe_failures=?, language_probe_last_failed_at=?,
+                        language_probe_quarantined_at=COALESCE(language_probe_quarantined_at, ?)
+                    WHERE id=?""",
+                (error, failures, now, quarantined, source_id),
+            )
+            _commit_with_retry(conn)
+            return {"failures": failures, "quarantined": bool(quarantined)}
+        finally:
+            conn.close()
+
+
+def reset_language_probe_failure(kind: str, source_id: int) -> None:
+    """Return a quarantined source to the pending probe queue for retry."""
+    table = "movie_sources" if kind == "movie" else "episode_sources"
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            conn.execute(
+                f"""UPDATE {table}
+                    SET language_probe_status=NULL, language_probe_error=NULL,
+                        language_probe_failures=0, language_probe_last_failed_at=NULL,
+                        language_probe_quarantined_at=NULL,
+                        language_probe_languages=NULL, language_probe_confidence=NULL,
+                        language_probe_method=NULL, language_probed_at=NULL
+                    WHERE id=?""",
+                (source_id,),
+            )
+            _commit_with_retry(conn)
+        finally:
+            conn.close()
+
+
+def delete_language_probe_source(kind: str, source_id: int) -> None:
+    """Permanently remove a quarantined source while preserving other copies."""
+    table, parent_table, parent_fk = _language_probe_table(kind)
+    conn = _connect()
+    try:
+        row = conn.execute(
+            f"SELECT {parent_fk} AS parent_id FROM {table} WHERE id=?", (source_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise ValueError("language probe source not found")
+    if kind == "movie":
+        delete_movie_source(row["parent_id"], source_id)
+    else:
+        delete_episode_source(row["parent_id"], source_id)
+
+
+def list_language_probe_errors(limit: int = 500) -> list[dict]:
+    """List quarantined language-probe sources awaiting manual action."""
+    conn = _connect()
+    try:
+        rows = conn.execute("""
+            SELECT 'movie' AS kind, ms.id AS source_id, ms.movie_id AS item_id,
+                   m.name AS title, m.year, ms.provider_id, p.name AS provider_name,
+                   ms.provider_category_name AS category, ms.provider_stream_id,
+                   ms.container_extension, ms.language_probe_error AS reason,
+                   ms.language_probe_failures AS attempts,
+                   ms.language_probe_last_failed_at AS last_failed_at,
+                   ms.language_probe_quarantined_at AS quarantined_at
+            FROM movie_sources ms JOIN movies m ON m.id=ms.movie_id
+            JOIN providers p ON p.id=ms.provider_id
+            WHERE ms.language_probe_quarantined_at IS NOT NULL AND p.is_active=1
+            UNION ALL
+            SELECT 'episode' AS kind, es.id AS source_id, es.episode_id AS item_id,
+                   s.name AS title, s.year, es.provider_id, p.name AS provider_name,
+                   es.provider_category_name AS category, es.provider_stream_id,
+                   es.container_extension, es.language_probe_error AS reason,
+                   es.language_probe_failures AS attempts,
+                   es.language_probe_last_failed_at AS last_failed_at,
+                   es.language_probe_quarantined_at AS quarantined_at
+            FROM episode_sources es JOIN episodes e ON e.id=es.episode_id
+            JOIN series s ON s.id=e.series_id JOIN providers p ON p.id=es.provider_id
+            WHERE es.language_probe_quarantined_at IS NOT NULL AND p.is_active=1
+            ORDER BY quarantined_at DESC, provider_name, title
+            LIMIT ?
+        """, (max(1, int(limit)),)).fetchall()
+        return [dict(r) for r in rows]
     finally:
         conn.close()
 
@@ -8414,6 +8529,7 @@ def language_audit_stats(history_limit: int = 31) -> dict:
             JOIN movies m ON m.id=ms.movie_id JOIN providers p ON p.id=ms.provider_id
             WHERE p.is_active=1 AND m.review_excluded=0
               AND ms.language_probe_decision IS NULL AND ms.language_probed_at IS NULL
+              AND ms.language_probe_quarantined_at IS NULL
               AND EXISTS (SELECT 1 FROM movie_category_placements cp WHERE cp.movie_id=m.id)
         """).fetchone()[0]
         series_eligible = conn.execute("""
@@ -8422,6 +8538,7 @@ def language_audit_stats(history_limit: int = 31) -> dict:
             JOIN providers p ON p.id=es.provider_id
             WHERE p.is_active=1 AND s.review_excluded=0
               AND es.language_probe_decision IS NULL AND es.language_probed_at IS NULL
+              AND es.language_probe_quarantined_at IS NULL
               AND EXISTS (SELECT 1 FROM series_category_placements cp WHERE cp.series_id=s.id)
         """).fetchone()[0]
         pending = conn.execute("""
@@ -8563,21 +8680,27 @@ def next_language_probe_targets(
         per_provider_limit = 1 if distinct_providers else max_items
         rows = conn.execute(f"""
             WITH candidates AS (
-                SELECT 'movie' AS kind, ms.id AS source_id, ms.provider_id
+                SELECT 'movie' AS kind, ms.id AS source_id, ms.provider_id,
+                       ms.language_probe_failures, ms.language_probe_last_failed_at
                 FROM movie_sources ms JOIN movies m ON m.id=ms.movie_id JOIN providers p ON p.id=ms.provider_id
                 WHERE p.is_active=1 AND m.review_excluded=0 AND ms.language_probe_decision IS NULL{provider_filter}
-                  AND ms.language_probed_at IS NULL
+                  AND ms.language_probed_at IS NULL AND ms.language_probe_quarantined_at IS NULL
                   AND EXISTS (SELECT 1 FROM movie_category_placements cp WHERE cp.movie_id=m.id)
                 UNION ALL
-                SELECT 'episode' AS kind, es.id AS source_id, es.provider_id
+                SELECT 'episode' AS kind, es.id AS source_id, es.provider_id,
+                       es.language_probe_failures, es.language_probe_last_failed_at
                 FROM episode_sources es JOIN episodes e ON e.id=es.episode_id
                 JOIN series s ON s.id=e.series_id JOIN providers p ON p.id=es.provider_id
                 WHERE p.is_active=1 AND s.review_excluded=0 AND es.language_probe_decision IS NULL{provider_filter}
-                  AND es.language_probed_at IS NULL
+                  AND es.language_probed_at IS NULL AND es.language_probe_quarantined_at IS NULL
                   AND EXISTS (SELECT 1 FROM series_category_placements cp WHERE cp.series_id=s.id)
             ), ranked AS (
                 SELECT kind, source_id, provider_id,
-                       ROW_NUMBER() OVER (PARTITION BY provider_id ORDER BY source_id) AS provider_rank
+                       ROW_NUMBER() OVER (
+                         PARTITION BY provider_id
+                         ORDER BY CASE WHEN COALESCE(language_probe_failures, 0) > 0 THEN 1 ELSE 0 END,
+                                  language_probe_last_failed_at, source_id
+                       ) AS provider_rank
                 FROM candidates
             )
             SELECT kind, source_id, provider_id FROM ranked
@@ -8726,7 +8849,7 @@ def list_movie_sources_for_streaming(movie_id: int) -> list[dict]:
                    p.name AS provider_name
             FROM movie_sources ms
             JOIN providers p ON p.id = ms.provider_id
-            WHERE ms.movie_id = ? AND p.is_active = 1
+            WHERE ms.movie_id = ? AND p.is_active = 1 AND ms.language_probe_quarantined_at IS NULL
                   AND {lang_clause}
             ORDER BY {_source_order_by('ms', 'p')}
         """, (movie_id, *lang_params)).fetchall()
@@ -10015,7 +10138,7 @@ def _episode_best_source_cte(*, extra_join: str = "", extra_where: str = "") -> 
         FROM episode_sources es
         JOIN providers pr ON pr.id = es.provider_id
         {extra_join}
-        WHERE pr.is_active = 1 AND {lang_clause} {extra_where}
+        WHERE pr.is_active = 1 AND es.language_probe_quarantined_at IS NULL AND {lang_clause} {extra_where}
     )
 """
 
@@ -10051,7 +10174,7 @@ def list_episode_sources_for_streaming(episode_id: int) -> list[dict]:
                    p.name AS provider_name
             FROM episode_sources es
             JOIN providers p ON p.id = es.provider_id
-            WHERE es.episode_id = ? AND p.is_active = 1
+            WHERE es.episode_id = ? AND p.is_active = 1 AND es.language_probe_quarantined_at IS NULL
                   AND {lang_clause}
             ORDER BY {_source_order_by('es', 'p')}
         """, (episode_id, *lang_params)).fetchall()

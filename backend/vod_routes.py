@@ -4358,6 +4358,10 @@ class LanguageMismatchDecisionRequest(BaseModel):
     decision: str                   # approved or rejected
 
 
+class LanguageProbeErrorActionRequest(BaseModel):
+    action: str                     # retry or delete
+
+
 class LanguageTrickleSettingsRequest(BaseModel):
     probes_per_cycle: int
     interval_seconds: int
@@ -4393,6 +4397,7 @@ async def language_mismatch_report():
     report = await asyncio.to_thread(vod_db.list_language_mismatches)
     report["trickle"] = vod_probe.language_trickle_status()
     report["stats"] = await asyncio.to_thread(vod_db.language_audit_stats)
+    report["errors"] = await asyncio.to_thread(vod_db.list_language_probe_errors)
     # The backlog card represents actual actionable mismatch rows, not every
     # observed source. Wanted-only probe results are history, not review work.
     report["stats"]["pending_review"] = report["count"]
@@ -4425,6 +4430,20 @@ async def save_language_trickle_enabled(body: LanguageTrickleEnabledRequest):
 async def run_language_trickle():
     """Run one bounded manual cycle; the same provider gates and optional cap apply."""
     return await vod_probe.run_language_trickle_cycle()
+
+
+@router.post("/language-probe-errors/{kind}/{source_id}/action/", dependencies=_GUARDS)
+async def language_probe_error_action(kind: str, source_id: int, body: LanguageProbeErrorActionRequest):
+    if body.action not in ("retry", "delete"):
+        raise HTTPException(400, detail="action must be retry or delete")
+    try:
+        if body.action == "retry":
+            await asyncio.to_thread(vod_db.reset_language_probe_failure, kind, source_id)
+            return {"action": "retry_queued"}
+        await asyncio.to_thread(vod_db.delete_language_probe_source, kind, source_id)
+        return {"action": "deleted"}
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc))
 
 
 @router.post("/language-mismatch/{kind}/{source_id}/decision/", dependencies=_GUARDS)
