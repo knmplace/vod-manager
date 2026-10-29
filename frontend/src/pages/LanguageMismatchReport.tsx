@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Check, Languages, Loader2, Power, RefreshCw, RotateCcw, Trash2, X } from 'lucide-react'
+import { Check, Languages, Loader2, Power, RefreshCw, X } from 'lucide-react'
 import api from '@/lib/api'
 import { notify } from '@/lib/confirm'
 import { buildHlsPreviewSourceUrl, buildPreviewSourceUrl, buildTranscodedPreviewSourceUrl, PlayButton, type XcCredentials } from './VodManager'
@@ -27,8 +27,7 @@ type Mismatch = {
 }
 
 type Stats = { eligible: { movies: number; series: number; total: number }; pending_review: number; wanted_languages: string[]; history: { day: string; probes: number; mismatches: number; not_needed: number; outside_wanted: number; wanted_only: number; errors: number }[]; provider_history: { provider: string; type: 'M' | 'S'; probes: number; mismatches: number; not_needed: number; outside_wanted: number; wanted_only: number; errors: number }[] }
-type ProbeError = { kind: 'movie' | 'episode'; source_id: number; item_id: number; title: string; year: number | null; provider_name: string; category: string | null; provider_stream_id: string; container_extension: string | null; reason: string; attempts: number; last_failed_at: string | null; quarantined_at: string | null }
-type Report = { enabled_languages: string[]; count: number; results: Mismatch[]; errors?: ProbeError[]; stats?: Stats; trickle?: { enabled: boolean; interval_seconds: number; daily_max: number | null; checked_today: number; attempts_today: number; deferred_today: number; errors_today: number; probes_per_cycle: number; language_window_max: number | null; language_window_seconds: number } }
+type Report = { enabled_languages: string[]; count: number; results: Mismatch[]; errors?: { source_id: number }[]; stats?: Stats; trickle?: { enabled: boolean; interval_seconds: number; daily_max: number | null; checked_today: number; attempts_today: number; deferred_today: number; errors_today: number; probes_per_cycle: number; language_window_max: number | null; language_window_seconds: number } }
 
 const NAMES: Record<string, string> = {
   EN: 'English', HI: 'Hindi', FR: 'French', ES: 'Spanish', DE: 'German', IT: 'Italian',
@@ -91,12 +90,6 @@ export default function LanguageMismatchReport() {
     },
     onError: (e: any) => notify(e?.response?.data?.detail ?? 'Could not start the language check cycle.'),
   })
-  const errorAction = useMutation({
-    mutationFn: ({ row, action }: { row: ProbeError; action: 'retry' | 'delete' }) => api.post(`/vod/language-probe-errors/${row.kind}/${row.source_id}/action/`, { action }).then((r) => r.data),
-    onSuccess: (result) => { notify(result.action === 'deleted' ? 'Source deleted.' : 'Source returned to the probe queue.'); qc.invalidateQueries({ queryKey: ['language-mismatch-report'] }) },
-    onError: (e: any) => notify(e?.response?.data?.detail ?? 'Could not update the language probe error.'),
-  })
-
   const runBulk = async (decision: 'approved' | 'rejected', all = false) => {
     const targets = all ? rows : rows.filter((r) => selected.has(key(r)))
     const safeTargets = decision === 'approved' ? targets.filter((r) => r.safe_to_apply) : targets
@@ -121,11 +114,10 @@ export default function LanguageMismatchReport() {
         <span className="flex items-center gap-2">
           {report.data?.trickle && <button className={`flex items-center gap-1.5 border rounded px-2 py-1.5 text-xs hover:bg-accent disabled:opacity-50 ${report.data.trickle.enabled ? 'border-amber-500/40 text-amber-400' : 'border-emerald-500/40 text-emerald-400'}`} disabled={toggleEnabled.isPending} onClick={() => toggleEnabled.mutate(!report.data!.trickle!.enabled)}><Power size={12} /> {report.data.trickle.enabled ? 'Disable monitoring' : 'Enable monitoring'}</button>}
           <button className="flex items-center gap-1.5 border border-primary/40 text-primary rounded px-2 py-1.5 text-xs hover:bg-accent disabled:opacity-50" disabled={runNow.isPending} onClick={() => runNow.mutate()}><Languages size={12} className={runNow.isPending ? 'animate-pulse' : ''} /> Run one cycle now</button>
+          <button className="flex items-center gap-1.5 border border-amber-500/40 text-amber-300 rounded px-2 py-1.5 text-xs hover:bg-amber-500/10" onClick={() => window.dispatchEvent(new CustomEvent('vodmanager-goto', { detail: 'language-errors' }))}>Probe issues{errors.length ? ` (${errors.length})` : ''}</button>
           <button className="flex items-center gap-1.5 border border-border rounded px-2 py-1.5 text-xs hover:bg-accent disabled:opacity-50" disabled={report.isFetching} onClick={() => report.refetch()}><RefreshCw size={12} className={report.isFetching ? 'animate-spin' : ''} /> Refresh</button>
         </span>
       </div>
-
-      {!!errors.length && <div className="space-y-2"><div><h2 className="text-sm font-semibold">Language Mismatch Errors</h2><p className="text-[11px] text-muted-foreground">Sources with two provider-level failures are removed from automatic probing and normal playback until you retry or delete them.</p></div><div className="overflow-x-auto border border-amber-500/30 rounded-md"><table className="w-full text-xs"><thead className="bg-card text-muted-foreground"><tr className="text-left"><th className="p-2">Title</th><th className="p-2">Provider</th><th className="p-2">Library/category</th><th className="p-2">Attempts</th><th className="p-2">Reason</th><th className="p-2">Actions</th></tr></thead><tbody>{errors.map((row) => <tr className="border-t border-border/60 align-top" key={`${row.kind}:${row.source_id}`}><td className="p-2"><div className="font-medium flex items-center gap-1"><span className="mr-1 rounded border border-border px-1 text-[10px]">{row.kind === 'episode' ? 'S' : 'M'}</span>{row.title}{row.year ? ` (${row.year})` : ''}<PlayButton url={buildPreviewSourceUrl(row.kind === 'episode' ? 'series' : 'movie', row.source_id, row.container_extension || 'mp4', credentials.data)} transcodedUrl={buildTranscodedPreviewSourceUrl(row.kind === 'episode' ? 'series' : 'movie', row.source_id, credentials.data)} hlsUrl={buildHlsPreviewSourceUrl(row.kind === 'episode' ? 'series' : 'movie', row.source_id, credentials.data)} title={row.title} /></div></td><td className="p-2">{row.provider_name}</td><td className="p-2">{row.category || '—'}</td><td className="p-2">{row.attempts}</td><td className="p-2 max-w-sm break-words text-amber-300">{row.reason}</td><td className="p-2"><span className="flex gap-1"><button title="Retry this source" disabled={errorAction.isPending} className="p-1 rounded border border-primary/40 text-primary hover:bg-accent disabled:opacity-40" onClick={() => errorAction.mutate({ row, action: 'retry' })}><RotateCcw size={13} /></button><button title="Delete this source" disabled={errorAction.isPending} className="p-1 rounded border border-red-500/40 text-red-400 hover:bg-red-500/10 disabled:opacity-40" onClick={() => window.confirm(`Delete the ${row.provider_name} source for ${row.title}? This cannot be undone.`) && errorAction.mutate({ row, action: 'delete' })}><Trash2 size={13} /></button></span></td></tr>)}</tbody></table></div></div>}
 
       <div className="grid gap-3 md:grid-cols-4">
         <div className="rounded-md border border-border bg-card px-3 py-2"><div className="text-[11px] text-muted-foreground">Eligible sources</div><div className="text-lg font-semibold">{report.data?.stats?.eligible.total.toLocaleString() ?? '—'}</div><div className="text-[11px] text-muted-foreground">Movies {report.data?.stats?.eligible.movies.toLocaleString() ?? '—'} · Episodes {report.data?.stats?.eligible.series.toLocaleString() ?? '—'}</div></div>

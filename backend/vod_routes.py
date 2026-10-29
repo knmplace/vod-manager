@@ -4359,7 +4359,7 @@ class LanguageMismatchDecisionRequest(BaseModel):
 
 
 class LanguageProbeErrorActionRequest(BaseModel):
-    action: str                     # retry or delete
+    action: str                     # approve, retry or delete
 
 
 class LanguageTrickleSettingsRequest(BaseModel):
@@ -4434,9 +4434,20 @@ async def run_language_trickle():
 
 @router.post("/language-probe-errors/{kind}/{source_id}/action/", dependencies=_GUARDS)
 async def language_probe_error_action(kind: str, source_id: int, body: LanguageProbeErrorActionRequest):
-    if body.action not in ("retry", "delete"):
-        raise HTTPException(400, detail="action must be retry or delete")
+    if body.action not in ("approve", "retry", "delete"):
+        raise HTTPException(400, detail="action must be approve, retry or delete")
     try:
+        if body.action == "approve":
+            source = await asyncio.to_thread(vod_db.approve_language_probe_source, kind, source_id)
+            configured = source.get("configured_language")
+            await asyncio.to_thread(
+                vod_db.record_language_probe_run, kind, source_id, source.get("provider_id"),
+                "manual_approved", configured, [configured] if configured else [],
+                config.get_enabled_languages(), False,
+                bool(configured and configured in config.get_enabled_languages()),
+                "Manually approved after playback review.",
+            )
+            return {"action": "approved"}
         if body.action == "retry":
             await asyncio.to_thread(vod_db.reset_language_probe_failure, kind, source_id)
             return {"action": "retry_queued"}

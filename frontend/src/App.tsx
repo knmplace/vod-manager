@@ -11,6 +11,7 @@ import TmdbStore from '@/pages/TmdbStore'
 import api from '@/lib/api'
 import NoticesBell from '@/components/NoticesBell'
 import LanguageMismatchReport from '@/pages/LanguageMismatchReport'
+import LanguageProbeErrors from '@/pages/LanguageProbeErrors'
 
 export const THEMES = ['dark', 'mid', 'light', 'mono', 'warm'] as const
 export type Theme = typeof THEMES[number]
@@ -31,7 +32,7 @@ function initTheme(): Theme {
 }
 
 type AuthState = 'checking' | 'login' | 'ready'
-type AppTab = VodManagerTab | 'tmdb' | 'language-report'
+type AppTab = VodManagerTab | 'tmdb' | 'language-report' | 'language-errors'
 
 interface NavItem {
   label: string
@@ -103,7 +104,7 @@ export default function App() {
 
   const [activeTab, setActiveTabState] = useState<AppTab>(() => {
     const saved = localStorage.getItem('vodmanager-tab')
-    return saved === 'movies' || saved === 'series' || saved === 'metadata' || saved === 'recovery' || saved === 'curation' || saved === 'config' || saved === 'downloads' || saved === 'dvr' || saved === 'artwork' || saved === 'tmdb' || saved === 'language-report' ? saved : 'movies'
+    return saved === 'movies' || saved === 'series' || saved === 'metadata' || saved === 'recovery' || saved === 'curation' || saved === 'config' || saved === 'downloads' || saved === 'dvr' || saved === 'artwork' || saved === 'tmdb' || saved === 'language-report' || saved === 'language-errors' ? saved : 'movies'
   })
   // KNM: let the user hide/unhide the sidebar menu; remembered per browser (2026-10-24)
   const [navHidden, setNavHiddenState] = useState(() => localStorage.getItem('vodmanager-nav-hidden') === '1')
@@ -464,6 +465,8 @@ export default function App() {
         <main className="flex-1 min-w-0 p-4">
           {activeTab === 'tmdb' ? (
             <TmdbStore />
+          ) : activeTab === 'language-errors' ? (
+            <LanguageProbeErrors />
           ) : activeTab === 'language-report' ? (
             <LanguageMismatchReport />
           ) : (

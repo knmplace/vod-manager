@@ -8407,6 +8407,34 @@ def reset_language_probe_failure(kind: str, source_id: int) -> None:
             conn.close()
 
 
+def approve_language_probe_source(kind: str, source_id: int) -> dict:
+    """Mark a manually reviewed source as completed without changing its language."""
+    table = "movie_sources" if kind == "movie" else "episode_sources"
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                f"SELECT provider_id, language FROM {table} WHERE id=?", (source_id,)
+            ).fetchone()
+            if not row:
+                raise ValueError("language probe source not found")
+            conn.execute(
+                f"""UPDATE {table}
+                    SET language_probe_status='manual_approved',
+                        language_probe_error=NULL, language_probe_method='manual_playback_review',
+                        language_probe_confidence='manual', language_probe_languages=?,
+                        language_probed_at=?, language_probe_failures=0,
+                        language_probe_last_failed_at=NULL, language_probe_quarantined_at=NULL
+                    WHERE id=?""",
+                (json.dumps([row["language"]] if row["language"] else []), now, source_id),
+            )
+            _commit_with_retry(conn)
+            return {"provider_id": row["provider_id"], "configured_language": row["language"]}
+        finally:
+            conn.close()
+
+
 def delete_language_probe_source(kind: str, source_id: int) -> None:
     """Permanently remove a quarantined source while preserving other copies."""
     table, parent_table, parent_fk = _language_probe_table(kind)
@@ -8426,7 +8454,7 @@ def delete_language_probe_source(kind: str, source_id: int) -> None:
 
 
 def list_language_probe_errors(limit: int = 500) -> list[dict]:
-    """List quarantined language-probe sources awaiting manual action."""
+    """List deferred and quarantined language-probe sources awaiting action."""
     conn = _connect()
     try:
         rows = conn.execute("""
@@ -8435,22 +8463,24 @@ def list_language_probe_errors(limit: int = 500) -> list[dict]:
                    ms.provider_category_name AS category, ms.provider_stream_id,
                    ms.container_extension, ms.language_probe_error AS reason,
                    ms.language_probe_failures AS attempts,
+                   ms.language_probe_quarantined_at IS NOT NULL AS quarantined,
                    ms.language_probe_last_failed_at AS last_failed_at,
                    ms.language_probe_quarantined_at AS quarantined_at
             FROM movie_sources ms JOIN movies m ON m.id=ms.movie_id
             JOIN providers p ON p.id=ms.provider_id
-            WHERE ms.language_probe_quarantined_at IS NOT NULL AND p.is_active=1
+            WHERE ms.language_probe_status='error' AND p.is_active=1
             UNION ALL
             SELECT 'episode' AS kind, es.id AS source_id, es.episode_id AS item_id,
                    s.name AS title, s.year, es.provider_id, p.name AS provider_name,
                    es.provider_category_name AS category, es.provider_stream_id,
                    es.container_extension, es.language_probe_error AS reason,
                    es.language_probe_failures AS attempts,
+                   es.language_probe_quarantined_at IS NOT NULL AS quarantined,
                    es.language_probe_last_failed_at AS last_failed_at,
                    es.language_probe_quarantined_at AS quarantined_at
             FROM episode_sources es JOIN episodes e ON e.id=es.episode_id
             JOIN series s ON s.id=e.series_id JOIN providers p ON p.id=es.provider_id
-            WHERE es.language_probe_quarantined_at IS NOT NULL AND p.is_active=1
+            WHERE es.language_probe_status='error' AND p.is_active=1
             ORDER BY quarantined_at DESC, provider_name, title
             LIMIT ?
         """, (max(1, int(limit)),)).fetchall()
