@@ -35,8 +35,9 @@ jobs:
         id: meta
         run: |
           SHORT_SHA="${GITHUB_SHA::7}"
-          TAGS="ghcr.io/${{ github.repository }}:${{ github.ref_name }}"
-          TAGS="$TAGS,ghcr.io/${{ github.repository }}:${{ github.ref_name }}-${SHORT_SHA}"
+          SAFE_REF="${GITHUB_REF_NAME//\//-}"
+          TAGS="ghcr.io/${{ github.repository }}:${SAFE_REF}"
+          TAGS="$TAGS,ghcr.io/${{ github.repository }}:${SAFE_REF}-${SHORT_SHA}"
           if [ "${{ github.ref }}" = "refs/heads/main" ]; then
             TAGS="$TAGS,ghcr.io/${{ github.repository }}:latest"
           fi
