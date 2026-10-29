@@ -889,8 +889,8 @@ def save_language_trickle_settings(
         if enabled is not None:
             data["language_trickle_enabled"] = bool(enabled)
         data.update({
-            "language_trickle_probes_per_cycle": min(100, max(1, int(probes_per_cycle))),
-            "language_trickle_interval_seconds": min(3600, max(60, int(interval_seconds))),
+            "language_trickle_probes_per_cycle": min(600, max(1, int(probes_per_cycle))),
+            "language_trickle_interval_seconds": min(86400, max(90, int(interval_seconds))),
             "language_trickle_daily_limit": min(1000000, int(daily_limit)) if daily_limit is not None else None,
         })
     _update_raw(update)

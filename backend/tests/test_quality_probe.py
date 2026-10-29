@@ -239,6 +239,36 @@ def test_language_trickle_enabled_setting_can_be_toggled(monkeypatch, tmp_path):
     assert config.get_language_trickle_settings()["language_trickle_enabled"] is True
 
 
+def test_provider_throttle_budget_and_gate_escalation(db):
+    provider_id = db.upsert_provider("Throttle Provider", "http://throttle.invalid", "u", "p")
+    state = db.language_probe_provider_state(provider_id, 50)
+    assert state["status"] == "normal" and state["effective_budget"] == 50
+
+    for _ in range(3):
+        state = db.record_language_probe_throttle(provider_id, "429", "rate limit", 50)
+    assert state["status"] == "normal" and state["effective_budget"] == 40
+
+    for _ in range(9):
+        state = db.record_language_probe_throttle(provider_id, "PUSHBACK", "slow down", 50)
+    assert state["effective_budget"] == 10
+
+    for _ in range(3):
+        state = db.record_language_probe_throttle(provider_id, "429", "rate limit", 50)
+    assert state["status"] == "gating" and state["tier"] == 1
+
+    db.unblock_language_probe_provider(provider_id, 50)
+    state = db.language_probe_provider_state(provider_id, 50)
+    assert state["status"] == "normal" and state["effective_budget"] == 50
+
+
+def test_language_trickle_bounds_are_safe(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "config.json")
+    config.save_language_trickle_settings(2000, 0, None)
+    settings = config.get_language_trickle_settings()
+    assert settings["language_trickle_probes_per_cycle"] == 600
+    assert settings["language_trickle_interval_seconds"] == 90
+
+
 def test_language_audit_stats_keep_daily_probe_history(db):
     db.record_language_probe_run("movie", 10, 20, "observed", "EN", ["EN"], ["EN"], False, True)
     db.record_language_probe_run("episode", 11, 21, "observed", "EN", ["HI"], ["EN"], True, False)

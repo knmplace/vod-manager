@@ -31,6 +31,24 @@ These submissions are focused upstream changes. Fork-only release notes remain
 below; PR branches contain no provider identities, private URLs, local network
 addresses, credentials, usernames, or user-specific deployment information.
 
+## 2026-10-29 (Adaptive provider safeguards)
+
+- Added persisted, dynamic provider monitoring status for active providers.
+- Added response-detail-aware provider throttle detection and adaptive pacing:
+  repeated qualifying throttle responses reduce a provider's effective probe
+  budget by 10, then escalate to 10-minute gating, 1-hour gating, and finally
+  a user-unblock-required block when the budget reaches 10 probes or fewer.
+- Kept Dispatcharr connection-limit conditions (`CAPACITY` and `BUSY`) separate
+  from provider throttling so a permitted-connection limit does not falsely
+  escalate a provider.
+- Added safe monitoring bounds of 600 probes per cycle maximum and 90 seconds
+  between cycles minimum, with longer intervals still allowed.
+- Added provider status cards and an unblock action to Monitoring controls.
+- Removed the provider/error-code summary table from the mismatch report while
+  retaining the backend history for a better future location.
+- Validation: 37 focused backend tests passed, Python compilation passed, and
+  the frontend production build passed.
+
 ## 2026-10-29 (Language report and Probe Issues adjustments)
 
 - Added provider dropdown filters to the Language Mismatch Report and Probe

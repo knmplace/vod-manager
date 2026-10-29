@@ -1166,6 +1166,22 @@ def _migrate(conn: sqlite3.Connection) -> None:
         error               TEXT
     )""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_language_probe_runs_checked ON language_probe_runs(checked_at)")
+    # Persist the small amount of provider-level language-probe state needed
+    # for adaptive pacing and a user-visible blocked state.  Provider rows are
+    # still the source of truth for which providers are active; this table is
+    # deliberately keyed by provider id so adding/removing providers needs no
+    # configuration migration.
+    conn.execute("""CREATE TABLE IF NOT EXISTS language_probe_provider_state (
+        provider_id                  INTEGER PRIMARY KEY,
+        effective_budget             INTEGER NOT NULL,
+        consecutive_throttle_errors  INTEGER NOT NULL DEFAULT 0,
+        gate_level                   INTEGER NOT NULL DEFAULT 0,
+        gated_until                  REAL,
+        blocked                      INTEGER NOT NULL DEFAULT 0,
+        last_code                    TEXT,
+        last_detail                  TEXT,
+        updated_at                   TEXT NOT NULL
+    )""")
     # In Library badge (library_presence.py): what the user's media
     # servers hold, replaced per server on each scan. Episode rows carry their show's
     # ids/title/year. server='import' rows are items a Radarr/Sonarr import just added.
@@ -8652,6 +8668,182 @@ def _language_probe_error_detail(code: str) -> str:
         "TIMEOUT": "Provider timed out",
         "INCOMPLETE": "Incomplete response",
     }.get(code, "Probe failed")
+
+
+def _ensure_language_probe_provider_state(conn: sqlite3.Connection, provider_id: int,
+                                         global_budget: int) -> dict:
+    row = conn.execute(
+        "SELECT * FROM language_probe_provider_state WHERE provider_id=?",
+        (provider_id,),
+    ).fetchone()
+    if row:
+        return dict(row)
+    now = _now()
+    budget = max(1, int(global_budget))
+    conn.execute(
+        """INSERT INTO language_probe_provider_state
+           (provider_id, effective_budget, updated_at) VALUES (?, ?, ?)""",
+        (provider_id, budget, now),
+    )
+    _commit_with_retry(conn)
+    return {
+        "provider_id": provider_id, "effective_budget": budget,
+        "consecutive_throttle_errors": 0, "gate_level": 0,
+        "gated_until": None, "blocked": 0, "last_code": None,
+        "last_detail": None, "updated_at": now,
+    }
+
+
+def _language_probe_provider_view(row: dict, global_budget: int, now: float | None = None) -> dict:
+    now = time.time() if now is None else now
+    blocked = bool(row.get("blocked"))
+    gated_until = float(row["gated_until"]) if row.get("gated_until") else None
+    if blocked:
+        status = "blocked"
+    elif gated_until and gated_until > now:
+        status = "gating"
+    else:
+        status = "normal"
+        gated_until = None
+    return {
+        "provider_id": row["provider_id"],
+        "status": status,
+        "effective_budget": int(row.get("effective_budget") or global_budget),
+        "global_budget": int(global_budget),
+        "consecutive_errors": int(row.get("consecutive_throttle_errors") or 0),
+        "tier": int(row.get("gate_level") or 0),
+        "gated_until": gated_until,
+        "blocked": blocked,
+        "last_code": row.get("last_code"),
+        "last_detail": row.get("last_detail"),
+    }
+
+
+def language_probe_provider_states(global_budget: int) -> list[dict]:
+    """Return dynamic status for currently active providers only."""
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            """SELECT p.id AS provider_id, p.name, p.provider_type, s.*
+               FROM providers p
+               LEFT JOIN language_probe_provider_state s ON s.provider_id=p.id
+               WHERE p.is_active=1 ORDER BY p.name"""
+        ).fetchall()
+        result = []
+        for raw in rows:
+            row = dict(raw)
+            if row.get("effective_budget") is None:
+                row.update(_ensure_language_probe_provider_state(conn, row["provider_id"], global_budget))
+            view = _language_probe_provider_view(row, global_budget)
+            view.update({"name": row["name"], "provider_type": row["provider_type"]})
+            result.append(view)
+        return result
+    finally:
+        conn.close()
+
+
+def language_probe_provider_state(provider_id: int, global_budget: int) -> dict:
+    conn = _connect()
+    try:
+        row = _ensure_language_probe_provider_state(conn, provider_id, global_budget)
+        return _language_probe_provider_view(row, global_budget)
+    finally:
+        conn.close()
+
+
+def record_language_probe_throttle(provider_id: int, code: str, detail: str | None,
+                                   global_budget: int) -> dict:
+    """Apply one qualifying provider throttle and return its new status.
+
+    Three qualifying events reduce the provider budget by ten.  Once the
+    budget is already ten or lower, three events escalate through 10-minute,
+    1-hour, then permanent user-unblock gates.
+    """
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            row = _ensure_language_probe_provider_state(conn, provider_id, global_budget)
+            if row.get("blocked"):
+                return _language_probe_provider_view(row, global_budget)
+            errors = int(row.get("consecutive_throttle_errors") or 0) + 1
+            budget = int(row.get("effective_budget") or global_budget)
+            gate_level = int(row.get("gate_level") or 0)
+            gated_until = row.get("gated_until")
+            blocked = 0
+            if errors >= 3:
+                errors = 0
+                if budget > 10:
+                    budget = max(10, budget - 10)
+                else:
+                    gate_level += 1
+                    if gate_level >= 3:
+                        blocked = 1
+                        gated_until = None
+                    else:
+                        gated_until = time.time() + (600 if gate_level == 1 else 3600)
+            now = _now()
+            conn.execute(
+                """UPDATE language_probe_provider_state
+                   SET effective_budget=?, consecutive_throttle_errors=?,
+                       gate_level=?, gated_until=?, blocked=?, last_code=?,
+                       last_detail=?, updated_at=? WHERE provider_id=?""",
+                (budget, errors, gate_level, gated_until, blocked, code,
+                 (detail or "")[:500], now, provider_id),
+            )
+            _commit_with_retry(conn)
+            row.update({"effective_budget": budget,
+                        "consecutive_throttle_errors": errors,
+                        "gate_level": gate_level, "gated_until": gated_until,
+                        "blocked": blocked, "last_code": code,
+                        "last_detail": (detail or "")[:500]})
+            return _language_probe_provider_view(row, global_budget)
+        finally:
+            conn.close()
+
+
+def recover_language_probe_provider(provider_id: int, global_budget: int) -> dict:
+    """Restore ten budget slots after a clean provider cycle."""
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            row = _ensure_language_probe_provider_state(conn, provider_id, global_budget)
+            if row.get("blocked"):
+                return _language_probe_provider_view(row, global_budget)
+            budget = min(int(global_budget), int(row.get("effective_budget") or global_budget) + 10)
+            conn.execute(
+                """UPDATE language_probe_provider_state
+                   SET effective_budget=?, consecutive_throttle_errors=0,
+                       updated_at=? WHERE provider_id=?""",
+                (budget, _now(), provider_id),
+            )
+            _commit_with_retry(conn)
+            row.update({"effective_budget": budget, "consecutive_throttle_errors": 0})
+            return _language_probe_provider_view(row, global_budget)
+        finally:
+            conn.close()
+
+
+def unblock_language_probe_provider(provider_id: int, global_budget: int) -> dict:
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            row = _ensure_language_probe_provider_state(conn, provider_id, global_budget)
+            conn.execute(
+                """UPDATE language_probe_provider_state
+                   SET effective_budget=?, consecutive_throttle_errors=0,
+                       gate_level=0, gated_until=NULL, blocked=0,
+                       last_code=NULL, last_detail=NULL, updated_at=?
+                   WHERE provider_id=?""",
+                (max(1, int(global_budget)), _now(), provider_id),
+            )
+            _commit_with_retry(conn)
+            row.update({"effective_budget": max(1, int(global_budget)),
+                        "consecutive_throttle_errors": 0, "gate_level": 0,
+                        "gated_until": None, "blocked": 0,
+                        "last_code": None, "last_detail": None})
+            return _language_probe_provider_view(row, global_budget)
+        finally:
+            conn.close()
 
 
 def language_audit_stats(history_limit: int = 31) -> dict:

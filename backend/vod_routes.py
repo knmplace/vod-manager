@@ -4426,6 +4426,15 @@ async def save_language_trickle_enabled(body: LanguageTrickleEnabledRequest):
     return config.get_language_trickle_settings()
 
 
+@router.post("/language-trickle/providers/{provider_id}/unblock/", dependencies=_GUARDS)
+async def unblock_language_trickle_provider(provider_id: int):
+    settings = config.get_language_trickle_settings()
+    return await asyncio.to_thread(
+        vod_db.unblock_language_probe_provider,
+        provider_id, settings["language_trickle_probes_per_cycle"],
+    )
+
+
 @router.post("/language-trickle/run/", dependencies=_GUARDS)
 async def run_language_trickle():
     """Run one bounded manual cycle; the same provider gates and optional cap apply."""

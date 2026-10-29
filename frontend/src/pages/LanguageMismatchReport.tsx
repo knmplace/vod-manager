@@ -26,8 +26,9 @@ type Mismatch = {
   proposed_archive: boolean
 }
 
-type Stats = { eligible: { movies: number; series: number; total: number }; pending_review: number; wanted_languages: string[]; history: { day: string; probes: number; mismatches: number; not_needed: number; outside_wanted: number; wanted_only: number; errors: number }[]; provider_history: { provider: string; type: 'M' | 'S'; probes: number; mismatches: number; not_needed: number; outside_wanted: number; wanted_only: number; errors: number }[]; error_history: { provider: string; code: string; count: number }[] }
-type Report = { enabled_languages: string[]; count: number; results: Mismatch[]; errors?: { source_id: number }[]; stats?: Stats; trickle?: { enabled: boolean; interval_seconds: number; daily_max: number | null; checked_today: number; attempts_today: number; deferred_today: number; errors_today: number; probes_per_cycle: number; language_window_max: number | null; language_window_seconds: number } }
+type Stats = { eligible: { movies: number; series: number; total: number }; pending_review: number; wanted_languages: string[]; history: { day: string; probes: number; mismatches: number; not_needed: number; outside_wanted: number; wanted_only: number; errors: number }[]; provider_history: { provider: string; type: 'M' | 'S'; probes: number; mismatches: number; not_needed: number; outside_wanted: number; wanted_only: number; errors: number }[] }
+type ProviderStatus = { provider_id: number; name: string; status: 'normal' | 'gating' | 'blocked'; effective_budget: number; global_budget: number; consecutive_errors: number; tier: number; gated_until: number | null; last_code: string | null; last_detail: string | null }
+type Report = { enabled_languages: string[]; count: number; results: Mismatch[]; errors?: { source_id: number }[]; stats?: Stats; trickle?: { enabled: boolean; interval_seconds: number; daily_max: number | null; checked_today: number; attempts_today: number; deferred_today: number; errors_today: number; probes_per_cycle: number; language_window_max: number | null; language_window_seconds: number; providers?: ProviderStatus[] } }
 
 const NAMES: Record<string, string> = {
   EN: 'English', HI: 'Hindi', FR: 'French', ES: 'Spanish', DE: 'German', IT: 'Italian',
@@ -54,7 +55,7 @@ export default function LanguageMismatchReport() {
   })
   const settings = useQuery({ queryKey: ['language-trickle-settings'], queryFn: () => api.get('/vod/language-trickle/settings/').then((r) => r.data) })
   const credentials = useQuery<XcCredentials>({ queryKey: ['vod-xc-credentials'], queryFn: () => api.get('/vod/xc-credentials/').then((r) => r.data), retry: false })
-  const [form, setForm] = useState({ probes_per_cycle: 15, interval_seconds: 120, daily_limit: '' })
+  const [form, setForm] = useState({ probes_per_cycle: 15, interval_seconds: 180, daily_limit: '' })
   useEffect(() => {
     if (settings.data) setForm({ probes_per_cycle: settings.data.language_trickle_probes_per_cycle, interval_seconds: settings.data.language_trickle_interval_seconds, daily_limit: settings.data.language_trickle_daily_limit == null ? '' : String(settings.data.language_trickle_daily_limit) })
   }, [settings.data])
@@ -67,6 +68,11 @@ export default function LanguageMismatchReport() {
     mutationFn: (enabled: boolean) => api.post('/vod/language-trickle/enabled/', { enabled }).then((r) => r.data),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['language-trickle-settings'] }); qc.invalidateQueries({ queryKey: ['language-mismatch-report'] }); notify('Language mismatch monitoring state saved.') },
     onError: (e: any) => notify(e?.response?.data?.detail ?? 'Could not change language mismatch monitoring state.'),
+  })
+  const unblockProvider = useMutation({
+    mutationFn: (providerId: number) => api.post(`/vod/language-trickle/providers/${providerId}/unblock/`).then((r) => r.data),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['language-mismatch-report'] }); notify('Provider returned to normal monitoring.') },
+    onError: (e: any) => notify(e?.response?.data?.detail ?? 'Could not unblock provider.'),
   })
   const rows = report.data?.results ?? []
   const errors = report.data?.errors ?? []
@@ -170,19 +176,25 @@ export default function LanguageMismatchReport() {
       <details className="rounded-md border border-border bg-card px-3 py-3">
         <summary className="cursor-pointer text-xs font-medium">Monitoring controls</summary>
         <div className="flex flex-wrap items-end gap-3">
-          <label className="text-xs">Probes per cycle<input className="block mt-1 w-28 rounded border border-border bg-background px-2 py-1" type="number" min="1" max="100" value={form.probes_per_cycle} onChange={(e) => setForm({ ...form, probes_per_cycle: Number(e.target.value) })} /></label>
-          <label className="text-xs">Seconds between cycles<input className="block mt-1 w-32 rounded border border-border bg-background px-2 py-1" type="number" min="60" max="3600" value={form.interval_seconds} onChange={(e) => setForm({ ...form, interval_seconds: Number(e.target.value) })} /></label>
+          <label className="text-xs">Probes per cycle<input className="block mt-1 w-28 rounded border border-border bg-background px-2 py-1" type="number" min="1" max="600" value={form.probes_per_cycle} onChange={(e) => setForm({ ...form, probes_per_cycle: Number(e.target.value) })} /></label>
+          <label className="text-xs">Seconds between cycles<input className="block mt-1 w-32 rounded border border-border bg-background px-2 py-1" type="number" min="90" max="86400" value={form.interval_seconds} onChange={(e) => setForm({ ...form, interval_seconds: Number(e.target.value) })} /></label>
           <label className="text-xs">Daily cap<input className="block mt-1 w-28 rounded border border-border bg-background px-2 py-1" type="number" min="1" placeholder="None" value={form.daily_limit} onChange={(e) => setForm({ ...form, daily_limit: e.target.value })} /></label>
           <button className="border border-primary/40 text-primary rounded px-2 py-1.5 text-xs hover:bg-accent disabled:opacity-50" disabled={saveSettings.isPending} onClick={() => saveSettings.mutate()}>Save pacing</button>
-          <span className="text-[11px] text-muted-foreground">Leave Daily cap blank for no cap. Individual source errors are recorded while the sweep continues rotating across active providers.</span>
+          <span className="text-[11px] text-muted-foreground">Leave Daily cap blank for no cap. Provider safeguards reduce or pause only providers that show repeated throttling.</span>
         </div>
+        {!!report.data?.trickle?.providers?.length && <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-3">{report.data.trickle.providers.map((provider) => {
+          const gated = provider.status === 'gating'
+          const blocked = provider.status === 'blocked'
+          const label = blocked ? 'Blocked' : gated ? `Tier ${provider.tier} gating` : 'Normal'
+          const detail = blocked ? 'User action required' : gated && provider.gated_until ? `Until ${new Date(provider.gated_until * 1000).toLocaleTimeString()}` : provider.effective_budget < provider.global_budget ? `${provider.effective_budget}/cycle` : 'Full budget'
+          return <div className="rounded border border-border bg-background/40 px-2 py-2 text-[11px]" key={provider.provider_id}><div className="flex items-center justify-between gap-2"><span className="font-medium">{provider.name}</span><span className={blocked ? 'text-red-400' : gated ? 'text-amber-400' : 'text-emerald-400'}>{label}</span></div><div className="mt-1 text-muted-foreground">{detail}{provider.last_code ? ` · ${provider.last_code}` : ''}</div>{blocked && <button className="mt-2 border border-primary/40 rounded px-2 py-1 text-primary hover:bg-accent" disabled={unblockProvider.isPending} onClick={() => unblockProvider.mutate(provider.provider_id)}>Unblock</button>}</div>
+        })}</div>}
       </details>
 
       <details className="rounded-md border border-border bg-card px-3 py-3">
-        <summary className="cursor-pointer text-xs font-medium">Provider probe history and error codes</summary>
+        <summary className="cursor-pointer text-xs font-medium">Provider probe history</summary>
       {!!report.data?.stats?.provider_history.length && <><div className="overflow-x-auto border border-border rounded-md"><table className="w-full text-xs"><thead className="bg-card text-muted-foreground"><tr className="text-left"><th className="p-2">Provider</th><th className="p-2">Type</th><th className="p-2">Probes</th><th className="p-2">Not needed</th><th className="p-2">Needed review</th><th className="p-2">Outside wanted</th><th className="p-2">Wanted only</th><th className="p-2">Errors/deferred</th></tr></thead><tbody>{report.data.stats.provider_history.map((h) => <tr className="border-t border-border/60" key={`${h.provider}:${h.type}`}><td className="p-2">{h.provider}</td><td className="p-2 font-semibold">{h.type}</td><td className="p-2">{h.probes.toLocaleString()}</td><td className="p-2">{h.not_needed.toLocaleString()}</td><td className="p-2">{h.mismatches.toLocaleString()}</td><td className="p-2">{h.outside_wanted.toLocaleString()}</td><td className="p-2">{h.wanted_only.toLocaleString()}</td><td className="p-2">{h.errors.toLocaleString()}</td></tr>)}</tbody></table></div><p className="text-[11px] text-muted-foreground">Each row reconciles as: Probes = Not needed + Needed review + Errors/deferred. “Not needed” means the probe completed without finding a mismatch.</p></>}
 
-      {!!report.data?.stats?.error_history.length && <div className="mt-3 overflow-x-auto"><div className="mb-2 text-[11px] text-muted-foreground">Deferred/error codes from the last 48 hours. HTTP codes are provider responses; PUSHBACK, CAPACITY, BUSY, TIMEOUT, and INCOMPLETE are normalized conditions.</div><table className="w-full text-xs"><thead className="text-muted-foreground"><tr className="text-left"><th className="p-2">Provider</th><th className="p-2">Code</th><th className="p-2">Count</th></tr></thead><tbody>{report.data.stats.error_history.map((h) => <tr className="border-t border-border/60" key={`${h.provider}:${h.code}`}><td className="p-2">{h.provider}</td><td className="p-2 font-semibold">{h.code}</td><td className="p-2">{h.count.toLocaleString()}</td></tr>)}</tbody></table></div>}
       </details>
 
       <div className="flex flex-wrap items-center gap-2 border border-border rounded-md bg-card px-3 py-2 text-xs">
