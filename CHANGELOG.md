@@ -39,6 +39,11 @@ The report now separates completed checks from total attempts and deferred
 attempts, making provider errors and pacing visible instead of hiding them
 inside the Checked today count.
 
+Eligible totals now count the same movie-source and episode-source rows that
+the worker probes. The report labels the second group as **Episodes** so the
+eligible total reconciles with the actual sweep backlog instead of counting
+series parents.
+
 ### Upstream PR hygiene
 
 Upstream submissions are prepared from a clean branch based on the current

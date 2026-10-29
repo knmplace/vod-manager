@@ -8417,7 +8417,7 @@ def language_audit_stats(history_limit: int = 31) -> dict:
               AND EXISTS (SELECT 1 FROM movie_category_placements cp WHERE cp.movie_id=m.id)
         """).fetchone()[0]
         series_eligible = conn.execute("""
-            SELECT COUNT(DISTINCT s.id) FROM episode_sources es
+            SELECT COUNT(*) FROM episode_sources es
             JOIN episodes e ON e.id=es.episode_id JOIN series s ON s.id=e.series_id
             JOIN providers p ON p.id=es.provider_id
             WHERE p.is_active=1 AND s.review_excluded=0
