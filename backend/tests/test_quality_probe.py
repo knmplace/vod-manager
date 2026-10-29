@@ -245,6 +245,20 @@ def test_language_audit_provider_history_excludes_inactive_providers(db):
     assert "inactive-language-provider" not in providers
 
 
+def test_language_audit_stats_group_recent_error_codes_by_provider(db):
+    pid = db.upsert_provider("error-code-provider", "", "", "", provider_type="library")
+    db.record_language_probe_run("movie", 31, pid, "deferred", None, [], ["EN"], False, False,
+                                "error-code-provider answered HTTP 404 for this source.")
+    db.record_language_probe_run("movie", 32, pid, "deferred", None, [], ["EN"], False, False,
+                                "error-code-provider asked us to slow down.")
+    db.record_language_probe_run("movie", 33, pid, "deferred", None, [], ["EN"], False, False,
+                                "error-code-provider has no free probe connection.")
+    codes = {(row["provider"], row["code"]): row["count"] for row in db.language_audit_stats()["error_history"]}
+    assert codes[("error-code-provider", "404")] == 1
+    assert codes[("error-code-provider", "PUSHBACK")] == 1
+    assert codes[("error-code-provider", "CAPACITY")] == 1
+
+
 def test_language_mismatch_report_approval_updates_tag_and_archives_excluded_source(db, tmp_path):
     pid = db.upsert_provider("report-language", "", "", "", provider_type="library")
     mid = db.upsert_movie("Report Hindi Movie", 2026)

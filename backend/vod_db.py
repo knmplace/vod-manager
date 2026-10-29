@@ -8551,6 +8551,26 @@ def language_probe_activity_today() -> dict:
         conn.close()
 
 
+def _language_probe_error_code(status: str | None, error: str | None) -> str:
+    """Normalize stored probe failures into a provider-actionable code."""
+    message = error or ""
+    match = re.search(r"HTTP (\d{3})", message)
+    if match:
+        return match.group(1)
+    lowered = message.lower()
+    if "slow down" in lowered or "pushed back" in lowered:
+        return "PUSHBACK"
+    if "no free probe connection" in lowered:
+        return "CAPACITY"
+    if "already being checked" in lowered:
+        return "BUSY"
+    if "timeout" in lowered or "took too long" in lowered:
+        return "TIMEOUT"
+    if "peer closed" in lowered or "incomplete message body" in lowered:
+        return "INCOMPLETE"
+    return (status or "OTHER").upper()
+
+
 def language_audit_stats(history_limit: int = 31) -> dict:
     """Return live backlog totals plus probe outcomes grouped by local day."""
     enabled = sorted(get_enabled_languages())
@@ -8608,6 +8628,19 @@ def language_audit_stats(history_limit: int = 31) -> dict:
             FROM language_probe_runs r JOIN providers p ON p.id=r.provider_id AND p.is_active=1
             GROUP BY provider, type ORDER BY provider, type
         """).fetchall()
+        error_rows = conn.execute("""
+            SELECT COALESCE(p.name, 'Unknown provider') AS provider,
+                   r.status, r.error
+            FROM language_probe_runs r
+            LEFT JOIN providers p ON p.id=r.provider_id
+            WHERE CAST(r.checked_at AS REAL) >= strftime('%s', 'now', '-48 hours')
+              AND r.status IN ('error', 'deferred')
+        """).fetchall()
+        error_counts: dict[tuple[str, str], int] = {}
+        for error_row in error_rows:
+            code = _language_probe_error_code(error_row["status"], error_row["error"])
+            key = (error_row["provider"], code)
+            error_counts[key] = error_counts.get(key, 0) + 1
         return {
             "eligible": {"movies": int(movie_eligible), "series": int(series_eligible),
                          "total": int(movie_eligible + series_eligible)},
@@ -8615,6 +8648,10 @@ def language_audit_stats(history_limit: int = 31) -> dict:
             "wanted_languages": enabled,
             "history": [dict(r) for r in rows],
             "provider_history": [dict(r) for r in provider_rows],
+            "error_history": [
+                {"provider": provider, "code": code, "count": count}
+                for (provider, code), count in sorted(error_counts.items())
+            ],
         }
     finally:
         conn.close()

@@ -42,6 +42,9 @@ addresses, credentials, usernames, or user-specific deployment information.
   explicitly from the report controls.
 - Clarified mismatch decisions with a separate Approve archive result and
   one-line per-record descriptions for Approve and Keep.
+- Added closed-by-default report sections for monitoring controls, provider
+  history, decision guidance, and provider/error-code counts from the last 48
+  hours.
 - Probe Issues now shows each source's configured language. Plex episode imports
   now populate that field consistently with movie and other provider imports.
 

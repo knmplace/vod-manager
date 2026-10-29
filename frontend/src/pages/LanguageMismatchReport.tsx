@@ -26,7 +26,7 @@ type Mismatch = {
   proposed_archive: boolean
 }
 
-type Stats = { eligible: { movies: number; series: number; total: number }; pending_review: number; wanted_languages: string[]; history: { day: string; probes: number; mismatches: number; not_needed: number; outside_wanted: number; wanted_only: number; errors: number }[]; provider_history: { provider: string; type: 'M' | 'S'; probes: number; mismatches: number; not_needed: number; outside_wanted: number; wanted_only: number; errors: number }[] }
+type Stats = { eligible: { movies: number; series: number; total: number }; pending_review: number; wanted_languages: string[]; history: { day: string; probes: number; mismatches: number; not_needed: number; outside_wanted: number; wanted_only: number; errors: number }[]; provider_history: { provider: string; type: 'M' | 'S'; probes: number; mismatches: number; not_needed: number; outside_wanted: number; wanted_only: number; errors: number }[]; error_history: { provider: string; code: string; count: number }[] }
 type Report = { enabled_languages: string[]; count: number; results: Mismatch[]; errors?: { source_id: number }[]; stats?: Stats; trickle?: { enabled: boolean; interval_seconds: number; daily_max: number | null; checked_today: number; attempts_today: number; deferred_today: number; errors_today: number; probes_per_cycle: number; language_window_max: number | null; language_window_seconds: number } }
 
 const NAMES: Record<string, string> = {
@@ -167,7 +167,8 @@ export default function LanguageMismatchReport() {
         <div className="rounded-md border border-border bg-card px-3 py-2"><div className="text-[11px] text-muted-foreground">Estimated pace</div><div className="text-lg font-semibold">{report.data?.trickle ? `${Math.round(report.data.trickle.probes_per_cycle * 3600 / report.data.trickle.interval_seconds).toLocaleString()}/hr` : '—'}</div><div className="text-[11px] text-muted-foreground">Eligible count drops as sources are checked</div></div>
       </div>
 
-      <div className="rounded-md border border-border bg-card px-3 py-3">
+      <details className="rounded-md border border-border bg-card px-3 py-3">
+        <summary className="cursor-pointer text-xs font-medium">Monitoring controls</summary>
         <div className="flex flex-wrap items-end gap-3">
           <label className="text-xs">Probes per cycle<input className="block mt-1 w-28 rounded border border-border bg-background px-2 py-1" type="number" min="1" max="100" value={form.probes_per_cycle} onChange={(e) => setForm({ ...form, probes_per_cycle: Number(e.target.value) })} /></label>
           <label className="text-xs">Seconds between cycles<input className="block mt-1 w-32 rounded border border-border bg-background px-2 py-1" type="number" min="60" max="3600" value={form.interval_seconds} onChange={(e) => setForm({ ...form, interval_seconds: Number(e.target.value) })} /></label>
@@ -175,9 +176,14 @@ export default function LanguageMismatchReport() {
           <button className="border border-primary/40 text-primary rounded px-2 py-1.5 text-xs hover:bg-accent disabled:opacity-50" disabled={saveSettings.isPending} onClick={() => saveSettings.mutate()}>Save pacing</button>
           <span className="text-[11px] text-muted-foreground">Leave Daily cap blank for no cap. Individual source errors are recorded while the sweep continues rotating across active providers.</span>
         </div>
-      </div>
+      </details>
 
+      <details className="rounded-md border border-border bg-card px-3 py-3">
+        <summary className="cursor-pointer text-xs font-medium">Provider probe history and error codes</summary>
       {!!report.data?.stats?.provider_history.length && <><div className="overflow-x-auto border border-border rounded-md"><table className="w-full text-xs"><thead className="bg-card text-muted-foreground"><tr className="text-left"><th className="p-2">Provider</th><th className="p-2">Type</th><th className="p-2">Probes</th><th className="p-2">Not needed</th><th className="p-2">Needed review</th><th className="p-2">Outside wanted</th><th className="p-2">Wanted only</th><th className="p-2">Errors/deferred</th></tr></thead><tbody>{report.data.stats.provider_history.map((h) => <tr className="border-t border-border/60" key={`${h.provider}:${h.type}`}><td className="p-2">{h.provider}</td><td className="p-2 font-semibold">{h.type}</td><td className="p-2">{h.probes.toLocaleString()}</td><td className="p-2">{h.not_needed.toLocaleString()}</td><td className="p-2">{h.mismatches.toLocaleString()}</td><td className="p-2">{h.outside_wanted.toLocaleString()}</td><td className="p-2">{h.wanted_only.toLocaleString()}</td><td className="p-2">{h.errors.toLocaleString()}</td></tr>)}</tbody></table></div><p className="text-[11px] text-muted-foreground">Each row reconciles as: Probes = Not needed + Needed review + Errors/deferred. “Not needed” means the probe completed without finding a mismatch.</p></>}
+
+      {!!report.data?.stats?.error_history.length && <div className="mt-3 overflow-x-auto"><div className="mb-2 text-[11px] text-muted-foreground">Deferred/error codes from the last 48 hours. HTTP codes are provider responses; PUSHBACK, CAPACITY, BUSY, TIMEOUT, and INCOMPLETE are normalized conditions.</div><table className="w-full text-xs"><thead className="text-muted-foreground"><tr className="text-left"><th className="p-2">Provider</th><th className="p-2">Code</th><th className="p-2">Count</th></tr></thead><tbody>{report.data.stats.error_history.map((h) => <tr className="border-t border-border/60" key={`${h.provider}:${h.code}`}><td className="p-2">{h.provider}</td><td className="p-2 font-semibold">{h.code}</td><td className="p-2">{h.count.toLocaleString()}</td></tr>)}</tbody></table></div>}
+      </details>
 
       <div className="flex flex-wrap items-center gap-2 border border-border rounded-md bg-card px-3 py-2 text-xs">
         <span className="text-muted-foreground">{filteredRows.length} shown of {rows.length} pending mismatch{rows.length === 1 ? '' : 'es'}</span>
@@ -191,11 +197,14 @@ export default function LanguageMismatchReport() {
         <button className="border border-amber-500/40 text-amber-400 rounded px-2 py-1 hover:bg-amber-500/10 disabled:opacity-50" disabled={decide.isPending || !rows.length} onClick={() => runBulk('rejected', true)}>Keep all</button>
       </div>
 
-      <div className="flex flex-wrap gap-x-5 gap-y-1 border border-border/70 rounded-md bg-background/50 px-3 py-2 text-[11px] text-muted-foreground">
+      <details className="rounded-md border border-border/70 bg-background/50 px-3 py-2">
+        <summary className="cursor-pointer text-[11px] font-medium">How decisions work</summary>
+        <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-[11px] text-muted-foreground">
         <span><strong className="text-emerald-400">✓ Approve</strong> — apply the proposed language; archive the parent when Approve archive is shown.</span>
         <span><strong className="text-amber-400">× Keep</strong> — no changes; record the decision and do not check this source again.</span>
         <span><strong className="text-foreground">Manual review</strong> — multiple or ambiguous audio tags; approval is disabled until the user decides.</span>
-      </div>
+        </div>
+      </details>
 
       {filteredRows.length === 0 ? <div className="border border-border rounded-md bg-card p-8 text-center text-sm text-muted-foreground">{rows.length === 0 ? 'No pending language mismatches.' : 'No mismatches match the selected filters.'}</div> : (
         <div className="overflow-x-auto border border-border rounded-md">
