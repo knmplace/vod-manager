@@ -450,14 +450,18 @@ async def language_trickle_once(target: dict | None = None) -> dict:
         observed = result.get("observed_languages") or []
         configured = result.get("configured_language")
         wanted = config.get_enabled_languages()
+        auto_approved = bool(configured and observed and configured in observed)
         # The report treats any multi-track result or a changed single-track
-        # result as needing review, even when the configured language is one of
-        # several observed tracks.
-        mismatch = bool(observed and observed != [configured])
+        # result as needing review unless the configured language is present.
+        mismatch = bool(observed and not auto_approved and observed != [configured])
         wanted_match = bool(observed and set(observed).issubset(set(wanted)))
+        if auto_approved:
+            await asyncio.to_thread(vod_db.auto_approve_language_probe_source,
+                                    target["kind"], target["source_id"], observed)
         await asyncio.to_thread(vod_db.record_language_probe_run,
                                 target["kind"], target["source_id"], target.get("provider_id"),
-                                result.get("status") or "observed", configured, observed,
+                                "auto_approved" if auto_approved else result.get("status") or "observed",
+                                configured, observed,
                                 wanted, mismatch, wanted_match, result.get("error"))
         if result.get("mismatch"):
             import notices

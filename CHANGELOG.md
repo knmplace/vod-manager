@@ -45,6 +45,15 @@ addresses, credentials, usernames, or user-specific deployment information.
 - Added closed-by-default report sections for monitoring controls, provider
   history, decision guidance, and provider/error-code counts from the last 48
   hours.
+- Updated Probe Issues with compact fixed-width columns, Shift selection,
+  collapsible deferred/quarantined sections, and plain-language HTTP reason
+  details.
+- Language probes now automatically approve and close sources when the
+  configured language is present among the observed audio tracks.
+- Tightened the mismatch table layout and moved provider/archive context into
+  the existing columns while keeping supporting text white for readability.
+- Provider and observed-language filters now support selecting multiple values
+  at once on both language report pages.
 - Probe Issues now shows each source's configured language. Plex episode imports
   now populate that field consistently with movie and other provider imports.
 

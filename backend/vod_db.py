@@ -8354,6 +8354,65 @@ def set_source_language_probe(kind: str, source_id: int, languages: list[str] | 
         conn.close()
 
 
+def auto_approve_language_probe_source(kind: str, source_id: int, languages: list[str]) -> None:
+    """Close a probe when the configured language is present in the tracks."""
+    table = "movie_sources" if kind == "movie" else "episode_sources"
+    now = _now()
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            row = conn.execute(f"SELECT language FROM {table} WHERE id=?", (source_id,)).fetchone()
+            if not row or not row["language"] or row["language"] not in set(languages):
+                return
+            conn.execute(
+                f"""UPDATE {table}
+                    SET language_probe_status='auto_approved', language_probe_decision='approved',
+                        language_probe_decided_at=?, language_probe_method='auto_approved_configured_present',
+                        language_probe_error=NULL, language_probe_failures=0,
+                        language_probe_last_failed_at=NULL, language_probe_quarantined_at=NULL
+                    WHERE id=?""",
+                (now, source_id),
+            )
+            _commit_with_retry(conn)
+        finally:
+            conn.close()
+
+
+def auto_approve_existing_language_matches() -> int:
+    """Retroactively close observed rows whose configured language is present."""
+    changed = 0
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            now = _now()
+            for table in ("movie_sources", "episode_sources"):
+                rows = conn.execute(
+                    f"""SELECT id, language, language_probe_languages FROM {table}
+                        WHERE language_probe_status='observed' AND language_probe_decision IS NULL
+                          AND language IS NOT NULL AND language_probe_languages IS NOT NULL"""
+                ).fetchall()
+                for row in rows:
+                    try:
+                        languages = set(json.loads(row["language_probe_languages"] or "[]"))
+                    except (TypeError, ValueError):
+                        languages = set()
+                    if row["language"] not in languages:
+                        continue
+                    conn.execute(
+                        f"""UPDATE {table}
+                            SET language_probe_status='auto_approved', language_probe_decision='approved',
+                                language_probe_decided_at=?, language_probe_method='auto_approved_configured_present'
+                            WHERE id=?""",
+                        (now, row["id"]),
+                    )
+                    changed += 1
+            if changed:
+                _commit_with_retry(conn)
+            return changed
+        finally:
+            conn.close()
+
+
 def record_language_probe_failure(kind: str, source_id: int, error: str,
                                   quarantine_after: int = 2) -> dict:
     """Record a provider/source failure and quarantine it after the threshold.
@@ -8486,7 +8545,13 @@ def list_language_probe_errors(limit: int = 500) -> list[dict]:
             ORDER BY quarantined_at DESC, provider_name, title
             LIMIT ?
         """, (max(1, int(limit)),)).fetchall()
-        return [dict(r) for r in rows]
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["reason_code"] = _language_probe_error_code("error", item.get("reason"))
+            item["reason_detail"] = _language_probe_error_detail(item["reason_code"])
+            items.append(item)
+        return items
     finally:
         conn.close()
 
@@ -8569,6 +8634,24 @@ def _language_probe_error_code(status: str | None, error: str | None) -> str:
     if "peer closed" in lowered or "incomplete message body" in lowered:
         return "INCOMPLETE"
     return (status or "OTHER").upper()
+
+
+def _language_probe_error_detail(code: str) -> str:
+    return {
+        "400": "Bad request",
+        "401": "Unauthorized",
+        "403": "Provider refused",
+        "404": "Source not found",
+        "406": "Format rejected",
+        "429": "Rate limited",
+        "500": "Provider server error",
+        "551": "Provider error",
+        "PUSHBACK": "Provider slowing down",
+        "CAPACITY": "No connection available",
+        "BUSY": "Probe already running",
+        "TIMEOUT": "Provider timed out",
+        "INCOMPLETE": "Incomplete response",
+    }.get(code, "Probe failed")
 
 
 def language_audit_stats(history_limit: int = 31) -> dict:
@@ -8711,7 +8794,7 @@ def list_language_mismatches(limit: int = 1000) -> dict:
                 observed = sorted(set(json.loads(item.pop("language_probe_languages") or "[]")))
             except (TypeError, ValueError):
                 observed = []
-            if not observed or observed == [item.get("configured_language")]:
+            if not observed or (item.get("configured_language") and item.get("configured_language") in observed):
                 continue
             item["observed_languages"] = observed
             item["safe_to_apply"] = len(observed) == 1

@@ -44,8 +44,8 @@ export default function LanguageMismatchReport() {
   const qc = useQueryClient()
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [selectionAnchor, setSelectionAnchor] = useState<string | null>(null)
-  const [providerFilter, setProviderFilter] = useState('all')
-  const [observedFilter, setObservedFilter] = useState('all')
+  const [providerFilters, setProviderFilters] = useState<string[]>([])
+  const [observedFilters, setObservedFilters] = useState<string[]>([])
   const [showTop, setShowTop] = useState(false)
   const report = useQuery<Report>({
     queryKey: ['language-mismatch-report'],
@@ -73,7 +73,7 @@ export default function LanguageMismatchReport() {
   const key = (r: Mismatch) => `${r.kind}:${r.source_id}`
   const providerOptions = useMemo(() => [...new Set(rows.map((row) => row.provider_name))], [rows])
   const observedOptions = useMemo(() => [...new Set(rows.map((row) => row.observed_languages.join(', ')))], [rows])
-  const filteredRows = useMemo(() => rows.filter((row) => (providerFilter === 'all' || row.provider_name === providerFilter) && (observedFilter === 'all' || row.observed_languages.join(', ') === observedFilter)), [rows, providerFilter, observedFilter])
+  const filteredRows = useMemo(() => rows.filter((row) => (!providerFilters.length || providerFilters.includes(row.provider_name)) && (!observedFilters.length || observedFilters.includes(row.observed_languages.join(', ')))), [rows, providerFilters, observedFilters])
   useEffect(() => {
     const onScroll = () => {
       const max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight)
@@ -188,8 +188,8 @@ export default function LanguageMismatchReport() {
       <div className="flex flex-wrap items-center gap-2 border border-border rounded-md bg-card px-3 py-2 text-xs">
         <span className="text-muted-foreground">{filteredRows.length} shown of {rows.length} pending mismatch{rows.length === 1 ? '' : 'es'}</span>
         <span className="text-muted-foreground">· {selected.size} selected</span>
-        <label className="text-[11px] text-muted-foreground">Provider<select className="ml-1 rounded border border-border bg-background px-2 py-1 text-xs text-foreground" value={providerFilter} onChange={(e) => setProviderFilter(e.target.value)}><option value="all">All reported providers</option>{providerOptions.map((provider) => <option key={provider} value={provider}>{provider}</option>)}</select></label>
-        <label className="text-[11px] text-muted-foreground">Observed<select className="ml-1 rounded border border-border bg-background px-2 py-1 text-xs text-foreground" value={observedFilter} onChange={(e) => setObservedFilter(e.target.value)}><option value="all">All reported languages</option>{observedOptions.map((observed) => <option key={observed} value={observed}>{observed}</option>)}</select></label>
+        <details className="relative"><summary className="cursor-pointer rounded border border-border px-2 py-1 text-[11px] text-foreground">Provider{providerFilters.length ? ` (${providerFilters.length})` : ''}</summary><div className="absolute left-0 z-30 mt-1 max-h-60 min-w-48 overflow-auto rounded border border-border bg-card p-2 shadow-lg">{providerOptions.map((provider) => <label className="flex items-center gap-2 whitespace-nowrap py-1 text-[11px] text-foreground" key={provider}><input type="checkbox" checked={providerFilters.includes(provider)} onChange={() => setProviderFilters((old) => old.includes(provider) ? old.filter((value) => value !== provider) : [...old, provider])} />{provider}</label>)}{providerFilters.length > 0 && <button className="mt-1 text-[11px] text-primary" onClick={() => setProviderFilters([])}>Clear providers</button>}</div></details>
+        <details className="relative"><summary className="cursor-pointer rounded border border-border px-2 py-1 text-[11px] text-foreground">Observed{observedFilters.length ? ` (${observedFilters.length})` : ''}</summary><div className="absolute left-0 z-30 mt-1 max-h-60 min-w-56 overflow-auto rounded border border-border bg-card p-2 shadow-lg">{observedOptions.map((observed) => <label className="flex items-center gap-2 whitespace-nowrap py-1 text-[11px] text-foreground" key={observed}><input type="checkbox" checked={observedFilters.includes(observed)} onChange={() => setObservedFilters((old) => old.includes(observed) ? old.filter((value) => value !== observed) : [...old, observed])} />{observed}</label>)}{observedFilters.length > 0 && <button className="mt-1 text-[11px] text-primary" onClick={() => setObservedFilters([])}>Clear observed</button>}</div></details>
         <button className="border border-border rounded px-2 py-1 hover:bg-accent" onClick={() => { setSelected((old) => old.size === filteredRows.length ? new Set() : new Set(filteredRows.map(key))); setSelectionAnchor(null) }}>{selected.size === filteredRows.length && filteredRows.length ? 'Clear selection' : 'Select all shown'}</button>
         <button className="border border-emerald-500/40 text-emerald-400 rounded px-2 py-1 hover:bg-emerald-500/10 disabled:opacity-50" disabled={decide.isPending || !selected.size} onClick={() => runBulk('approved')}>Approve selected</button>
         <button className="border border-amber-500/40 text-amber-400 rounded px-2 py-1 hover:bg-amber-500/10 disabled:opacity-50" disabled={decide.isPending || !selected.size} onClick={() => runBulk('rejected')}>Keep selected</button>
@@ -208,19 +208,18 @@ export default function LanguageMismatchReport() {
 
       {filteredRows.length === 0 ? <div className="border border-border rounded-md bg-card p-8 text-center text-sm text-muted-foreground">{rows.length === 0 ? 'No pending language mismatches.' : 'No mismatches match the selected filters.'}</div> : (
         <div className="overflow-x-auto border border-border rounded-md">
-          <table className="w-full text-xs">
+          <table className="w-full table-fixed text-xs text-white [&_.text-muted-foreground]:text-white">
             <thead className="bg-card text-muted-foreground"><tr className="text-left">
-              <th className="p-2 w-8"><input type="checkbox" aria-label="Select all shown mismatches" checked={filteredRows.length > 0 && filteredRows.every((row) => selected.has(key(row)))} onChange={(e) => setSelected((old) => { const next = new Set(old); filteredRows.forEach((row) => e.target.checked ? next.add(key(row)) : next.delete(key(row))); return next })} /></th><th className="p-2">Title</th><th className="p-2">Provider</th><th className="p-2">Configured</th><th className="p-2">Observed</th><th className="p-2">Archive action</th><th className="p-2">Proposed result</th><th className="p-2">Checked</th><th className="p-2">Decision</th>
+              <th className="p-2 w-8"><input type="checkbox" aria-label="Select all shown mismatches" checked={filteredRows.length > 0 && filteredRows.every((row) => selected.has(key(row)))} onChange={(e) => setSelected((old) => { const next = new Set(old); filteredRows.forEach((row) => e.target.checked ? next.add(key(row)) : next.delete(key(row))); return next })} /></th><th className="p-2 w-[34%]">Title</th><th className="p-2 w-[10%]">Provider</th><th className="p-2 w-[10%]">Configured</th><th className="p-2 w-[17%]">Observed / archive</th><th className="p-2 w-[13%]">Proposed result</th><th className="p-2 w-[10%]">Checked</th><th className="p-2 w-[16%]">Decision</th>
             </tr></thead>
             <tbody>{filteredRows.map((row) => {
               const id = key(row); const disabled = !row.safe_to_apply
               return <tr key={id} className="border-t border-border/60 align-top">
                 <td className="p-2"><input type="checkbox" checked={selected.has(id)} onChange={(e) => toggleRowSelection(row, filteredRows.indexOf(row), e)} /></td>
                 <td className="p-2"><div className="font-medium flex items-center gap-1"><span className="mr-1 rounded border border-border px-1 text-[10px]">{row.kind === 'episode' ? 'S' : 'M'}</span>{row.title} {row.year ? `(${row.year})` : ''}<PlayButton url={buildPreviewSourceUrl(row.kind === 'episode' ? 'series' : 'movie', row.source_id, row.container_extension || 'mp4', credentials.data)} transcodedUrl={buildTranscodedPreviewSourceUrl(row.kind === 'episode' ? 'series' : 'movie', row.source_id, credentials.data)} hlsUrl={buildHlsPreviewSourceUrl(row.kind === 'episode' ? 'series' : 'movie', row.source_id, credentials.data)} title={`${row.title}${row.year ? ` (${row.year})` : ''}${row.kind === 'episode' ? ` S${row.season_number}E${row.episode_number}` : ''}`} /></div><div className="text-muted-foreground">{row.kind === 'episode' ? `S${row.season_number}E${row.episode_number} · ${row.episode_name ?? ''}` : 'Movie'}{row.tmdb_id ? ` · TMDB ${row.tmdb_id}` : ''}</div></td>
-                <td className="p-2">{row.provider_name}</td>
+                <td className="p-2 text-white">{row.provider_name}</td>
                 <td className="p-2">{languageLabel(row.configured_language)}</td>
-                <td className="p-2">{row.observed_languages.map(languageLabel).join(', ')}</td>
-                <td className="p-2">{row.proposed_archive ? <span className="text-amber-400">Approve archive</span> : <span className="text-muted-foreground">No archive</span>}</td>
+                <td className="p-2"><div>{row.observed_languages.map(languageLabel).join(', ')}</div><div className={row.proposed_archive ? 'text-[11px] text-amber-400' : 'text-[11px] text-white'}>{row.proposed_archive ? 'Approve archive' : 'No archive'}</div></td>
                 <td className="p-2">{disabled ? 'Manual review required' : languageLabel(row.proposed_language)}</td>
                 <td className="p-2 text-muted-foreground">{row.language_probed_at ? new Date(row.language_probed_at).toLocaleString() : '—'}</td>
                 <td className="p-2"><span className="flex gap-1"><button title="Approve: apply the proposed language and archive when shown" disabled={decide.isPending || disabled} className="p-1 rounded border border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/10 disabled:opacity-40" onClick={() => decide.mutate({ row, decision: 'approved' })}><Check size={13} /></button><button title="Keep: make no changes and do not check this source again" disabled={decide.isPending} className="p-1 rounded border border-amber-500/40 text-amber-400 hover:bg-amber-500/10 disabled:opacity-40" onClick={() => decide.mutate({ row, decision: 'rejected' })}><X size={13} /></button></span><div className="mt-1 space-y-0.5 text-[10px] text-muted-foreground"><div>Approve: {disabled ? 'manual review required' : row.proposed_archive ? 'update language; archive parent' : 'update language'}</div><div>Keep: no changes; no future checks</div></div></td>

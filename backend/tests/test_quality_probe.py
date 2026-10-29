@@ -149,6 +149,24 @@ def test_language_probe_records_observed_tags_without_changing_configured_langua
     assert row["language_probe_languages"] == '["HI"]'
 
 
+def test_configured_language_present_auto_approves_without_changing_language(db):
+    pid = db.upsert_provider("auto-language", "", "", "", provider_type="library")
+    mid = db.upsert_movie("Multi-track Movie", 2026)
+    db.add_movie_source(mid, pid, "multi-track", "mkv")
+    conn = db._connect()
+    sid = conn.execute("SELECT id FROM movie_sources WHERE movie_id=?", (mid,)).fetchone()["id"]
+    conn.execute("UPDATE movie_sources SET language='EN' WHERE id=?", (sid,))
+    conn.commit(); conn.close()
+    db.set_source_language_probe("movie", sid, ["DE", "EN", "ES"], "observed", "embedded_audio_tags", "high")
+
+    db.auto_approve_language_probe_source("movie", sid, ["DE", "EN", "ES"])
+
+    row = db.get_language_probe_source("movie", sid)
+    assert row["language"] == "EN"
+    assert row["language_probe_status"] == "auto_approved"
+    assert row["language_probe_decision"] == "approved"
+
+
 def test_language_probe_caches_unknown_result(db, tmp_path, monkeypatch):
     pid = db.upsert_provider("local-language-unknown", "", "", "", provider_type="library")
     mid = db.upsert_movie("Un tagged Movie", 2026)
