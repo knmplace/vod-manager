@@ -31,6 +31,16 @@ These submissions are focused upstream changes. Fork-only release notes remain
 below; PR branches contain no provider identities, private URLs, local network
 addresses, credentials, usernames, or user-specific deployment information.
 
+## 2026-10-29 (Language report and Probe Issues adjustments)
+
+- Added provider sorting to the Language Mismatch Report and Probe Issues page,
+  plus observed-language sorting to the mismatch report.
+- Added page-level selection with bulk approve/keep/retry/delete actions.
+- Added a floating return-to-top control after the page is substantially
+  scrolled.
+- Probe Issues now shows each source's configured language. Plex episode imports
+  now populate that field consistently with movie and other provider imports.
+
 Provider breakdowns in the Language Mismatch Report use only active providers
 currently configured in the Providers list; inactive or stale historical
 provider records are omitted.

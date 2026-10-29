@@ -8460,6 +8460,7 @@ def list_language_probe_errors(limit: int = 500) -> list[dict]:
         rows = conn.execute("""
             SELECT 'movie' AS kind, ms.id AS source_id, ms.movie_id AS item_id,
                    m.name AS title, m.year, ms.provider_id, p.name AS provider_name,
+                   ms.language AS configured_language,
                    ms.provider_category_name AS category, ms.provider_stream_id,
                    ms.container_extension, ms.language_probe_error AS reason,
                    ms.language_probe_failures AS attempts,
@@ -8472,6 +8473,7 @@ def list_language_probe_errors(limit: int = 500) -> list[dict]:
             UNION ALL
             SELECT 'episode' AS kind, es.id AS source_id, es.episode_id AS item_id,
                    s.name AS title, s.year, es.provider_id, p.name AS provider_name,
+                   es.language AS configured_language,
                    es.provider_category_name AS category, es.provider_stream_id,
                    es.container_extension, es.language_probe_error AS reason,
                    es.language_probe_failures AS attempts,
@@ -11713,18 +11715,20 @@ def bulk_import_plex_series(provider_id: int, items: list[dict]) -> dict:
                                     source_new = _source_is_new(conn, "episode_sources", "episode_id", provider_id,
                                                                 "provider_stream_id", ep["provider_stream_id"], episode_id,
                                                                 ep.get("file_size_bytes"))
+                                    raw_name = ep.get("raw_name") or item.get("raw_name") or ep.get("name") or item.get("name") or ""
                                     conn.execute(
-                                        """INSERT INTO episode_sources (episode_id, provider_id, provider_stream_id, container_extension, plex_rating_key, file_size_bytes, provider_category_name, added_at, last_seen_at)
-                                           VALUES (?,?,?,?,?,?,?,?,?)
+                                        """INSERT INTO episode_sources (episode_id, provider_id, provider_stream_id, container_extension, plex_rating_key, file_size_bytes, provider_category_name, raw_name, language, added_at, last_seen_at)
+                                           VALUES (?,?,?,?,?,?,?,?,?,?,?)
                                            ON CONFLICT(provider_id, provider_stream_id) DO UPDATE SET
                                                episode_id=excluded.episode_id, last_seen_at=excluded.last_seen_at, plex_rating_key=excluded.plex_rating_key,
-                                               file_size_bytes=excluded.file_size_bytes, provider_category_name=excluded.provider_category_name""",
+                                               file_size_bytes=excluded.file_size_bytes, provider_category_name=excluded.provider_category_name,
+                                               raw_name=excluded.raw_name, language=excluded.language""",
                                         # Unlike XC (per-episode category unknown until enrich_series
                                         # lazily fetches it, see that function's docstring), Plex/Emby
                                         # already know every episode up front -- the series-level
                                         # item's own category_name (GH#9) applies directly here, no
                                         # staging through series.provider_category_name needed.
-                                        (episode_id, provider_id, ep["provider_stream_id"], ep.get("container_extension", "mp4"), ep.get("plex_rating_key"), ep.get("file_size_bytes"), item.get("provider_category_name"), now, now),
+                                        (episode_id, provider_id, ep["provider_stream_id"], ep.get("container_extension", "mp4"), ep.get("plex_rating_key"), ep.get("file_size_bytes"), item.get("provider_category_name"), raw_name, _source_language(raw_name, item.get("provider_category_name")), now, now),
                                     )
                                     episodes_total += 1
                                     episodes_added += episode_added

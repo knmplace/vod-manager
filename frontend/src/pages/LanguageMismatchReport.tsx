@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Check, Languages, Loader2, Power, RefreshCw, X } from 'lucide-react'
+import { ArrowUp, ArrowUpDown, Check, Languages, Loader2, Power, RefreshCw, X } from 'lucide-react'
 import api from '@/lib/api'
 import { notify } from '@/lib/confirm'
 import { buildHlsPreviewSourceUrl, buildPreviewSourceUrl, buildTranscodedPreviewSourceUrl, PlayButton, type XcCredentials } from './VodManager'
@@ -43,6 +43,8 @@ function languageLabel(code: string | null | undefined) {
 export default function LanguageMismatchReport() {
   const qc = useQueryClient()
   const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [sort, setSort] = useState<{ key: 'provider' | 'observed'; direction: 'asc' | 'desc' }>({ key: 'provider', direction: 'asc' })
+  const [showTop, setShowTop] = useState(false)
   const report = useQuery<Report>({
     queryKey: ['language-mismatch-report'],
     queryFn: () => api.get('/vod/language-mismatch-report/').then((r) => r.data),
@@ -67,7 +69,22 @@ export default function LanguageMismatchReport() {
   const rows = report.data?.results ?? []
   const errors = report.data?.errors ?? []
   const key = (r: Mismatch) => `${r.kind}:${r.source_id}`
-  const selectable = useMemo(() => rows.filter((r) => r.safe_to_apply).map(key), [rows])
+  const sortedRows = useMemo(() => [...rows].sort((a, b) => {
+    const left = sort.key === 'provider' ? a.provider_name : a.observed_languages.join(', ')
+    const right = sort.key === 'provider' ? b.provider_name : b.observed_languages.join(', ')
+    const result = left.localeCompare(right, undefined, { sensitivity: 'base' }) || a.title.localeCompare(b.title, undefined, { sensitivity: 'base' })
+    return sort.direction === 'asc' ? result : -result
+  }), [rows, sort])
+  const toggleSort = (key: 'provider' | 'observed') => setSort((old) => ({ key, direction: old.key === key && old.direction === 'asc' ? 'desc' : 'asc' }))
+  useEffect(() => {
+    const onScroll = () => {
+      const max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight)
+      setShowTop(window.scrollY > Math.max(240, max * 0.3))
+    }
+    onScroll()
+    window.addEventListener('scroll', onScroll, { passive: true })
+    return () => window.removeEventListener('scroll', onScroll)
+  }, [])
   useEffect(() => {
     setSelected((old) => new Set([...old].filter((id) => rows.some((r) => key(r) === id))))
   }, [rows])
@@ -141,7 +158,7 @@ export default function LanguageMismatchReport() {
       <div className="flex flex-wrap items-center gap-2 border border-border rounded-md bg-card px-3 py-2 text-xs">
         <span className="text-muted-foreground">{rows.length} pending mismatch{rows.length === 1 ? '' : 'es'}</span>
         <span className="text-muted-foreground">· {selected.size} selected</span>
-        <button className="ml-auto border border-border rounded px-2 py-1 hover:bg-accent" onClick={() => setSelected(new Set(selectable))}>Select all approvable</button>
+        <button className="ml-auto border border-border rounded px-2 py-1 hover:bg-accent" onClick={() => setSelected((old) => old.size === rows.length ? new Set() : new Set(rows.map(key)))}>{selected.size === rows.length && rows.length ? 'Clear selection' : 'Select all on page'}</button>
         <button className="border border-emerald-500/40 text-emerald-400 rounded px-2 py-1 hover:bg-emerald-500/10 disabled:opacity-50" disabled={decide.isPending || !selected.size} onClick={() => runBulk('approved')}>Approve selected</button>
         <button className="border border-amber-500/40 text-amber-400 rounded px-2 py-1 hover:bg-amber-500/10 disabled:opacity-50" disabled={decide.isPending || !selected.size} onClick={() => runBulk('rejected')}>Keep configured selected</button>
         <button className="border border-emerald-500/40 text-emerald-400 rounded px-2 py-1 hover:bg-emerald-500/10 disabled:opacity-50" disabled={decide.isPending || !rows.length} onClick={() => runBulk('approved', true)}>Approve all proposed</button>
@@ -158,12 +175,12 @@ export default function LanguageMismatchReport() {
         <div className="overflow-x-auto border border-border rounded-md">
           <table className="w-full text-xs">
             <thead className="bg-card text-muted-foreground"><tr className="text-left">
-              <th className="p-2 w-8"></th><th className="p-2">Title</th><th className="p-2">Provider</th><th className="p-2">Configured</th><th className="p-2">Observed</th><th className="p-2">Proposed result</th><th className="p-2">Checked</th><th className="p-2">Decision</th>
+              <th className="p-2 w-8"><input type="checkbox" aria-label="Select all mismatches on page" checked={rows.length > 0 && selected.size === rows.length} onChange={(e) => setSelected(e.target.checked ? new Set(rows.map(key)) : new Set())} /></th><th className="p-2">Title</th><th className="p-2"><button className="inline-flex items-center gap-1 hover:text-foreground" onClick={() => toggleSort('provider')}>Provider <ArrowUpDown size={12} /></button>{sort.key === 'provider' && <ArrowUp size={12} className={`inline ml-1 ${sort.direction === 'desc' ? 'rotate-180' : ''}`} />}</th><th className="p-2">Configured</th><th className="p-2"><button className="inline-flex items-center gap-1 hover:text-foreground" onClick={() => toggleSort('observed')}>Observed <ArrowUpDown size={12} /></button>{sort.key === 'observed' && <ArrowUp size={12} className={`inline ml-1 ${sort.direction === 'desc' ? 'rotate-180' : ''}`} />}</th><th className="p-2">Proposed result</th><th className="p-2">Checked</th><th className="p-2">Decision</th>
             </tr></thead>
-            <tbody>{rows.map((row) => {
+            <tbody>{sortedRows.map((row) => {
               const id = key(row); const disabled = !row.safe_to_apply
               return <tr key={id} className="border-t border-border/60 align-top">
-                <td className="p-2"><input type="checkbox" disabled={disabled} checked={selected.has(id)} onChange={(e) => setSelected((old) => { const n = new Set(old); e.target.checked ? n.add(id) : n.delete(id); return n })} /></td>
+                <td className="p-2"><input type="checkbox" checked={selected.has(id)} onChange={(e) => setSelected((old) => { const n = new Set(old); e.target.checked ? n.add(id) : n.delete(id); return n })} /></td>
                 <td className="p-2"><div className="font-medium flex items-center gap-1"><span className="mr-1 rounded border border-border px-1 text-[10px]">{row.kind === 'episode' ? 'S' : 'M'}</span>{row.title} {row.year ? `(${row.year})` : ''}<PlayButton url={buildPreviewSourceUrl(row.kind === 'episode' ? 'series' : 'movie', row.source_id, row.container_extension || 'mp4', credentials.data)} transcodedUrl={buildTranscodedPreviewSourceUrl(row.kind === 'episode' ? 'series' : 'movie', row.source_id, credentials.data)} hlsUrl={buildHlsPreviewSourceUrl(row.kind === 'episode' ? 'series' : 'movie', row.source_id, credentials.data)} title={`${row.title}${row.year ? ` (${row.year})` : ''}${row.kind === 'episode' ? ` S${row.season_number}E${row.episode_number}` : ''}`} /></div><div className="text-muted-foreground">{row.kind === 'episode' ? `S${row.season_number}E${row.episode_number} · ${row.episode_name ?? ''}` : 'Movie'}{row.tmdb_id ? ` · TMDB ${row.tmdb_id}` : ''}</div></td>
                 <td className="p-2">{row.provider_name}</td>
                 <td className="p-2">{languageLabel(row.configured_language)}</td>
@@ -176,6 +193,7 @@ export default function LanguageMismatchReport() {
           </table>
         </div>
       )}
+      {showTop && <button aria-label="Return to top" title="Return to top" className="fixed bottom-5 right-5 z-20 rounded-full border border-primary/50 bg-card p-3 text-primary shadow-lg hover:bg-accent" onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}><ArrowUp size={17} /></button>}
     </div>
   )
 }
