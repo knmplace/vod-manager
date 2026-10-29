@@ -35,6 +35,10 @@ Provider breakdowns in the Language Mismatch Report use only active providers
 currently configured in the Providers list; inactive or stale historical
 provider records are omitted.
 
+The report now separates completed checks from total attempts and deferred
+attempts, making provider errors and pacing visible instead of hiding them
+inside the Checked today count.
+
 ### Upstream PR hygiene
 
 Upstream submissions are prepared from a clean branch based on the current

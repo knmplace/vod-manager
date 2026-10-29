@@ -8386,6 +8386,24 @@ def language_probe_count_today() -> int:
         conn.close()
 
 
+def language_probe_activity_today() -> dict:
+    """Return today's total attempts and their completed/deferred breakdown."""
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS attempts, "
+            "SUM(CASE WHEN status NOT IN ('deferred', 'error') THEN 1 ELSE 0 END) AS completed, "
+            "SUM(CASE WHEN status='deferred' THEN 1 ELSE 0 END) AS deferred, "
+            "SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS errors "
+            "FROM language_probe_runs "
+            "WHERE CAST(checked_at AS REAL) >= "
+            "strftime('%s', 'now', 'start of day', 'localtime')"
+        ).fetchone()
+        return {key: int(row[key] or 0) for key in ('attempts', 'completed', 'deferred', 'errors')}
+    finally:
+        conn.close()
+
+
 def language_audit_stats(history_limit: int = 31) -> dict:
     """Return live backlog totals plus probe outcomes grouped by local day."""
     enabled = sorted(get_enabled_languages())

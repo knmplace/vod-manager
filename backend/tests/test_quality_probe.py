@@ -230,6 +230,8 @@ def test_language_audit_stats_keep_daily_probe_history(db):
     assert stats["history"][0]["outside_wanted"] == 1
     assert stats["history"][0]["wanted_only"] == 1
     assert stats["history"][0]["not_needed"] == 1
+    activity = db.language_probe_activity_today()
+    assert activity["attempts"] == 2 and activity["completed"] == 2
 
 
 def test_language_audit_provider_history_excludes_inactive_providers(db):

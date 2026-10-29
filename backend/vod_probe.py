@@ -479,14 +479,19 @@ def language_trickle_status() -> dict:
     day = time.strftime("%Y-%m-%d", time.localtime())
     settings = config.get_language_trickle_settings()
     try:
-        checked_today = vod_db.language_probe_count_today()
+        activity = vod_db.language_probe_activity_today()
+        checked_today = activity["completed"]
     except Exception:
+        activity = {"attempts": 0, "completed": 0, "deferred": 0, "errors": 0}
         checked_today = _language_trickle_count if _language_trickle_day == day else 0
     return {
         "enabled": bool(settings.get("language_trickle_enabled", True)),
         "interval_seconds": settings["language_trickle_interval_seconds"],
         "daily_max": settings["language_trickle_daily_limit"],
         "checked_today": max(checked_today, _language_trickle_count if _language_trickle_day == day else 0),
+        "attempts_today": activity["attempts"],
+        "deferred_today": activity["deferred"],
+        "errors_today": activity["errors"],
         "probes_per_cycle": settings["language_trickle_probes_per_cycle"],
         "language_window_max": LANGUAGE_WINDOW_MAX,
         "language_window_seconds": LANGUAGE_WINDOW_SECONDS,
