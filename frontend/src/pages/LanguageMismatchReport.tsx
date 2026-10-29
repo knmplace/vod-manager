@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowUp, ArrowUpDown, Check, Languages, Loader2, Power, RefreshCw, X } from 'lucide-react'
+import { ArrowUp, Check, Languages, Loader2, Power, RefreshCw, X } from 'lucide-react'
 import api from '@/lib/api'
 import { notify } from '@/lib/confirm'
 import { buildHlsPreviewSourceUrl, buildPreviewSourceUrl, buildTranscodedPreviewSourceUrl, PlayButton, type XcCredentials } from './VodManager'
@@ -43,7 +43,8 @@ function languageLabel(code: string | null | undefined) {
 export default function LanguageMismatchReport() {
   const qc = useQueryClient()
   const [selected, setSelected] = useState<Set<string>>(new Set())
-  const [sort, setSort] = useState<{ key: 'provider' | 'observed'; direction: 'asc' | 'desc' }>({ key: 'provider', direction: 'asc' })
+  const [providerFilter, setProviderFilter] = useState('all')
+  const [observedFilter, setObservedFilter] = useState('all')
   const [showTop, setShowTop] = useState(false)
   const report = useQuery<Report>({
     queryKey: ['language-mismatch-report'],
@@ -69,13 +70,9 @@ export default function LanguageMismatchReport() {
   const rows = report.data?.results ?? []
   const errors = report.data?.errors ?? []
   const key = (r: Mismatch) => `${r.kind}:${r.source_id}`
-  const sortedRows = useMemo(() => [...rows].sort((a, b) => {
-    const left = sort.key === 'provider' ? a.provider_name : a.observed_languages.join(', ')
-    const right = sort.key === 'provider' ? b.provider_name : b.observed_languages.join(', ')
-    const result = left.localeCompare(right, undefined, { sensitivity: 'base' }) || a.title.localeCompare(b.title, undefined, { sensitivity: 'base' })
-    return sort.direction === 'asc' ? result : -result
-  }), [rows, sort])
-  const toggleSort = (key: 'provider' | 'observed') => setSort((old) => ({ key, direction: old.key === key && old.direction === 'asc' ? 'desc' : 'asc' }))
+  const providerOptions = useMemo(() => [...new Set(rows.map((row) => row.provider_name))], [rows])
+  const observedOptions = useMemo(() => [...new Set(rows.map((row) => row.observed_languages.join(', ')))], [rows])
+  const filteredRows = useMemo(() => rows.filter((row) => (providerFilter === 'all' || row.provider_name === providerFilter) && (observedFilter === 'all' || row.observed_languages.join(', ') === observedFilter)), [rows, providerFilter, observedFilter])
   useEffect(() => {
     const onScroll = () => {
       const max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight)
@@ -156,9 +153,11 @@ export default function LanguageMismatchReport() {
       {!!report.data?.stats?.provider_history.length && <><div className="overflow-x-auto border border-border rounded-md"><table className="w-full text-xs"><thead className="bg-card text-muted-foreground"><tr className="text-left"><th className="p-2">Provider</th><th className="p-2">Type</th><th className="p-2">Probes</th><th className="p-2">Not needed</th><th className="p-2">Needed review</th><th className="p-2">Outside wanted</th><th className="p-2">Wanted only</th><th className="p-2">Errors/deferred</th></tr></thead><tbody>{report.data.stats.provider_history.map((h) => <tr className="border-t border-border/60" key={`${h.provider}:${h.type}`}><td className="p-2">{h.provider}</td><td className="p-2 font-semibold">{h.type}</td><td className="p-2">{h.probes.toLocaleString()}</td><td className="p-2">{h.not_needed.toLocaleString()}</td><td className="p-2">{h.mismatches.toLocaleString()}</td><td className="p-2">{h.outside_wanted.toLocaleString()}</td><td className="p-2">{h.wanted_only.toLocaleString()}</td><td className="p-2">{h.errors.toLocaleString()}</td></tr>)}</tbody></table></div><p className="text-[11px] text-muted-foreground">Each row reconciles as: Probes = Not needed + Needed review + Errors/deferred. “Not needed” means the probe completed without finding a mismatch.</p></>}
 
       <div className="flex flex-wrap items-center gap-2 border border-border rounded-md bg-card px-3 py-2 text-xs">
-        <span className="text-muted-foreground">{rows.length} pending mismatch{rows.length === 1 ? '' : 'es'}</span>
+        <span className="text-muted-foreground">{filteredRows.length} shown of {rows.length} pending mismatch{rows.length === 1 ? '' : 'es'}</span>
         <span className="text-muted-foreground">· {selected.size} selected</span>
-        <button className="ml-auto border border-border rounded px-2 py-1 hover:bg-accent" onClick={() => setSelected((old) => old.size === rows.length ? new Set() : new Set(rows.map(key)))}>{selected.size === rows.length && rows.length ? 'Clear selection' : 'Select all on page'}</button>
+        <label className="text-[11px] text-muted-foreground">Provider<select className="ml-1 rounded border border-border bg-background px-2 py-1 text-xs text-foreground" value={providerFilter} onChange={(e) => setProviderFilter(e.target.value)}><option value="all">All reported providers</option>{providerOptions.map((provider) => <option key={provider} value={provider}>{provider}</option>)}</select></label>
+        <label className="text-[11px] text-muted-foreground">Observed<select className="ml-1 rounded border border-border bg-background px-2 py-1 text-xs text-foreground" value={observedFilter} onChange={(e) => setObservedFilter(e.target.value)}><option value="all">All reported languages</option>{observedOptions.map((observed) => <option key={observed} value={observed}>{observed}</option>)}</select></label>
+        <button className="border border-border rounded px-2 py-1 hover:bg-accent" onClick={() => setSelected((old) => old.size === filteredRows.length ? new Set() : new Set(filteredRows.map(key)))}>{selected.size === filteredRows.length && filteredRows.length ? 'Clear selection' : 'Select all shown'}</button>
         <button className="border border-emerald-500/40 text-emerald-400 rounded px-2 py-1 hover:bg-emerald-500/10 disabled:opacity-50" disabled={decide.isPending || !selected.size} onClick={() => runBulk('approved')}>Approve selected</button>
         <button className="border border-amber-500/40 text-amber-400 rounded px-2 py-1 hover:bg-amber-500/10 disabled:opacity-50" disabled={decide.isPending || !selected.size} onClick={() => runBulk('rejected')}>Keep configured selected</button>
         <button className="border border-emerald-500/40 text-emerald-400 rounded px-2 py-1 hover:bg-emerald-500/10 disabled:opacity-50" disabled={decide.isPending || !rows.length} onClick={() => runBulk('approved', true)}>Approve all proposed</button>
@@ -175,9 +174,9 @@ export default function LanguageMismatchReport() {
         <div className="overflow-x-auto border border-border rounded-md">
           <table className="w-full text-xs">
             <thead className="bg-card text-muted-foreground"><tr className="text-left">
-              <th className="p-2 w-8"><input type="checkbox" aria-label="Select all mismatches on page" checked={rows.length > 0 && selected.size === rows.length} onChange={(e) => setSelected(e.target.checked ? new Set(rows.map(key)) : new Set())} /></th><th className="p-2">Title</th><th className="p-2"><button className="inline-flex items-center gap-1 hover:text-foreground" onClick={() => toggleSort('provider')}>Provider <ArrowUpDown size={12} /></button>{sort.key === 'provider' && <ArrowUp size={12} className={`inline ml-1 ${sort.direction === 'desc' ? 'rotate-180' : ''}`} />}</th><th className="p-2">Configured</th><th className="p-2"><button className="inline-flex items-center gap-1 hover:text-foreground" onClick={() => toggleSort('observed')}>Observed <ArrowUpDown size={12} /></button>{sort.key === 'observed' && <ArrowUp size={12} className={`inline ml-1 ${sort.direction === 'desc' ? 'rotate-180' : ''}`} />}</th><th className="p-2">Proposed result</th><th className="p-2">Checked</th><th className="p-2">Decision</th>
+              <th className="p-2 w-8"><input type="checkbox" aria-label="Select all shown mismatches" checked={filteredRows.length > 0 && filteredRows.every((row) => selected.has(key(row)))} onChange={(e) => setSelected((old) => { const next = new Set(old); filteredRows.forEach((row) => e.target.checked ? next.add(key(row)) : next.delete(key(row))); return next })} /></th><th className="p-2">Title</th><th className="p-2">Provider</th><th className="p-2">Configured</th><th className="p-2">Observed</th><th className="p-2">Proposed result</th><th className="p-2">Checked</th><th className="p-2">Decision</th>
             </tr></thead>
-            <tbody>{sortedRows.map((row) => {
+            <tbody>{filteredRows.map((row) => {
               const id = key(row); const disabled = !row.safe_to_apply
               return <tr key={id} className="border-t border-border/60 align-top">
                 <td className="p-2"><input type="checkbox" checked={selected.has(id)} onChange={(e) => setSelected((old) => { const n = new Set(old); e.target.checked ? n.add(id) : n.delete(id); return n })} /></td>

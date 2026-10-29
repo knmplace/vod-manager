@@ -33,8 +33,8 @@ addresses, credentials, usernames, or user-specific deployment information.
 
 ## 2026-10-29 (Language report and Probe Issues adjustments)
 
-- Added provider sorting to the Language Mismatch Report and Probe Issues page,
-  plus observed-language sorting to the mismatch report.
+- Added provider dropdown filters to the Language Mismatch Report and Probe
+  Issues page, plus an observed-language dropdown filter to the mismatch report.
 - Added page-level selection with bulk approve/keep/retry/delete actions.
 - Added a floating return-to-top control after the page is substantially
   scrolled.
