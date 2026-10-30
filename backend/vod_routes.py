@@ -4360,6 +4360,10 @@ class LanguageMismatchDecisionRequest(BaseModel):
     decision: str                   # approved or rejected
 
 
+class LanguageProbeErrorActionRequest(BaseModel):
+    action: str                     # approve, retry or delete
+
+
 class LanguageTrickleSettingsRequest(BaseModel):
     probes_per_cycle: int
     interval_seconds: int
@@ -4395,6 +4399,7 @@ async def language_mismatch_report():
     report = await asyncio.to_thread(vod_db.list_language_mismatches)
     report["trickle"] = vod_probe.language_trickle_status()
     report["stats"] = await asyncio.to_thread(vod_db.language_audit_stats)
+    report["errors"] = await asyncio.to_thread(vod_db.list_language_probe_errors)
     # The backlog card represents actual actionable mismatch rows, not every
     # observed source. Wanted-only probe results are history, not review work.
     report["stats"]["pending_review"] = report["count"]
@@ -4404,6 +4409,11 @@ async def language_mismatch_report():
             f"{report['count']} source language mismatch{'es' if report['count'] != 1 else ''} need review in the Language Mismatch Report."
         )
     return report
+
+
+@router.get("/language-unknown-report/", dependencies=_GUARDS)
+async def language_unknown_report():
+    return await asyncio.to_thread(vod_db.list_language_unknowns)
 
 
 @router.get("/language-trickle/settings/", dependencies=_GUARDS)
@@ -4423,10 +4433,44 @@ async def save_language_trickle_enabled(body: LanguageTrickleEnabledRequest):
     return config.get_language_trickle_settings()
 
 
+@router.post("/language-trickle/providers/{provider_id}/unblock/", dependencies=_GUARDS)
+async def unblock_language_trickle_provider(provider_id: int):
+    settings = config.get_language_trickle_settings()
+    return await asyncio.to_thread(
+        vod_db.unblock_language_probe_provider,
+        provider_id, settings["language_trickle_probes_per_cycle"],
+    )
+
+
 @router.post("/language-trickle/run/", dependencies=_GUARDS)
 async def run_language_trickle():
     """Run one bounded manual cycle; the same provider gates and optional cap apply."""
     return await vod_probe.run_language_trickle_cycle()
+
+
+@router.post("/language-probe-errors/{kind}/{source_id}/action/", dependencies=_GUARDS)
+async def language_probe_error_action(kind: str, source_id: int, body: LanguageProbeErrorActionRequest):
+    if body.action not in ("approve", "retry", "delete"):
+        raise HTTPException(400, detail="action must be approve, retry or delete")
+    try:
+        if body.action == "approve":
+            source = await asyncio.to_thread(vod_db.approve_language_probe_source, kind, source_id)
+            configured = source.get("configured_language")
+            await asyncio.to_thread(
+                vod_db.record_language_probe_run, kind, source_id, source.get("provider_id"),
+                "manual_approved", configured, [configured] if configured else [],
+                config.get_enabled_languages(), False,
+                bool(configured and configured in config.get_enabled_languages()),
+                "Manually approved after playback review.",
+            )
+            return {"action": "approved"}
+        if body.action == "retry":
+            await asyncio.to_thread(vod_db.reset_language_probe_failure, kind, source_id)
+            return {"action": "retry_queued"}
+        await asyncio.to_thread(vod_db.delete_language_probe_source, kind, source_id)
+        return {"action": "deleted"}
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc))
 
 
 @router.post("/language-mismatch/{kind}/{source_id}/decision/", dependencies=_GUARDS)

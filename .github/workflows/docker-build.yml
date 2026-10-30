@@ -11,7 +11,13 @@ on:
       - "screenshots/**"
       - ".beads/**"
       - "beads/**"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      publish_latest:
+        description: Publish this manually selected revision as latest
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   build:
@@ -35,9 +41,10 @@ jobs:
         id: meta
         run: |
           SHORT_SHA="${GITHUB_SHA::7}"
-          TAGS="ghcr.io/${{ github.repository }}:${{ github.ref_name }}"
-          TAGS="$TAGS,ghcr.io/${{ github.repository }}:${{ github.ref_name }}-${SHORT_SHA}"
-          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+          SAFE_REF="${GITHUB_REF_NAME//\//-}"
+          TAGS="ghcr.io/${{ github.repository }}:${SAFE_REF}"
+          TAGS="$TAGS,ghcr.io/${{ github.repository }}:${SAFE_REF}-${SHORT_SHA}"
+          if [ "${{ github.ref }}" = "refs/heads/main" ] || [ "${{ inputs.publish_latest }}" = "true" ]; then
             TAGS="$TAGS,ghcr.io/${{ github.repository }}:latest"
           fi
           echo "tags=$TAGS" >> "$GITHUB_OUTPUT"

@@ -517,6 +517,9 @@ async def lifespan(app: FastAPI):
     closed = await asyncio.to_thread(vod_db.close_orphaned_catalog_sync_runs)
     if closed:
         logger.info("Closed %d stale Sync History run(s) left by the previous process", closed)
+    auto_approved = await asyncio.to_thread(vod_db.auto_approve_existing_language_matches)
+    if auto_approved:
+        logger.info("Automatically approved %d language probes whose configured language was present", auto_approved)
     tasks = [
         asyncio.create_task(_vod_catalog_refresher()),
         asyncio.create_task(_strm_export_scheduler()),

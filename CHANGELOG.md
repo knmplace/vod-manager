@@ -32,6 +32,64 @@ These submissions are focused upstream changes. Fork-only release notes remain
 below; PR branches contain no provider identities, private URLs, local network
 addresses, credentials, usernames, or user-specific deployment information.
 
+## 2026-10-29 (Adaptive provider safeguards)
+
+- Added persisted, dynamic provider monitoring status for active providers.
+- Added response-detail-aware provider throttle detection and adaptive pacing:
+  repeated qualifying throttle responses reduce a provider's effective probe
+  budget by 10, then escalate to 10-minute gating, 1-hour gating, and finally
+  a user-unblock-required block when the budget reaches 10 probes or fewer.
+- Kept Dispatcharr connection-limit conditions (`CAPACITY` and `BUSY`) separate
+  from provider throttling so a permitted-connection limit does not falsely
+  escalate a provider.
+- Added safe monitoring bounds of 600 probes per cycle maximum and 90 seconds
+  between cycles minimum, with longer intervals still allowed.
+- Added provider status cards and an unblock action to Monitoring controls.
+- Clarified provider status cards so a normal provider's historical last
+  response (for example, HTTP 429) is labeled separately from its current
+  budget and gating state.
+- Removed the provider/error-code summary table from the mismatch report while
+  retaining the backend history for a better future location.
+- Separated Unknown or untagged language results into their own review page;
+  they never auto-archive and never imply a language correction.
+- Replaced ambiguous mismatch actions with explicit Apply language, Archive
+  parent, and Keep as-is actions, with confirmation before single-row or bulk
+  changes. Archive prompts now state exactly what will happen.
+- Added sorting, provider filtering, multi-select, confirmation, retry,
+  confirm-current, and delete actions to Unknown Language Review.
+- Kept source-language correction as a separate follow-up feature so review
+  actions do not imply that metadata editing is already available.
+- Disabled monitoring now blocks both scheduled and manual probe cycles and
+  stops periodic report refreshes while it remains disabled.
+- Added Shift-click range selection and a return-to-top control to Unknown
+  Language Review for faster bulk review of long queues.
+- Validation: 39 focused backend tests passed, Python compilation passed,
+  frontend TypeScript/Vite build passed, and a static visual smoke capture
+  passed.
+
+## 2026-10-29 (Language report and Probe Issues adjustments)
+
+- Added provider dropdown filters to the Language Mismatch Report and Probe
+  Issues page, plus an observed-language dropdown filter to the mismatch report.
+- Added page-level selection with bulk approve/keep/retry/delete actions.
+- Added a floating return-to-top control after the page is substantially
+  scrolled.
+- Language mismatch monitoring is now disabled by default; it must be enabled
+  explicitly from the report controls.
+- Added closed-by-default report sections for monitoring controls, provider
+  history, and decision guidance.
+- Updated Probe Issues with compact fixed-width columns, Shift selection,
+  collapsible deferred/quarantined sections, and plain-language HTTP reason
+  details.
+- Language probes now automatically approve and close sources when the
+  configured language is present among the observed audio tracks.
+- Tightened the mismatch table layout and moved provider/archive context into
+  the existing columns while keeping supporting text white for readability.
+- Provider and observed-language filters now support selecting multiple values
+  at once on both language report pages.
+- Probe Issues now shows each source's configured language. Plex episode imports
+  now populate that field consistently with movie and other provider imports.
+
 Provider breakdowns in the Language Mismatch Report use only active providers
 currently configured in the Providers list; inactive or stale historical
 provider records are omitted.

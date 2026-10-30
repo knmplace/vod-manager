@@ -33,6 +33,15 @@ def test_series_first_import_reports_created(db):
     assert r["changed_series_ids"] == r["created_series_ids"]
 
 
+def test_plex_episode_sources_store_configured_language(db):
+    pid = db.upsert_provider("Plex", "http://plex.invalid", "u", "p")
+    show = _show([1], provider_category_name="[FR] TV", raw_name="FR| Example Show")
+    sid = db.bulk_import_plex_series(pid, [show])["created_series_ids"][0]
+    episode = db.list_episodes(sid)[0]
+    source = db.list_episode_sources_for_episode_ids([episode["id"]])[episode["id"]][0]
+    assert source["language"] == "FR"
+
+
 def test_series_unchanged_reimport_reports_nothing(db):
     pid = db.upsert_provider("Plex", "http://plex.invalid", "u", "p")
     db.bulk_import_plex_series(pid, [_show([1, 2])])
