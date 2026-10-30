@@ -23,11 +23,34 @@ included.
 
 | Area | Upstream PR | Status |
 | --- | --- | --- |
-| TMDB identity picker and Metadata Review | [#67](https://github.com/jstevenscl/vod-manager/pull/67) | Open |
-| Artwork Review and safe poster matching | [#68](https://github.com/jstevenscl/vod-manager/pull/68) | Open |
-| Language Mismatch Report and embedded-audio audit | [#69](https://github.com/jstevenscl/vod-manager/pull/69) | Open / on hold |
-| Smart-category reconciliation toggle | [#71](https://github.com/jstevenscl/vod-manager/pull/71) | Open / under review |
+| TMDB identity picker and Metadata Review | [#67](https://github.com/jstevenscl/vod-manager/pull/67) | Included in upstream v0.3.14 |
+| Artwork Review and safe poster matching | [#68](https://github.com/jstevenscl/vod-manager/pull/68) | Included in upstream v0.3.14 |
+| Plex stale-source reconciliation | [#70](https://github.com/jstevenscl/vod-manager/pull/70) | Included in upstream v0.3.14 |
+| Language Mismatch Report and embedded-audio audit | [#69](https://github.com/jstevenscl/vod-manager/pull/69) | Withdrawn; replacement PR in preparation |
+| Smart-category reconciliation toggle | [#71](https://github.com/jstevenscl/vod-manager/pull/71) | Included in upstream v0.3.15 |
 | Configuration and reporting page navigation | [#72](https://github.com/jstevenscl/vod-manager/pull/72) | Open / under review |
+
+## 2026-10-30 (Upstream v0.3.15 alignment)
+
+- Updated the fork's application version to **0.3.15** and synchronized with
+  upstream through the v0.3.15 release.
+- Upstream v0.3.14 included PRs #67, #68, and #70 as tested patches. Upstream
+  noted fixes made while applying the TMDB picker and artwork review; the Plex
+  cleanup skips reconciliation when Plex reports an empty library snapshot.
+- Upstream v0.3.15 included PR #71, the optional 15-minute smart-category
+  safety sweep toggle and its missing import fix.
+- PR #69 was withdrawn before merge and was not part of either release. Its
+  replacement language-mismatch submission will be based on current upstream
+  main and will include the fork's validated opt-in, provider-capacity, and
+  manual language-confirmation safeguards. PR #72 remains a separate open UI
+  submission.
+- Release integration checks: 45 focused Metadata Review, Plex reconciliation,
+  importer, and enrichment tests passed; the frontend production build,
+  Python compilation, and `git diff --check` passed. The full backend run
+  reported 1,131 passed and 3 skipped; seven failures caused by missing
+  v0.3.14 integration behavior were fixed and passed in focused reruns. The
+  remaining slow-download reconnect test also fails on the unchanged fork
+  baseline in this Windows environment, so the full suite is not fully green.
 
 ## 2026-10-30 (Unknown-language confirmation)
 
@@ -206,7 +229,7 @@ instead of opening a duplicate request.
   version, deployment, and private-environment changes were excluded.
 - Existing upstream PR #67 remains the TMDB identity-picker and Metadata Review
   submission; no duplicate PR was created for that work. PRs #68 and #69 are
-  independent of #67 and each other.
+  independent of #67 and each other. PR #69 was later withdrawn before merge; its replacement is tracked in the current status table above.
 
 ## 2026-10-28 (Language audit sweep controls and progress fix)
 
@@ -245,7 +268,7 @@ instead of opening a duplicate request.
 
 ## 2026-10-28 (Language audit live statistics and pacing controls)
 
-- Marked upstream PR #69 as **on hold** while the fork adds the live operational
+- PR #69 was subsequently withdrawn before merge while the fork added live operational
   statistics and user-controlled pacing described below; a replacement focused
   PR will be submitted after validation.
 - Added live eligible, checked-today, pending-review, estimated-rate, and daily

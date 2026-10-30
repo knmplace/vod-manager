@@ -3829,6 +3829,23 @@ def movie_owned_by_portal_user(movie_id: int, dispatcharr_user_id: int) -> bool:
         conn.close()
 
 
+# A show counts as the user's when any of its episodes is in their library
+# (portal poster fallback).
+def series_owned_by_portal_user(series_id: int, dispatcharr_user_id: int) -> bool:
+    conn = _connect()
+    try:
+        row = conn.execute("""
+        SELECT 1 FROM episodes e
+        JOIN episode_sources es ON es.episode_id = e.id
+        JOIN episode_source_owners eso ON eso.episode_source_id = es.id
+        WHERE e.series_id = ? AND eso.dispatcharr_user_id = ? LIMIT 1
+    """, (series_id, dispatcharr_user_id)).fetchone()
+        conn.close()
+        return row is not None
+    finally:
+        conn.close()
+
+
 def episode_owned_by_portal_user(episode_id: int, dispatcharr_user_id: int) -> bool:
     conn = _connect()
     try:
@@ -13327,8 +13344,26 @@ def auto_merge_series_tmdb_collisions(series_ids: set[int] | list[int] | None = 
             if not ids:
                 conn.close()
                 return []
+            # A changed series can collide with an unchanged sibling. Expand
+            # only the duplicate TMDB groups touched by this changed frontier;
+            # unrelated collisions elsewhere in a large catalog stay idle.
             rows = conn.execute(
-                f"SELECT id, name, year, tmdb_id FROM series WHERE id IN ({','.join('?' * len(ids))}) ORDER BY id",
+                f"""SELECT id, name, year, tmdb_id FROM series
+                    WHERE tmdb_id IN (
+                            SELECT tmdb_id FROM series WHERE id IN ({','.join('?' * len(ids))})
+                              AND tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> ''
+                       )
+                       AND tmdb_id IN (
+                            SELECT tmdb_id FROM series WHERE tmdb_id IS NOT NULL AND TRIM(tmdb_id) <> ''
+                            GROUP BY tmdb_id HAVING COUNT(*) > 1
+                       )
+                    ORDER BY id""",
+                ids,
+            ).fetchall()
+            rows += conn.execute(
+                f"""SELECT id, name, year, tmdb_id FROM series
+                    WHERE id IN ({','.join('?' * len(ids))})
+                      AND (tmdb_id IS NULL OR TRIM(tmdb_id)='')""",
                 ids,
             ).fetchall()
         merge_ids = [row["id"] for row in rows if row["tmdb_id"] and str(row["tmdb_id"]).strip()]
@@ -13453,6 +13488,7 @@ def _metadata_review_sql(table: str) -> str:
     # enrichment has run and left it yearless (e.g. TMDB has no first-air date);
     # before enrichment it is left to the enrichment year write.
     enriched_col = "last_enriched_at" if table == "movies" else "tmdb_metadata_enriched_at"
+    content_type = "movie" if table == "movies" else "series"
     # KNM: 2026-10-04 -- restored upstream's UNION form (upstream PR #35 review):
     # SQLite won't split an OR across the two partial idx_*_metadata_review_*
     # indexes, so the OR form full-scanned (8s+ on ~115k rows). Keeps the fork's
@@ -13474,6 +13510,10 @@ def _metadata_review_sql(table: str) -> str:
                 UNION
                 SELECT * FROM {table} INDEXED BY idx_{table}_metadata_review_no_tmdb
                   WHERE review_excluded=0 AND tmdb_id IS NULL AND year IS NOT NULL
+                    AND id NOT IN (
+                        SELECT item_id FROM tmdb_auto_match
+                        WHERE content_type='{content_type}' AND status='reviewed'
+                    )
                 UNION
                 SELECT * FROM {table}
                   WHERE review_excluded=0 AND tmdb_id IS NOT NULL AND TRIM(tmdb_id)=''
@@ -13537,8 +13577,14 @@ def _settle_auto_match(content_type: str, item_id: int, *, reviewed: bool = Fals
     conn = _connect()
     try:
         if reviewed:
-            conn.execute("UPDATE tmdb_auto_match SET status='reviewed' WHERE content_type=? AND item_id=?",
-                         (content_type, item_id))
+            # A user can settle a normal imported no-ID title before it has an
+            # auto-match row. Persist that decision so the review queue and
+            # later sweeps do not reopen it.
+            conn.execute(
+                "INSERT INTO tmdb_auto_match(content_type, item_id, status, attempted_at) VALUES(?,?,'reviewed',?) "
+                "ON CONFLICT(content_type, item_id) DO UPDATE SET status='reviewed'",
+                (content_type, item_id, _now()),
+            )
         else:
             conn.execute("DELETE FROM tmdb_auto_match WHERE content_type=? AND item_id=?", (content_type, item_id))
         _commit_with_retry(conn)

@@ -88,6 +88,10 @@ async def import_plex_library(provider_id: int) -> dict:
     exclude_uncategorized = bool(provider.get("import_exclude_uncategorized"))
     lang = vod_importer._current_lang_settings()
     country = config.get_import_country_exclusion()
+    # Track the provider's raw snapshot before applying local exclusion rules,
+    # so excluded but still-present sources are not mistaken for deletions.
+    seen_movie_stream_ids: set[str] = set()
+    seen_series_ids: set[str] = set()
 
     movie_result = {"movies_created": 0, "movies_matched": 0, "total": 0}
     series_result = {"series_created": 0, "series_matched": 0, "episodes_imported": 0, "episodes_added": 0}
@@ -126,6 +130,7 @@ async def import_plex_library(provider_id: int) -> dict:
                     part_key, container = plex_client.extract_part(item)
                     if not part_key:
                         continue
+                    seen_movie_stream_ids.add(part_key)
                     if vod_importer._should_auto_archive(
                         item.get("title", ""), category_name, exclude_categories, exclude_uncategorized, lang, country=country,
                     ):
@@ -169,6 +174,7 @@ async def import_plex_library(provider_id: int) -> dict:
                     rating_key = show.get("ratingKey")
                     if not rating_key:
                         continue
+                    seen_series_ids.add(str(rating_key))
                     if vod_importer._should_auto_archive(
                         show.get("title", ""), category_name, exclude_categories, exclude_uncategorized, lang, country=country,
                     ):
@@ -197,12 +203,36 @@ async def import_plex_library(provider_id: int) -> dict:
                 ids["created_series_ids"].update(r.get("created_series_ids", ()))
                 ids["changed_series_ids"].update(r.get("changed_series_ids", ()))
 
+    # Plex can change a Part key when a file is replaced or a library is
+    # removed. Reconcile against the complete raw snapshot so old sources
+    # from deleted libraries do not remain in the provider's source pool.
+    # Sources from still-present excluded libraries remain because their raw
+    # IDs are included above.
+    # An empty snapshot is far more likely a Plex that is mid-restart/scan (or
+    # a token that can't see the libraries) than a server that really lost
+    # everything, and reconciling against it would delete every source this
+    # provider has. Skip the cleanup and let the next import decide.
+    if not seen_movie_stream_ids and not seen_series_ids:
+        logger.warning(
+            "[plex_importer] provider=%s: Plex reported no movies or shows; skipping stale-source cleanup",
+            provider["name"],
+        )
+        removed = {"movie_sources_removed": 0, "series_sources_removed": 0, "episode_sources_removed": 0}
+    else:
+        removed = await asyncio.to_thread(
+            vod_db.reconcile_provider_catalog_sources,
+            provider_id,
+            seen_movie_stream_ids=seen_movie_stream_ids,
+            seen_series_ids=seen_series_ids,
+        )
+
     result = {
         "provider": provider["name"],
         "movies_created": movie_result["movies_created"], "movies_matched": movie_result["movies_matched"],
         "series_created": series_result["series_created"], "series_matched": series_result["series_matched"],
         "episodes_imported": series_result["episodes_imported"],
         "episodes_added": series_result["episodes_added"],
+        "removed": removed,
         **{k: sorted(v) for k, v in ids.items()},
         "skipped_libraries": skipped_libraries,
     }

@@ -61,3 +61,19 @@ def test_metadata_review_existing_match_is_ranked_and_reports_sources(db):
     assert matches[0]["tmdb_id"] == "123"
     assert matches[0]["source_count"] == 1
     assert matches[0]["match_reason"] == "same normalized title"
+
+
+def test_title_a_reviewer_settled_without_an_id_stays_out_of_the_queue(db):
+    provider_id = db.upsert_provider("Provider", "http://provider.invalid", "u", "p", provider_type="xc")
+    db.bulk_import_movies(provider_id, [
+        _movie("settled", "Settled Without Id", 2024),
+        _movie("open", "Still Open", 2024),
+    ])
+    ids = {row["name"]: row["id"] for row in db.list_metadata_review()["movies"]}
+    assert set(ids) == {"Settled Without Id", "Still Open"}
+
+    # Confirming the year without a TMDB ID is a deliberate decision and must
+    # not put the item back in the review queue.
+    db.resolve_year_review("movie", ids["Settled Without Id"], 2024)
+
+    assert {row["name"] for row in db.list_metadata_review()["movies"]} == {"Still Open"}

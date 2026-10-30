@@ -254,6 +254,15 @@ check that library's Content type is explicitly set to Movies or TV Shows;
 the import result now calls out any library it couldn't classify by name so
 this is visible instead of silently importing nothing.
 
+**Plex: sources Plex no longer has are cleaned up.** After a successful Plex
+import, the provider's sources are compared with everything Plex reports.
+Movies and shows that are gone (a deleted library, or a file whose Plex part
+key changed) have their old sources removed, along with a removed show's
+episode sources; a title another provider still supplies stays, and sources
+from libraries Plex still has but you excluded are left alone. If Plex
+reports nothing at all (for example while it is restarting or rescanning),
+the cleanup is skipped for that import.
+
 **Jellyfin: some installs don't alias the `/emby/*` compatibility paths.**
 VOD & DVR Manager talks to Emby and Jellyfin through the same client, since
 they share almost the entire API surface — including `/emby/*` path aliases
@@ -495,8 +504,12 @@ movie/series with at least one source in a still-enabled language stays
 fully visible either way, even if it also has sources in languages you've
 unchecked. Content a provider tags **[MULTI-LANG]** (category) or **[MULTI-SUB]**
 (title) is multi-track, so it is classed as its own **MULTI** language and is
-never hidden by this filter, whatever languages you leave enabled. Existing
-catalogs pick this up from [Language Backfill](#language-backfill-and-language-split)
+never hidden by this filter, whatever languages you leave enabled. A language
+tag in a provider's category name is read whether it leads (`[KR] Series`) or
+trails (`Series Korean [KR]`); non-language tags such as `[4K]` or `[HD]` are
+ignored. Episode lists are also not fetched for sources in a language you have
+unchecked (saving provider calls); re-checking the language queues them again.
+Existing catalogs pick this up from [Language Backfill](#language-backfill-and-language-split)
 (Curation & Maintenance), which re-tags already-imported sources.
 
 Use Import Language Exclusion when you never want a language cluttering
@@ -1957,6 +1970,15 @@ imported in the first place.
   **Delete selected** buttons once you've checked a few. Deleting a category
   only unplaces items from it — nothing in your pool is touched.
 
+- **Periodic reconciliation** — smart categories are evaluated whenever an
+  import, provider sync, curation change or saved rule change touches them, and
+  on top of that a safety-net pass re-checks every smart category across the
+  whole library every 15 minutes. That pass is on by default; to turn it off,
+  untick **Configuration → Refresh Schedule → Periodic smart-category
+  reconciliation** and press **Save**. The 15-minute interval is fixed and
+  can't be changed. Unticking it stops only that pass — the event-driven
+  evaluation above keeps working.
+
 ### Missing Artwork
 
 Movies/series with no poster — usually because the source provider's own
@@ -1968,11 +1990,33 @@ once — useful for content that will never have a real per-title poster
 
 ![Missing Artwork queue](docs/screenshots/missing-artwork.png)
 
+**Artwork Review page.** For a bigger, table-style view, click **Open Artwork
+Review** in the Missing Artwork popup. Each row expands to show TMDB
+suggestions, searched in your local TMDB library first and falling back to
+the TMDB API (when a key is configured) only if the local library has no
+answer. Picking a suggestion saves the poster and the TMDB identity, shows a
+confirmation, and refreshes the queue and the counts. When the search finds
+exactly one result whose title and year match the card and that has a poster,
+it is applied for you automatically; anything ambiguous, or where the year
+differs, is left for you to choose. **Hide adult** is on by default (adult
+titles stay playable and are one toggle away). Closing the Missing Artwork
+popup while **Bulk resolve with AI** is running now cancels that job, so it
+no longer keeps working through titles in the background.
+
+![Artwork Review page with a TMDB suggestion for a title whose year differs, left for you to choose](docs/screenshots/artwork-review.png)
+
 Also supports **archiving**: hide matching items from this queue (and
 Needs Review, and Duplicate Finder) without deleting anything — still fully
 browsable, playable, and usable in categories, just no longer flagged as
 needing attention. Useful for content you've decided not to curate further
 (e.g. a language you don't plan to add posters for).
+
+**Broken posters repair themselves.** If a card's poster fails to load (the
+provider's image host is gone, or the stored address has no image path) and
+the title has a TMDB id, the card asks once for TMDB's poster, saves it and
+shows it. A title TMDB has no poster for keeps its normal placeholder and
+isn't asked again that session. The Portal does the same, only for titles in
+the signed-in user's own library.
 
 ### Language Filter
 
@@ -2038,6 +2082,14 @@ found three ways at once:
   gap than the rule above alone would allow. A *conflicting* TMDB id is
   treated the opposite way: proof they're genuinely different, so that pair
   is ruled out and never shown as a duplicate at all.
+
+A candidate in a group that has no TMDB id or no year shows a **Find TMDB
+match** (or **Fix missing year**) link that opens an inline picker, so you
+don't have to leave the page: it searches by name (your local TMDB library
+first, then TMDB), lets you pick the exact result or enter a year and TMDB ID
+by hand, and **Save** records them and refreshes the group. If the saved
+identity matches a title already in your pool, the two merge, as everywhere
+else in the app.
 
 There's also an **opt-in fourth check, off by default**: a checkbox above the
 scan button groups a quality-tagged title with its plain version — e.g.
@@ -2118,9 +2170,11 @@ from a real TMDB match rather than having to research it yourself.
 ### Metadata Review
 
 A broader, sidebar-level version of the same idea (**Metadata Review** nav
-item) — fixes titles a provider left without *both* a TMDB identity and a
-release year, plus the same ambiguous-year hold queue Needs Review covers
-above. A provider supplying neither a TMDB id nor a year never even entered
+item) — fixes active titles a provider left without a usable TMDB identity
+(missing, blank or whitespace-only), whether or not a release year came with
+it, plus the same ambiguous-year hold queue Needs Review covers above.
+Archived titles are never listed, and a title you resolve with a year but no
+TMDB id counts as settled and stays out of the queue. A provider supplying neither a TMDB id nor a year never even entered
 the ambiguity detector Needs Review relies on, and is a common real cause of
 duplicate-looking titles that Duplicate Finder can't cleanly resolve on its
 own. Movies/TV Shows tabs, a **Hide adult titles** toggle, and bulk select
@@ -2129,7 +2183,10 @@ AI-assisted TMDB matching described in [§10](#10-ai-assisted-features), just
 scoped to this queue) — search TMDB and select the exact result to record a
 confirmed TMDB id and year; if the corrected identity already matches an
 existing pool entry, sources and categories merge into it automatically,
-same as everywhere else in the app.
+same as everywhere else in the app. The search looks in your
+local TMDB library (TMDB Library page) first when it is on, and only asks TMDB
+when that has nothing, so a name search works even without a TMDB key as long
+as the local library can answer it.
 
 A series that already carries a TMDB id but no year gets resolved
 automatically in the background after each provider import, straight from
@@ -2174,8 +2231,12 @@ re-run any time (each becomes a no-op once nothing's left to fix):
   matching) is detected from its raw title and provider category. A source
   written before that detection existed on a given import path — or
   classified by a since-fixed version of it — sits with the wrong value
-  until backfilled. Scan shows what's missing or outdated per table/language
-  code with sample titles; **Backfill N rows** applies it.
+  until backfilled. This includes provider categories that carry the tag at
+  the end of the name (`Series Korean [KR]`), which older versions read as
+  English. Scan shows what's missing or outdated per table/language
+  code with sample titles; **Backfill N rows** applies it, then run
+  **Language Split** to separate any foreign-language copy that had been
+  merged into an English title of the same name.
 - **Language Split** — a movie or series with sources in two languages that
   share no common source can end up merged into a single catalog entry from
   before the auto-merge language gate existed (a shared TMDB id used to be
