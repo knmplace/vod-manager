@@ -44,6 +44,9 @@ addresses, credentials, usernames, or user-specific deployment information.
 - Added safe monitoring bounds of 600 probes per cycle maximum and 90 seconds
   between cycles minimum, with longer intervals still allowed.
 - Added provider status cards and an unblock action to Monitoring controls.
+- Clarified provider status cards so a normal provider's historical last
+  response (for example, HTTP 429) is labeled separately from its current
+  budget and gating state.
 - Removed the provider/error-code summary table from the mismatch report while
   retaining the backend history for a better future location.
 - Separated Unknown or untagged language results into their own review page;
