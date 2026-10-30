@@ -569,6 +569,8 @@ def language_trickle_status() -> dict:
 async def run_language_trickle_cycle() -> dict:
     """Run one bounded manual/scheduled cycle without bypassing any gates."""
     settings = config.get_language_trickle_settings()
+    if not settings.get("language_trickle_enabled", False):
+        return {"targets": 0, "results": [], "trickle": language_trickle_status()}
     targets = await asyncio.to_thread(
         vod_db.next_language_probe_targets,
         settings["language_trickle_probes_per_cycle"], False,

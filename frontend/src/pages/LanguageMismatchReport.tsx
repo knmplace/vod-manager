@@ -51,7 +51,7 @@ export default function LanguageMismatchReport() {
   const report = useQuery<Report>({
     queryKey: ['language-mismatch-report'],
     queryFn: () => api.get('/vod/language-mismatch-report/').then((r) => r.data),
-    refetchInterval: 30_000,
+    refetchInterval: (query) => query.state.data?.trickle?.enabled ? 30_000 : false,
   })
   const settings = useQuery({ queryKey: ['language-trickle-settings'], queryFn: () => api.get('/vod/language-trickle/settings/').then((r) => r.data) })
   const credentials = useQuery<XcCredentials>({ queryKey: ['vod-xc-credentials'], queryFn: () => api.get('/vod/xc-credentials/').then((r) => r.data), retry: false })
@@ -176,7 +176,7 @@ export default function LanguageMismatchReport() {
         </div>
         <span className="flex items-center gap-2">
           {report.data?.trickle && <button className={`flex items-center gap-1.5 border rounded px-2 py-1.5 text-xs hover:bg-accent disabled:opacity-50 ${report.data.trickle.enabled ? 'border-amber-500/40 text-amber-400' : 'border-emerald-500/40 text-emerald-400'}`} disabled={toggleEnabled.isPending} onClick={() => toggleEnabled.mutate(!report.data!.trickle!.enabled)}><Power size={12} /> {report.data.trickle.enabled ? 'Disable monitoring' : 'Enable monitoring'}</button>}
-          <button className="flex items-center gap-1.5 border border-primary/40 text-primary rounded px-2 py-1.5 text-xs hover:bg-accent disabled:opacity-50" disabled={runNow.isPending} onClick={() => runNow.mutate()}><Languages size={12} className={runNow.isPending ? 'animate-pulse' : ''} /> Run one cycle now</button>
+          <button className="flex items-center gap-1.5 border border-primary/40 text-primary rounded px-2 py-1.5 text-xs hover:bg-accent disabled:opacity-50" disabled={runNow.isPending || !report.data?.trickle?.enabled} title={report.data?.trickle?.enabled ? 'Run one bounded monitoring cycle' : 'Enable monitoring before running a cycle'} onClick={() => runNow.mutate()}><Languages size={12} className={runNow.isPending ? 'animate-pulse' : ''} /> Run one cycle now</button>
           <button className="flex items-center gap-1.5 border border-amber-500/40 text-amber-300 rounded px-2 py-1.5 text-xs hover:bg-amber-500/10" onClick={() => window.dispatchEvent(new CustomEvent('vodmanager-goto', { detail: 'language-unknowns' }))}>Unknown language review</button>
           <button className="flex items-center gap-1.5 border border-amber-500/40 text-amber-300 rounded px-2 py-1.5 text-xs hover:bg-amber-500/10" onClick={() => window.dispatchEvent(new CustomEvent('vodmanager-goto', { detail: 'language-errors' }))}>Probe issues{errors.length ? ` (${errors.length})` : ''}</button>
           <button className="flex items-center gap-1.5 border border-border rounded px-2 py-1.5 text-xs hover:bg-accent disabled:opacity-50" disabled={report.isFetching} onClick={() => report.refetch()}><RefreshCw size={12} className={report.isFetching ? 'animate-spin' : ''} /> Refresh</button>

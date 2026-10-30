@@ -210,6 +210,10 @@ def test_language_trickle_runs_up_to_source_limit_per_cycle(monkeypatch):
     async def fake_probe(kind, source_id, force=False, spacing=None):
         return {"source_id": source_id, "mismatch": False}
 
+    saved_settings = config.get_language_trickle_settings
+    monkeypatch.setattr(config, "get_language_trickle_settings", lambda: {
+        **saved_settings(), "language_trickle_enabled": True,
+    })
     monkeypatch.setattr(vod_probe.vod_db, "next_language_probe_targets", lambda limit, distinct: targets[:limit])
     monkeypatch.setattr(vod_probe, "probe_language_source", fake_probe)
 
@@ -217,6 +221,18 @@ def test_language_trickle_runs_up_to_source_limit_per_cycle(monkeypatch):
 
     assert result["targets"] == 15
     assert len(result["results"]) == 15
+
+
+def test_language_trickle_manual_cycle_is_noop_when_disabled(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "config.json")
+    config.save_language_trickle_settings(15, 180, None)
+    called = []
+    monkeypatch.setattr(vod_probe.vod_db, "next_language_probe_targets", lambda *args: called.append(True))
+
+    result = asyncio.run(vod_probe.run_language_trickle_cycle())
+
+    assert result["targets"] == 0 and result["results"] == []
+    assert called == []
 
 
 def test_language_trickle_settings_allow_unlimited_daily_budget(monkeypatch, tmp_path):

@@ -25,7 +25,8 @@ export default function LanguageUnknowns() {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [provider, setProvider] = useState('')
   const [sort, setSort] = useState<'checked' | 'title' | 'provider'>('checked')
-  const report = useQuery<{ results: UnknownRow[] }>({ queryKey: ['language-unknown-report'], queryFn: () => api.get('/vod/language-unknown-report/').then((r) => r.data), refetchInterval: 30_000 })
+  const settings = useQuery<{ language_trickle_enabled: boolean }>({ queryKey: ['language-trickle-settings'], queryFn: () => api.get('/vod/language-trickle/settings/').then((r) => r.data) })
+  const report = useQuery<{ results: UnknownRow[] }>({ queryKey: ['language-unknown-report'], queryFn: () => api.get('/vod/language-unknown-report/').then((r) => r.data), refetchInterval: () => settings.data?.language_trickle_enabled ? 30_000 : false })
   const credentials = useQuery<XcCredentials>({ queryKey: ['vod-xc-credentials'], queryFn: () => api.get('/vod/xc-credentials/').then((r) => r.data), retry: false })
   const action = useMutation({
     mutationFn: ({ row, value }: { row: UnknownRow; value: 'approve' | 'retry' | 'delete' }) => api.post(`/vod/language-probe-errors/${row.kind}/${row.source_id}/action/`, { action: value }).then((r) => r.data),
