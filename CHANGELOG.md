@@ -60,6 +60,8 @@ addresses, credentials, usernames, or user-specific deployment information.
   actions do not imply that metadata editing is already available.
 - Disabled monitoring now blocks both scheduled and manual probe cycles and
   stops periodic report refreshes while it remains disabled.
+- Added Shift-click range selection and a return-to-top control to Unknown
+  Language Review for faster bulk review of long queues.
 - Validation: 39 focused backend tests passed, Python compilation passed,
   frontend TypeScript/Vite build passed, and a static visual smoke capture
   passed.
