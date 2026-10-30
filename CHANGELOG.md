@@ -31,6 +31,9 @@ included.
 
 ## 2026-10-30 (Unknown-language confirmation)
 
+- Before this change, confirming an Unknown source marked it reviewed but left
+  its configured language unchanged. Confirmation now saves the selected
+  enabled language, records manual validation, and prevents future scans.
 - Added language confirmation for unknown probe results. Confirm one source at
   a time or select several sources and assign one enabled playback language to
   them. With one enabled language, that language is the only choice; with
@@ -38,6 +41,17 @@ included.
 - Confirmation saves the selected language as manually validated, records the
   review decision, and removes that source from future scans. Unknown results
   remain separate from mismatch/archive decisions.
+- Verification: 43 focused backend tests passed, including single-language EN,
+  multi-language RU, disabled-language rejection, and no-repeat checks. The
+  frontend production build, Python compilation, and diff check passed.
+- Live validation: Docker Build run 41111498588 succeeded for commit
+  738f85651ca515def2c0cfb2a7dc02679c7e82ed; the deployed image reported that
+  commit and digest `sha256:462fd3933fcc2ab604ed4c3bc540d9c0ab30844aa3e2001e99147f64d14ddb12`.
+  Root/OpenAPI returned 200. An isolated API test inside that image used a
+  temporary database to confirm RU assignment, manual-approved state, and
+  removal from the Unknown report and probe queue; no live catalog item was
+  changed. Sampled recent logs had no HTTP 5xx or traceback/error/critical
+  lines.
 
 ## 2026-10-30 (Provider capacity holds for language mismatch checks)
 
