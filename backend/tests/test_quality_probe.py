@@ -3,6 +3,7 @@ ffprobe isn't needed here: the frame-size read is stubbed, the HTTP side runs ag
 
 import asyncio
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -223,6 +224,51 @@ def test_language_trickle_runs_up_to_source_limit_per_cycle(monkeypatch):
     assert len(result["results"]) == 15
 
 
+def test_language_trickle_capacity_refusal_records_two_hour_hold(db, monkeypatch):
+    provider_id = db.upsert_provider("Full Pool", "http://capacity.invalid", "u", "p")
+    config.save_language_trickle_settings(15, 180, None)
+
+    async def no_slot(*args, **kwargs):
+        raise vod_probe.ProbeRefused("No free probe connection", 60, "capacity")
+
+    monkeypatch.setattr(vod_probe, "probe_language_source", no_slot)
+    result = asyncio.run(vod_probe.language_trickle_once(
+        {"kind": "movie", "source_id": 77, "provider_id": provider_id}
+    ))
+
+    assert result["status"] == "capacity_hold"
+    assert result["retry_after"] == 7200
+    hold = db.list_language_probe_capacity_holds()[0]
+    assert hold["provider_id"] == provider_id
+    assert hold["source_id"] == 77
+    assert hold["attempt_count"] == 1
+    assert hold["next_retry_at"] - hold["last_attempt_at"] == 7200
+
+
+def test_language_cycle_stops_provider_queue_after_capacity_refusal(db, monkeypatch):
+    config.save_language_trickle_settings(15, 180, None)
+    config.save_language_trickle_enabled(True)
+    first_provider = db.upsert_provider("Provider A", "http://a.invalid", "u", "p")
+    second_provider = db.upsert_provider("Provider B", "http://b.invalid", "u", "p")
+    targets = [
+        {"kind": "movie", "source_id": 1, "provider_id": first_provider},
+        {"kind": "movie", "source_id": 2, "provider_id": first_provider},
+        {"kind": "movie", "source_id": 3, "provider_id": second_provider},
+    ]
+    monkeypatch.setattr(vod_probe.vod_db, "next_language_probe_targets", lambda *args: targets)
+    attempted = []
+
+    async def fake_once(target):
+        attempted.append(target["source_id"])
+        return {"status": "capacity_hold" if target["source_id"] == 1 else "checked"}
+
+    monkeypatch.setattr(vod_probe, "language_trickle_once", fake_once)
+    result = asyncio.run(vod_probe.run_language_trickle_cycle())
+
+    assert result["targets"] == 3
+    assert set(attempted) == {1, 3}
+
+
 def test_language_trickle_manual_cycle_is_noop_when_disabled(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "config.json")
     config.save_language_trickle_settings(15, 180, None)
@@ -259,7 +305,6 @@ def test_provider_throttle_budget_and_gate_escalation(db):
     provider_id = db.upsert_provider("Throttle Provider", "http://throttle.invalid", "u", "p")
     state = db.language_probe_provider_state(provider_id, 50)
     assert state["status"] == "normal" and state["effective_budget"] == 50
-
     for _ in range(3):
         state = db.record_language_probe_throttle(provider_id, "429", "rate limit", 50)
     assert state["status"] == "normal" and state["effective_budget"] == 40
@@ -275,6 +320,58 @@ def test_provider_throttle_budget_and_gate_escalation(db):
     db.unblock_language_probe_provider(provider_id, 50)
     state = db.language_probe_provider_state(provider_id, 50)
     assert state["status"] == "normal" and state["effective_budget"] == 50
+
+
+def test_capacity_hold_uses_two_hour_provider_retry_and_tracks_attempts(db):
+    provider_id = db.upsert_provider("Capacity Provider", "http://capacity.invalid", "u", "p")
+    movie_id = db.upsert_movie("Held Movie", 2026)
+    db.add_movie_source(movie_id, provider_id, "held", "mp4")
+    conn = db._connect()
+    source_id = conn.execute("SELECT id FROM movie_sources WHERE movie_id=?", (movie_id,)).fetchone()["id"]
+    conn.close()
+
+    first = db.hold_language_probe_provider(provider_id, "movie", source_id,
+                                            "No free connection", hold_seconds=7200, now=1000)
+    second = db.hold_language_probe_provider(provider_id, "movie", source_id,
+                                             "Still at capacity", hold_seconds=7200, now=2000)
+
+    assert first["first_attempt_at"] == 1000
+    assert first["next_retry_at"] == 8200
+    assert second["first_attempt_at"] == 1000
+    assert second["last_attempt_at"] == 2000
+    assert second["next_retry_at"] == 9200
+    assert second["attempt_count"] == 2
+    hold = db.list_language_probe_capacity_holds(now=2000)[0]
+    assert hold["title"] == "Held Movie" and hold["retry_due"] == 0
+    db.clear_language_probe_capacity_hold(provider_id)
+    restarted = db.hold_language_probe_provider(provider_id, "movie", source_id,
+                                                "Capacity became full again", hold_seconds=7200, now=3000)
+    assert restarted["first_attempt_at"] == 3000 and restarted["attempt_count"] == 1
+
+
+def test_capacity_hold_suppresses_provider_until_retry_and_prioritizes_held_source(db):
+    provider_id = db.upsert_provider("Capacity Queue", "http://capacity.invalid", "u", "p")
+    category_id = db.upsert_category("Movies", "movie")
+    source_ids = []
+    for title in ("First Movie", "Second Movie"):
+        movie_id = db.upsert_movie(title, 2026)
+        db.place_movie_in_category(movie_id, category_id)
+        db.add_movie_source(movie_id, provider_id, title, "mp4")
+        conn = db._connect()
+        source_ids.append(conn.execute("SELECT id FROM movie_sources WHERE movie_id=?", (movie_id,)).fetchone()["id"])
+        conn.close()
+
+    db.hold_language_probe_provider(provider_id, "movie", source_ids[1],
+                                    "No free connection", hold_seconds=7200)
+    assert db.next_language_probe_targets(10, False) == []
+
+    conn = db._connect()
+    conn.execute("UPDATE language_probe_capacity_provider_state SET next_retry_at=? WHERE provider_id=?",
+                 (time.time() - 1, provider_id))
+    conn.commit()
+    conn.close()
+    targets = db.next_language_probe_targets(10, False)
+    assert targets[0]["source_id"] == source_ids[1]
 
 
 def test_language_trickle_bounds_are_safe(monkeypatch, tmp_path):

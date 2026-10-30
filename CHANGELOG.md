@@ -29,6 +29,20 @@ included.
 | Smart-category reconciliation toggle | [#71](https://github.com/jstevenscl/vod-manager/pull/71) | Open / under review |
 | Configuration and reporting page navigation | [#72](https://github.com/jstevenscl/vod-manager/pull/72) | Open / under review |
 
+## 2026-10-30 (Provider capacity holds for language mismatch checks)
+
+- Added a provider-scoped two-hour hold when a language mismatch probe cannot
+  get a connection. The worker pauses further checks for that provider while
+  continuing with other providers, then retries the held source first when
+  the hold expires. If capacity is still full, the hold is extended from that
+  attempt; once a slot is acquired, the hold is cleared.
+- Added a read-only capacity report behind a button on the Language Mismatch
+  Report page. It stays out of the side menu and shows first/last attempt,
+  next retry, attempt count, source, and reason, with provider filtering and
+  source-type/retry-status filters and sortable columns.
+- Added regression coverage for two-hour retry timing, persistent attempt
+  history, provider queue pause, and retry ordering.
+
 ## 2026-10-30 (Primary language and reporting controls)
 
 - Added a global **Primary Language** setting under Curation & Maintenance,

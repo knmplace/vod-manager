@@ -1182,6 +1182,32 @@ def _migrate(conn: sqlite3.Connection) -> None:
         last_detail                  TEXT,
         updated_at                   TEXT NOT NULL
     )""")
+    # Per-source visibility for items deferred by a full provider pool.
+    conn.execute("""CREATE TABLE IF NOT EXISTS language_probe_capacity_holds (
+        provider_id       INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+        kind              TEXT NOT NULL,
+        source_id         INTEGER NOT NULL,
+        first_attempt_at  REAL NOT NULL,
+        last_attempt_at   REAL NOT NULL,
+        next_retry_at     REAL NOT NULL,
+        hold_reason       TEXT NOT NULL,
+        attempt_count     INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY(kind, source_id)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_language_probe_capacity_provider ON language_probe_capacity_holds(provider_id)")
+    # One timer per provider ensures a full account is checked at most every
+    # two hours, even when the normal probe batch contains many sources.
+    conn.execute("""CREATE TABLE IF NOT EXISTS language_probe_capacity_provider_state (
+        provider_id       INTEGER PRIMARY KEY REFERENCES providers(id) ON DELETE CASCADE,
+        kind              TEXT NOT NULL,
+        source_id         INTEGER NOT NULL,
+        first_attempt_at  REAL NOT NULL,
+        last_attempt_at   REAL NOT NULL,
+        next_retry_at     REAL NOT NULL,
+        hold_reason       TEXT NOT NULL,
+        attempt_count     INTEGER NOT NULL DEFAULT 1
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_language_probe_capacity_retry ON language_probe_capacity_provider_state(next_retry_at)")
     # In Library badge (library_presence.py): what the user's media
     # servers hold, replaced per server on each scan. Episode rows carry their show's
     # ids/title/year. server='import' rows are items a Radarr/Sonarr import just added.
@@ -8751,6 +8777,96 @@ def language_probe_provider_state(provider_id: int, global_budget: int) -> dict:
         conn.close()
 
 
+def hold_language_probe_provider(provider_id: int, kind: str, source_id: int,
+                                 reason: str, hold_seconds: int = 7200,
+                                 now: float | None = None) -> dict:
+    """Put this provider's automatic language-probe queue on a timed hold.
+
+    Repeated capacity refusals preserve the original first-attempt time, bump
+    the attempt count, and move the next check two hours from the latest
+    refusal. A successful probe clears the hold via
+    clear_language_probe_capacity_hold().
+    """
+    now = time.time() if now is None else float(now)
+    next_retry = now + max(1, int(hold_seconds))
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            conn.execute(
+                """INSERT INTO language_probe_capacity_provider_state
+                   (provider_id, kind, source_id, first_attempt_at, last_attempt_at,
+                    next_retry_at, hold_reason, attempt_count)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                   ON CONFLICT(provider_id) DO UPDATE SET
+                     kind=excluded.kind, source_id=excluded.source_id,
+                     last_attempt_at=excluded.last_attempt_at,
+                     next_retry_at=excluded.next_retry_at,
+                     hold_reason=excluded.hold_reason,
+                     attempt_count=language_probe_capacity_provider_state.attempt_count + 1""",
+                (provider_id, kind, source_id, now, now, next_retry, (reason or "No provider connection available")[:500]),
+            )
+            conn.execute(
+                """INSERT INTO language_probe_capacity_holds
+                   (provider_id, kind, source_id, first_attempt_at, last_attempt_at,
+                    next_retry_at, hold_reason, attempt_count)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                   ON CONFLICT(kind, source_id) DO UPDATE SET
+                     provider_id=excluded.provider_id,
+                     last_attempt_at=excluded.last_attempt_at,
+                     next_retry_at=excluded.next_retry_at,
+                     hold_reason=excluded.hold_reason,
+                     attempt_count=language_probe_capacity_holds.attempt_count + 1""",
+                (provider_id, kind, source_id, now, now, next_retry, (reason or "No provider connection available")[:500]),
+            )
+            _commit_with_retry(conn)
+            row = conn.execute("SELECT * FROM language_probe_capacity_provider_state WHERE provider_id=?", (provider_id,)).fetchone()
+            return dict(row)
+        finally:
+            conn.close()
+
+
+def clear_language_probe_capacity_hold(provider_id: int) -> None:
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            conn.execute("DELETE FROM language_probe_capacity_provider_state WHERE provider_id=?", (provider_id,))
+            conn.execute("DELETE FROM language_probe_capacity_holds WHERE provider_id=?", (provider_id,))
+            _commit_with_retry(conn)
+        finally:
+            conn.close()
+
+
+def list_language_probe_capacity_holds(now: float | None = None) -> list[dict]:
+    """Read-only visibility list for providers currently waiting on capacity."""
+    now = time.time() if now is None else float(now)
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            """SELECT h.provider_id, p.name AS provider_name, h.kind, h.source_id,
+                      h.first_attempt_at, h.last_attempt_at, s.next_retry_at,
+                      h.hold_reason, h.attempt_count,
+                      CASE WHEN h.kind='movie' THEN m.name ELSE s.name END AS title,
+                      CASE WHEN h.kind='movie' THEN m.year ELSE s.year END AS year,
+                      CASE WHEN h.kind='episode' THEN e.season_number END AS season_number,
+                      CASE WHEN h.kind='episode' THEN e.episode_number END AS episode_number,
+                      CASE WHEN h.kind='episode' THEN e.name END AS episode_name,
+                      CASE WHEN s.next_retry_at<=? THEN 1 ELSE 0 END AS retry_due
+               FROM language_probe_capacity_holds h
+               JOIN language_probe_capacity_provider_state s ON s.provider_id=h.provider_id
+               JOIN providers p ON p.id=h.provider_id AND p.is_active=1
+               LEFT JOIN movie_sources ms ON h.kind='movie' AND ms.id=h.source_id
+               LEFT JOIN movies m ON m.id=ms.movie_id
+               LEFT JOIN episode_sources es ON h.kind='episode' AND es.id=h.source_id
+               LEFT JOIN episodes e ON e.id=es.episode_id
+               LEFT JOIN series s ON s.id=e.series_id
+               ORDER BY s.next_retry_at, p.name, h.first_attempt_at""",
+            (now,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
 def record_language_probe_throttle(provider_id: int, code: str, detail: str | None,
                                    global_budget: int) -> dict:
     """Apply one qualifying provider throttle and return its new status.
@@ -9078,6 +9194,7 @@ def next_language_probe_targets(
     conn = _connect()
     try:
         max_items = max(1, int(limit))
+        now = time.time()
         provider_filter = ""
         params: list[int] = []
         per_provider_limit = 1 if distinct_providers else max_items
@@ -9089,6 +9206,8 @@ def next_language_probe_targets(
                 WHERE p.is_active=1 AND m.review_excluded=0 AND ms.language_probe_decision IS NULL{provider_filter}
                   AND ms.language_probed_at IS NULL AND ms.language_probe_quarantined_at IS NULL
                   AND EXISTS (SELECT 1 FROM movie_category_placements cp WHERE cp.movie_id=m.id)
+                  AND NOT EXISTS (SELECT 1 FROM language_probe_capacity_provider_state h
+                                  WHERE h.provider_id=p.id AND h.next_retry_at>?)
                 UNION ALL
                 SELECT 'episode' AS kind, es.id AS source_id, es.provider_id,
                        es.language_probe_failures, es.language_probe_last_failed_at
@@ -9097,11 +9216,18 @@ def next_language_probe_targets(
                 WHERE p.is_active=1 AND s.review_excluded=0 AND es.language_probe_decision IS NULL{provider_filter}
                   AND es.language_probed_at IS NULL AND es.language_probe_quarantined_at IS NULL
                   AND EXISTS (SELECT 1 FROM series_category_placements cp WHERE cp.series_id=s.id)
+                  AND NOT EXISTS (SELECT 1 FROM language_probe_capacity_provider_state h
+                                  WHERE h.provider_id=p.id AND h.next_retry_at>?)
             ), ranked AS (
                 SELECT kind, source_id, provider_id,
                        ROW_NUMBER() OVER (
                          PARTITION BY provider_id
-                         ORDER BY CASE WHEN COALESCE(language_probe_failures, 0) > 0 THEN 1 ELSE 0 END,
+                         ORDER BY CASE WHEN EXISTS (
+                                      SELECT 1 FROM language_probe_capacity_provider_state h
+                                      WHERE h.provider_id=candidates.provider_id
+                                        AND h.source_id=candidates.source_id
+                                    ) THEN 0 ELSE 1 END,
+                                  CASE WHEN COALESCE(language_probe_failures, 0) > 0 THEN 1 ELSE 0 END,
                                   language_probe_last_failed_at, source_id
                        ) AS provider_rank
                 FROM candidates
@@ -9109,7 +9235,7 @@ def next_language_probe_targets(
             SELECT kind, source_id, provider_id FROM ranked
             WHERE provider_rank <= ?
             ORDER BY provider_rank, provider_id, source_id
-        """, params + params + [per_provider_limit]).fetchall()
+        """, params + [now] + params + [now, per_provider_limit]).fetchall()
         if distinct_providers:
             chosen = []
             providers = set()
