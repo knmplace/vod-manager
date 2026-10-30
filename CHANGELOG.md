@@ -29,6 +29,16 @@ included.
 | Smart-category reconciliation toggle | [#71](https://github.com/jstevenscl/vod-manager/pull/71) | Open / under review |
 | Configuration and reporting page navigation | [#72](https://github.com/jstevenscl/vod-manager/pull/72) | Open / under review |
 
+## 2026-10-30 (Unknown-language confirmation)
+
+- Added language confirmation for unknown probe results. Confirm one source at
+  a time or select several sources and assign one enabled playback language to
+  them. With one enabled language, that language is the only choice; with
+  several enabled languages, choose the language to record.
+- Confirmation saves the selected language as manually validated, records the
+  review decision, and removes that source from future scans. Unknown results
+  remain separate from mismatch/archive decisions.
+
 ## 2026-10-30 (Provider capacity holds for language mismatch checks)
 
 - Added a provider-scoped two-hour hold when a language mismatch probe cannot
