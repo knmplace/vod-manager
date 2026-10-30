@@ -26,7 +26,8 @@ included.
 | TMDB identity picker and Metadata Review | [#67](https://github.com/jstevenscl/vod-manager/pull/67) | Included in upstream v0.3.14 |
 | Artwork Review and safe poster matching | [#68](https://github.com/jstevenscl/vod-manager/pull/68) | Included in upstream v0.3.14 |
 | Plex stale-source reconciliation | [#70](https://github.com/jstevenscl/vod-manager/pull/70) | Included in upstream v0.3.14 |
-| Language Mismatch Report and embedded-audio audit | [#69](https://github.com/jstevenscl/vod-manager/pull/69) | Withdrawn; replacement PR in preparation |
+| Language Mismatch Report and embedded-audio audit | [#69](https://github.com/jstevenscl/vod-manager/pull/69) | Withdrawn before merge |
+| Language mismatch replacement: capacity holds and Unknown confirmation | [#73](https://github.com/jstevenscl/vod-manager/pull/73) | Open / under review |
 | Smart-category reconciliation toggle | [#71](https://github.com/jstevenscl/vod-manager/pull/71) | Included in upstream v0.3.15 |
 | Configuration and reporting page navigation | [#72](https://github.com/jstevenscl/vod-manager/pull/72) | Open / under review |
 
@@ -40,10 +41,14 @@ included.
 - Upstream v0.3.15 included PR #71, the optional 15-minute smart-category
   safety sweep toggle and its missing import fix.
 - PR #69 was withdrawn before merge and was not part of either release. Its
-  replacement language-mismatch submission will be based on current upstream
-  main and will include the fork's validated opt-in, provider-capacity, and
-  manual language-confirmation safeguards. PR #72 remains a separate open UI
-  submission.
+  replacement, [PR #73](https://github.com/jstevenscl/vod-manager/pull/73), is
+  based directly on upstream v0.3.15 and includes opt-in monitoring,
+  provider-capacity holds, and manual language confirmation. PR #72 remains a
+  separate open UI submission.
+- Replacement PR validation: 50 focused backend tests passed, the frontend
+  production build passed with the existing large-chunk advisory, Python
+  compilation passed, and `git diff --check` passed. The full backend suite was
+  not rerun on the upstream-based PR branch.
 - Release integration checks: 45 focused Metadata Review, Plex reconciliation,
   importer, and enrichment tests passed; the frontend production build,
   Python compilation, and `git diff --check` passed. The full backend run
