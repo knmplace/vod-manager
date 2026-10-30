@@ -315,6 +315,7 @@ interface RefreshSettings {
   episode_trickle_batch: number
   episode_trickle_interval_seconds: number
   episode_trickle_spacing_seconds: number
+  smart_category_reconciliation_enabled: boolean
 }
 
 interface BackupComponent {
@@ -7220,6 +7221,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
     trickle_batch: string
     trickle_pause_minutes: string
     trickle_spacing_seconds: string
+    smart_category_reconciliation_enabled: boolean
   } | null>(null)
   const secToHrStr = (s: number | null | undefined) => (s == null ? '' : String(s / 3600))
   const refreshValues = refreshForm ?? (refreshSettingsQuery.data ? {
@@ -7232,6 +7234,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
     trickle_batch:                  String(refreshSettingsQuery.data.episode_trickle_batch),
     trickle_pause_minutes:          String(refreshSettingsQuery.data.episode_trickle_interval_seconds / 60),
     trickle_spacing_seconds:        String(refreshSettingsQuery.data.episode_trickle_spacing_seconds),
+    smart_category_reconciliation_enabled: refreshSettingsQuery.data.smart_category_reconciliation_enabled,
   } : null)
   // KNM: 2026-10-04 -- live estimate for the episode preloading fields, so the
   // effect of a change on the provider is visible before saving.
@@ -7258,6 +7261,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
         episode_trickle_batch:            Math.round(Number(refreshValues!.trickle_batch)),
         episode_trickle_interval_seconds: Math.round(Number(refreshValues!.trickle_pause_minutes) * 60),
         episode_trickle_spacing_seconds:  Number(refreshValues!.trickle_spacing_seconds),
+        smart_category_reconciliation_enabled: refreshValues!.smart_category_reconciliation_enabled,
       })
     },
     onSuccess: () => {
@@ -9441,6 +9445,20 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
             </p>
             {trickleEstimate && <p className="text-xs font-medium text-primary">{trickleEstimate}</p>}
           </div>
+        )}
+        {refreshValues && (
+          <label className="flex items-start gap-1.5 text-xs mt-3" title="Controls only the independent full-pool smart-category pass. Imports, provider syncs, curation changes, and saved rules still evaluate their affected content when those actions occur.">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={refreshValues.smart_category_reconciliation_enabled}
+              onChange={(e) => setRefreshForm({ ...refreshValues, smart_category_reconciliation_enabled: e.target.checked })}
+            />
+            <span>
+              Periodic smart-category reconciliation
+              <span className="block text-foreground/85">Run the full-pool safety check every 15 minutes. The interval is fixed.</span>
+            </span>
+          </label>
         )}
         <div className="flex items-center gap-1.5">
           <Button

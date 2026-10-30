@@ -26,6 +26,7 @@ included.
 | TMDB identity picker and Metadata Review | [#67](https://github.com/jstevenscl/vod-manager/pull/67) | Open |
 | Artwork Review and safe poster matching | [#68](https://github.com/jstevenscl/vod-manager/pull/68) | Open |
 | Language Mismatch Report and embedded-audio audit | [#69](https://github.com/jstevenscl/vod-manager/pull/69) | Open / on hold |
+| Smart-category reconciliation toggle | [#71](https://github.com/jstevenscl/vod-manager/pull/71) | Open / under review |
 
 ## 2026-10-30 (Primary language and reporting controls)
 
@@ -126,6 +127,19 @@ hostnames, IPs, credentials, and unrelated tooling. Test data and URLs must be
 synthetic placeholders. If upstream already contains equivalent or evolved
 work, update the existing changelog entry with that PR/release reference
 instead of opening a duplicate request.
+
+## 2026-10-29 (Smart-category reconciliation)
+
+- Added an optional **Periodic smart-category reconciliation** control for
+  the independent full-pool safety pass. Its cadence remains fixed at 15
+  minutes; disabling it does not disable import, provider-sync, curation, or
+  saved-rule evaluations that are triggered by those actions.
+- Published to the fork's `main` as `3834125`; upstream review is tracked in
+  [PR #71](https://github.com/jstevenscl/vod-manager/pull/71).
+- Validation: Python compilation, focused backend tests (6 passed), and the
+  frontend production build passed. The full backend suite reached 795 passed
+  and 1 skipped; one unrelated slow-download reconnect test failed and
+  reproduced independently.
 
 ## 2026-10-28 (Upstream PRs submitted)
 

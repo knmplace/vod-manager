@@ -867,6 +867,7 @@ _REFRESH_DEFAULTS = {
     "catalog_refresh_seconds_jellyfin": 6 * 3600,
     "enrichment_ttl_seconds":           24 * 3600,
     "tmdb_sync_interval_seconds":       None,
+    "smart_category_reconciliation_enabled": True,
     # KNM: 2026-10-03 -- paced episode trickle: at most this many pending
     # series sources per provider per batch, one request at a time with a
     # few seconds between them, so a big backlog never looks like a burst.
@@ -929,6 +930,7 @@ def save_refresh_settings(
     catalog_refresh_seconds_jellyfin: int,
     enrichment_ttl_seconds: int,
     tmdb_sync_interval_seconds: int | None,
+    smart_category_reconciliation_enabled: bool | None = None,
     episode_trickle_batch: int | None = None,
     episode_trickle_interval_seconds: int | None = None,
     episode_trickle_spacing_seconds: float | None = None,
@@ -950,6 +952,8 @@ def save_refresh_settings(
         "catalog_refresh_seconds_jellyfin": max(60, int(catalog_refresh_seconds_jellyfin)),
         "enrichment_ttl_seconds":           max(60, int(enrichment_ttl_seconds)),
         "tmdb_sync_interval_seconds":       max(60, int(tmdb_sync_interval_seconds)) if tmdb_sync_interval_seconds else None,
+        **({"smart_category_reconciliation_enabled": bool(smart_category_reconciliation_enabled)}
+           if smart_category_reconciliation_enabled is not None else {}),
     }))
 
 
