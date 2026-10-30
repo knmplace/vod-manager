@@ -27,13 +27,13 @@ included.
 | Artwork Review and safe poster matching | [#68](https://github.com/jstevenscl/vod-manager/pull/68) | Open |
 | Language Mismatch Report and embedded-audio audit | [#69](https://github.com/jstevenscl/vod-manager/pull/69) | Open / on hold |
 | Smart-category reconciliation toggle | [#71](https://github.com/jstevenscl/vod-manager/pull/71) | Open / under review |
+| Configuration and reporting page navigation | [#72](https://github.com/jstevenscl/vod-manager/pull/72) | Open / under review |
 
 ## 2026-10-30 (Primary language and reporting controls)
 
-- Added a global **Primary Language** setting under Configuration, defaulting to
-  English (EN). It is constrained to the enabled playback-language set and is
-  documented as the default used when language detection or review needs one
-  assigned language; it does not disable other enabled languages.
+- Added a global **Primary Language** setting under Curation & Maintenance,
+  defaulting to English (EN). It is constrained to the enabled playback-language
+  set and stores the app-wide choice for flows that need one language assigned.
 - Added collapsible section markers to shared reporting/configuration cards.
   Movies and TV Shows remain expanded/non-collapsible as requested.
 - Added one shared Return to top control to the admin pages. It appears after
@@ -47,6 +47,10 @@ included.
 - Corrected the language-policy layout so Import Language Exclusion, Enabled
   Playback Languages, and Import Country Exclusion share one row, with Primary
   Language remaining separate below it.
+- Submitted the shared section, header, scroll-control, and Primary Language
+  changes upstream in [PR #72](https://github.com/jstevenscl/vod-manager/pull/72).
+  The fork-specific Sync History and mismatch-report layout changes are not in
+  that PR because those sections are not present on its upstream base.
 - Verified the upstream smart-category reconciliation fix: `main.py` imports
   `get_refresh_settings`, and added regression coverage for the default-enabled
   loop, enabled/disabled behavior, and config round-tripping.
