@@ -209,7 +209,7 @@ export default function TmdbStore() {
     <div className="space-y-4">
       <ConfirmDialogHost />
       {status && (
-        <SectionCard title="Use local TMDB library" icon={<Power size={14} />}>
+        <SectionCard title="Use local TMDB library" description="Cache TMDB details locally to reduce external lookups." icon={<Power size={14} />}>
           <div className="flex flex-wrap items-center gap-3">
             <div className="inline-flex rounded-md border border-border overflow-hidden text-xs">
               {[true, false].map((on) => (
@@ -248,7 +248,7 @@ export default function TmdbStore() {
           </div>
         </SectionCard>
       )}
-      <SectionCard title="TMDB Library" icon={<Database size={14} />}>
+      <SectionCard title="TMDB Library" description="Monitor cached TMDB data, retention, and refresh state." icon={<Database size={14} />}>
         <p className="text-xs text-muted-foreground">
           A local copy of TMDB movie and TV details for your catalog plus the most popular TMDB titles. Catalog and popular
           titles are refreshed before the cache limit; any title is kept until that limit, then removed. It is off until you turn it on above, and needs a
@@ -371,7 +371,7 @@ export default function TmdbStore() {
         )}
       </SectionCard>
 
-      <SectionCard title="Lookup" icon={<Search size={14} />}>
+      <SectionCard title="Lookup" description="Search local or remote TMDB data by title or ID." icon={<Search size={14} />}>
         <p className="text-xs text-muted-foreground">
           Search by name or TMDB ID. The local library is checked first; on a miss TMDB is searched and the results are
           saved here.
@@ -428,7 +428,7 @@ export default function TmdbStore() {
       </SectionCard>
 
       {form && (
-        <SectionCard title="Catalog refresh settings" icon={<SettingsIcon size={14} />}>
+        <SectionCard title="Catalog refresh settings" description="Control background TMDB refresh and matching." icon={<SettingsIcon size={14} />}>
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
             {SETTING_FIELDS.map((f) => (
               <label key={f.key} className="text-xs space-y-1">

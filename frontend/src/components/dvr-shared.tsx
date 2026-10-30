@@ -10,10 +10,10 @@ import { useState } from 'react'
 import { ChevronDown } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 
-export function SectionCard({ title, icon, children, collapsible = true }: { title: string; icon: React.ReactNode; children: React.ReactNode; collapsible?: boolean }) {
+export function SectionCard({ title, icon, description, children, collapsible = true, className }: { title: string; icon: React.ReactNode; description?: React.ReactNode; children: React.ReactNode; collapsible?: boolean; className?: string }) {
   const [open, setOpen] = useState(false)
   return (
-    <Card>
+    <Card className={className}>
       <CardContent className="space-y-3">
         <button
           type="button"
@@ -23,7 +23,10 @@ export function SectionCard({ title, icon, children, collapsible = true }: { tit
           aria-disabled={!collapsible}
         >
           <span className="flex items-center justify-center w-6 h-6 rounded-md bg-primary/10 text-primary shrink-0 [&_svg]:w-3.5 [&_svg]:h-3.5">{icon}</span>
-          {title}
+          <span className="min-w-0 flex-1">
+            <span className="block">{title}</span>
+            {description && <span className="block mt-0.5 text-xs font-normal leading-4 text-white">{description}</span>}
+          </span>
           {collapsible && <ChevronDown size={15} className={`ml-auto text-muted-foreground transition-transform ${open ? '' : '-rotate-90'}`} />}
         </button>
         {(!collapsible || open) && children}

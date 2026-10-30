@@ -40,6 +40,10 @@ included.
   10% of the current page has been scrolled and uses the same behavior across
   Curation, TMDB Library, Configuration, Download Configuration, Movies, Shows,
   and language-review pages.
+- Added concise white descriptions to section headers across configuration and
+  reporting pages. Primary Language now occupies its own full-width section;
+  Sync History and Rich Metadata guidance is shown in the headers, while the
+  three existing language policy sections retain their in-section help text.
 
 These submissions are focused upstream changes. Fork-only release notes remain
 below; PR branches contain no provider identities, private URLs, local network
