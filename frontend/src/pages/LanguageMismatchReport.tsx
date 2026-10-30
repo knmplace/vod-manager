@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowUp, Check, Languages, Loader2, Power, RefreshCw, X } from 'lucide-react'
+import { Check, Languages, Loader2, Power, RefreshCw, X } from 'lucide-react'
 import api from '@/lib/api'
 import { notify } from '@/lib/confirm'
 import { buildHlsPreviewSourceUrl, buildPreviewSourceUrl, buildTranscodedPreviewSourceUrl, PlayButton, type XcCredentials } from './VodManager'
@@ -47,7 +47,6 @@ export default function LanguageMismatchReport() {
   const [selectionAnchor, setSelectionAnchor] = useState<string | null>(null)
   const [providerFilters, setProviderFilters] = useState<string[]>([])
   const [observedFilters, setObservedFilters] = useState<string[]>([])
-  const [showTop, setShowTop] = useState(false)
   const report = useQuery<Report>({
     queryKey: ['language-mismatch-report'],
     queryFn: () => api.get('/vod/language-mismatch-report/').then((r) => r.data),
@@ -80,15 +79,6 @@ export default function LanguageMismatchReport() {
   const providerOptions = useMemo(() => [...new Set(rows.map((row) => row.provider_name))], [rows])
   const observedOptions = useMemo(() => [...new Set(rows.map((row) => row.observed_languages.join(', ')))], [rows])
   const filteredRows = useMemo(() => rows.filter((row) => (!providerFilters.length || providerFilters.includes(row.provider_name)) && (!observedFilters.length || observedFilters.includes(row.observed_languages.join(', ')))), [rows, providerFilters, observedFilters])
-  useEffect(() => {
-    const onScroll = () => {
-      const max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight)
-      setShowTop(window.scrollY > Math.max(240, max * 0.3))
-    }
-    onScroll()
-    window.addEventListener('scroll', onScroll, { passive: true })
-    return () => window.removeEventListener('scroll', onScroll)
-  }, [])
   useEffect(() => {
     setSelected((old) => new Set([...old].filter((id) => rows.some((r) => key(r) === id))))
   }, [rows])
@@ -257,7 +247,6 @@ export default function LanguageMismatchReport() {
           </table>
         </div>
       )}
-      {showTop && <button aria-label="Return to top" title="Return to top" className="fixed bottom-5 right-5 z-20 rounded-full border border-primary/50 bg-card p-3 text-primary shadow-lg hover:bg-accent" onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}><ArrowUp size={17} /></button>}
     </div>
   )
 }

@@ -27,6 +27,19 @@ included.
 | Artwork Review and safe poster matching | [#68](https://github.com/jstevenscl/vod-manager/pull/68) | Open |
 | Language Mismatch Report and embedded-audio audit | [#69](https://github.com/jstevenscl/vod-manager/pull/69) | Open / on hold |
 
+## 2026-10-30 (Primary language and reporting controls)
+
+- Added a global **Primary Language** setting under Configuration, defaulting to
+  English (EN). It is constrained to the enabled playback-language set and is
+  documented as the default used when language detection or review needs one
+  assigned language; it does not disable other enabled languages.
+- Added collapsible section markers to shared reporting/configuration cards.
+  Movies and TV Shows remain expanded/non-collapsible as requested.
+- Added one shared Return to top control to the admin pages. It appears after
+  10% of the current page has been scrolled and uses the same behavior across
+  Curation, TMDB Library, Configuration, Download Configuration, Movies, Shows,
+  and language-review pages.
+
 These submissions are focused upstream changes. Fork-only release notes remain
 below; PR branches contain no provider identities, private URLs, local network
 addresses, credentials, usernames, or user-specific deployment information.

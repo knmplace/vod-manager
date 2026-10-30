@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { ArrowLeft, ArrowUp, Check, Loader2, RefreshCw, RotateCcw, Trash2 } from 'lucide-react'
+import { ArrowLeft, Check, Loader2, RefreshCw, RotateCcw, Trash2 } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import api from '@/lib/api'
 import { notify } from '@/lib/confirm'
@@ -30,7 +30,6 @@ export default function LanguageProbeErrors() {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [selectionAnchor, setSelectionAnchor] = useState<string | null>(null)
   const [providerFilters, setProviderFilters] = useState<string[]>([])
-  const [showTop, setShowTop] = useState(false)
   const report = useQuery<Report>({
     queryKey: ['language-mismatch-report'],
     queryFn: () => api.get('/vod/language-mismatch-report/').then((r) => r.data),
@@ -55,15 +54,6 @@ export default function LanguageProbeErrors() {
   const filteredQuarantined = filteredErrors.filter((row) => row.quarantined)
   const visibleRows = [...filteredDeferred, ...filteredQuarantined]
   useEffect(() => setSelected((old) => new Set([...old].filter((id) => errors.some((row) => rowKey(row) === id)))), [errors])
-  useEffect(() => {
-    const onScroll = () => {
-      const max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight)
-      setShowTop(window.scrollY > Math.max(240, max * 0.3))
-    }
-    onScroll()
-    window.addEventListener('scroll', onScroll, { passive: true })
-    return () => window.removeEventListener('scroll', onScroll)
-  }, [])
   const play = (row: ProbeError) => <PlayButton url={buildPreviewSourceUrl(row.kind === 'episode' ? 'series' : 'movie', row.source_id, row.container_extension || 'mp4', credentials.data)} transcodedUrl={buildTranscodedPreviewSourceUrl(row.kind === 'episode' ? 'series' : 'movie', row.source_id, credentials.data)} hlsUrl={buildHlsPreviewSourceUrl(row.kind === 'episode' ? 'series' : 'movie', row.source_id, credentials.data)} title={`${row.title}${row.year ? ` (${row.year})` : ''}`} />
   const bulkAction = async (value: 'approve' | 'retry' | 'delete') => {
     const targets = errors.filter((row) => selected.has(rowKey(row)))
@@ -106,6 +96,5 @@ export default function LanguageProbeErrors() {
     <div className="flex flex-wrap items-center gap-2 border border-border rounded-md bg-card px-3 py-2 text-xs text-white"><span>{selected.size} selected</span><details className="relative ml-auto"><summary className="cursor-pointer rounded border border-border px-2 py-1 text-[11px]">Provider{providerFilters.length ? ` (${providerFilters.length})` : ''}</summary><div className="absolute right-0 z-30 mt-1 max-h-60 min-w-48 overflow-auto rounded border border-border bg-card p-2 shadow-lg">{providerOptions.map((provider) => <label className="flex items-center gap-2 whitespace-nowrap py-1 text-[11px] text-white" key={provider}><input type="checkbox" checked={providerFilters.includes(provider)} onChange={() => setProviderFilters((old) => old.includes(provider) ? old.filter((value) => value !== provider) : [...old, provider])} />{provider}</label>)}{providerFilters.length > 0 && <button className="mt-1 text-[11px] text-primary" onClick={() => setProviderFilters([])}>Clear providers</button>}</div></details><button className="border border-border rounded px-2 py-1 hover:bg-accent" onClick={() => { setSelected((old) => old.size === filteredErrors.length ? new Set() : new Set(filteredErrors.map((row) => rowKey(row)))); setSelectionAnchor(null) }}>{selected.size === filteredErrors.length && filteredErrors.length ? 'Clear selection' : 'Select all shown'}</button><button className="border border-emerald-500/40 text-emerald-400 rounded px-2 py-1 hover:bg-emerald-500/10 disabled:opacity-50" disabled={action.isPending || !selected.size} onClick={() => bulkAction('approve')}>Approve selected</button><button className="border border-primary/40 text-primary rounded px-2 py-1 hover:bg-accent disabled:opacity-50" disabled={action.isPending || !selected.size} onClick={() => bulkAction('retry')}>Retry selected</button><button className="border border-red-500/40 text-red-400 rounded px-2 py-1 hover:bg-red-500/10 disabled:opacity-50" disabled={action.isPending || !selected.size} onClick={() => bulkAction('delete')}>Delete selected</button></div>
     <details className="space-y-2"><summary className="cursor-pointer text-sm font-semibold text-white">Deferred sources ({filteredDeferred.length})</summary><div className="pt-2"><p className="text-[11px] text-white">These sources failed once and remain eligible. Approve after playback review to mark them checked, retry them, or delete them.</p>{table(filteredDeferred, false)}</div></details>
     <details className="space-y-2"><summary className="cursor-pointer text-sm font-semibold text-amber-300">Quarantined sources ({filteredQuarantined.length})</summary><div className="pt-2"><p className="text-[11px] text-white">These sources failed twice and are excluded from automatic probing and normal playback. Manual review is required.</p>{table(filteredQuarantined, true)}</div></details>
-    {showTop && <button aria-label="Return to top" title="Return to top" className="fixed bottom-5 right-5 z-20 rounded-full border border-primary/50 bg-card p-3 text-primary shadow-lg hover:bg-accent" onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}><ArrowUp size={17} /></button>}
   </div>
 }

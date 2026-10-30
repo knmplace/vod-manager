@@ -32,6 +32,7 @@ from config import (
     get_lockout_settings,
     get_mdblist_api_key,
     get_openai_api_key,
+    get_primary_language,
     get_refresh_settings,
     get_smtp_settings,
     get_stream_priority_mode,
@@ -49,6 +50,7 @@ from config import (
     save_lockout_settings,
     save_mdblist_api_key,
     save_openai_api_key,
+    save_primary_language,
     save_refresh_settings,
     save_smtp_settings,
     save_stream_priority_mode,
@@ -155,6 +157,10 @@ class ImportExclusionsApplyRequest(BaseModel):
 
 class EnabledLanguagesRequest(BaseModel):
     codes: list[str] = []
+
+
+class PrimaryLanguageRequest(BaseModel):
+    code: str
 
 
 class EnabledLanguagesImpactRequest(BaseModel):
@@ -1019,7 +1025,21 @@ async def list_import_language_exclusion_prefixes():
 
 @router.get("/enabled-languages/", dependencies=_GUARDS)
 async def get_enabled_languages_settings():
-    return {"codes": get_enabled_languages()}
+    return {"codes": get_enabled_languages(), "primary_language": get_primary_language()}
+
+
+@router.get("/primary-language/", dependencies=_GUARDS)
+async def get_primary_language_settings():
+    return {"code": get_primary_language()}
+
+
+@router.post("/primary-language/", dependencies=_GUARDS)
+async def save_primary_language_settings(body: PrimaryLanguageRequest):
+    try:
+        save_primary_language(body.code)
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc))
+    return {"ok": True, "code": get_primary_language()}
 
 
 @router.get("/enabled-languages/inventory/", dependencies=_GUARDS)
@@ -1030,11 +1050,14 @@ async def get_enabled_languages_inventory():
 @router.post("/enabled-languages/", dependencies=_GUARDS)
 async def save_enabled_languages_settings(body: EnabledLanguagesRequest):
     save_enabled_languages(body.codes)
+    enabled = get_enabled_languages()
+    if enabled and get_primary_language() not in enabled:
+        save_primary_language(enabled[0])
     archive = await asyncio.to_thread(
         vod_db.archive_disabled_language_content,
-        enabled_languages=set(body.codes),
+        enabled_languages=set(enabled),
     )
-    return {"ok": True, "archive": archive}
+    return {"ok": True, "archive": archive, "primary_language": get_primary_language()}
 
 
 @router.post("/enabled-languages/impact/", dependencies=_GUARDS)

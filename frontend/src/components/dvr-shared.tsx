@@ -6,17 +6,27 @@
 // specifically so the portal doesn't have to import that whole 6800+ line
 // admin file just to get a status pill.
 
+import { useState } from 'react'
+import { ChevronDown } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 
-export function SectionCard({ title, icon, children }: { title: string; icon: React.ReactNode; children: React.ReactNode }) {
+export function SectionCard({ title, icon, children, collapsible = true }: { title: string; icon: React.ReactNode; children: React.ReactNode; collapsible?: boolean }) {
+  const [open, setOpen] = useState(true)
   return (
     <Card>
       <CardContent className="space-y-3">
-        <h2 className="text-sm font-bold flex items-center gap-2">
+        <button
+          type="button"
+          className="w-full text-left text-sm font-bold flex items-center gap-2 rounded focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+          onClick={() => collapsible && setOpen((value) => !value)}
+          aria-expanded={collapsible ? open : true}
+          aria-disabled={!collapsible}
+        >
           <span className="flex items-center justify-center w-6 h-6 rounded-md bg-primary/10 text-primary shrink-0 [&_svg]:w-3.5 [&_svg]:h-3.5">{icon}</span>
           {title}
-        </h2>
-        {children}
+          {collapsible && <ChevronDown size={15} className={`ml-auto text-muted-foreground transition-transform ${open ? '' : '-rotate-90'}`} />}
+        </button>
+        {(!collapsible || open) && children}
       </CardContent>
     </Card>
   )

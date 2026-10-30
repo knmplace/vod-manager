@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { ArrowLeft, ArrowUp, Check, Loader2, RefreshCw, RotateCcw, Trash2 } from 'lucide-react'
+import { ArrowLeft, Check, Loader2, RefreshCw, RotateCcw, Trash2 } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import api from '@/lib/api'
 import { notify } from '@/lib/confirm'
@@ -11,7 +11,6 @@ export default function LanguageUnknowns() {
   const qc = useQueryClient()
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [selectionAnchor, setSelectionAnchor] = useState<string | null>(null)
-  const [showTop, setShowTop] = useState(false)
   const [provider, setProvider] = useState('')
   const [sort, setSort] = useState<'checked' | 'title' | 'provider'>('checked')
   const settings = useQuery<{ language_trickle_enabled: boolean }>({ queryKey: ['language-trickle-settings'], queryFn: () => api.get('/vod/language-trickle/settings/').then((r) => r.data) })
@@ -25,13 +24,6 @@ export default function LanguageUnknowns() {
   const rows = report.data?.results ?? []
   const visible = useMemo(() => [...rows].filter((row) => !provider || row.provider_name === provider).sort((a, b) => sort === 'title' ? a.title.localeCompare(b.title) : sort === 'provider' ? a.provider_name.localeCompare(b.provider_name) : (b.language_probed_at || '').localeCompare(a.language_probed_at || '')), [rows, provider, sort])
   const key = (row: UnknownRow) => `${row.kind}:${row.source_id}`
-
-  useEffect(() => {
-    const onScroll = () => setShowTop(window.scrollY > 240)
-    onScroll()
-    window.addEventListener('scroll', onScroll, { passive: true })
-    return () => window.removeEventListener('scroll', onScroll)
-  }, [])
 
   const toggleRowSelection = (row: UnknownRow, index: number, event: React.ChangeEvent<HTMLInputElement>) => {
     const id = key(row)
@@ -71,6 +63,5 @@ export default function LanguageUnknowns() {
     <div className="rounded-md border border-amber-500/30 bg-card px-3 py-2 text-xs text-amber-200">Confirm current language marks a source reviewed after playback review. It does not archive the parent and does not relabel the source. Language correction is planned separately.</div>
     <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-card px-3 py-2 text-xs"><span>{visible.length} shown · {selected.size} selected</span><span className="text-muted-foreground">Shift-click rows to select a range.</span><select className="ml-auto rounded border border-border bg-background px-2 py-1" value={provider} onChange={(e) => setProvider(e.target.value)}><option value="">All providers</option>{[...new Set(rows.map((row) => row.provider_name))].sort().map((name) => <option key={name}>{name}</option>)}</select><select className="rounded border border-border bg-background px-2 py-1" value={sort} onChange={(e) => setSort(e.target.value as typeof sort)}><option value="checked">Newest checked</option><option value="title">Title</option><option value="provider">Provider</option></select><button className="border border-border rounded px-2 py-1 hover:bg-accent" onClick={() => { setSelected((old) => old.size === visible.length ? new Set() : new Set(visible.map(key))); setSelectionAnchor(null) }}>{selected.size === visible.length && visible.length ? 'Clear selection' : 'Select all shown'}</button><button className="border border-emerald-500/40 text-emerald-400 rounded px-2 py-1 disabled:opacity-50" disabled={action.isPending || !selected.size} onClick={() => bulk('approve')}>Confirm current selected</button><button className="border border-primary/40 text-primary rounded px-2 py-1 disabled:opacity-50" disabled={action.isPending || !selected.size} onClick={() => bulk('retry')}>Retry selected</button><button className="border border-red-500/40 text-red-400 rounded px-2 py-1 disabled:opacity-50" disabled={action.isPending || !selected.size} onClick={() => bulk('delete')}>Delete selected</button></div>
     {visible.length ? <div className="overflow-x-auto border border-border rounded-md"><table className="w-full table-fixed text-xs"><thead className="bg-card"><tr className="text-left"><th className="p-2 w-8"><input type="checkbox" aria-label="Select all shown unknown-language sources" checked={visible.length > 0 && visible.every((row) => selected.has(key(row)))} onChange={(e) => { setSelected((old) => { const next = new Set(old); visible.forEach((row) => e.target.checked ? next.add(key(row)) : next.delete(key(row))); return next }); setSelectionAnchor(null) }} /></th><th className="p-2 w-[38%]">Title / play</th><th className="p-2 w-[17%]">Provider</th><th className="p-2 w-[13%]">Configured</th><th className="p-2 w-[14%]">Observed</th><th className="p-2 w-[18%]">Actions</th></tr></thead><tbody>{visible.map((row, index) => <tr className="border-t border-border/60 align-top" key={key(row)}><td className="p-2"><input type="checkbox" aria-label={`Select ${row.title}`} checked={selected.has(key(row))} onChange={(e) => toggleRowSelection(row, index, e)} /></td><td className="p-2"><div className="font-medium flex items-center gap-1"><span className="rounded border border-border px-1 text-[10px]">{row.kind === 'episode' ? 'S' : 'M'}</span>{row.title}{row.year ? ` (${row.year})` : ''}<PlayButton url={buildPreviewSourceUrl(row.kind === 'episode' ? 'series' : 'movie', row.source_id, row.container_extension || 'mp4', credentials.data)} transcodedUrl={buildTranscodedPreviewSourceUrl(row.kind === 'episode' ? 'series' : 'movie', row.source_id, credentials.data)} hlsUrl={buildHlsPreviewSourceUrl(row.kind === 'episode' ? 'series' : 'movie', row.source_id, credentials.data)} title={row.title} /></div><div className="text-[11px] text-muted-foreground">{row.kind === 'episode' ? `S${row.season_number}E${row.episode_number} · ${row.episode_name || ''}` : 'Movie'}</div></td><td className="p-2">{row.provider_name}</td><td className="p-2">{row.configured_language || 'Unknown'}</td><td className="p-2 text-amber-300">Unknown</td><td className="p-2"><span className="flex flex-wrap gap-1"><button className="px-1.5 py-1 rounded border border-emerald-500/40 text-emerald-400" disabled={action.isPending} onClick={() => run(row, 'approve')}><Check size={13} /> Confirm current</button><button className="px-1.5 py-1 rounded border border-primary/40 text-primary" disabled={action.isPending} onClick={() => run(row, 'retry')}><RotateCcw size={13} /> Retry</button><button className="px-1.5 py-1 rounded border border-red-500/40 text-red-400" disabled={action.isPending} onClick={() => run(row, 'delete')}><Trash2 size={13} /> Delete</button></span></td></tr>)}</tbody></table></div> : <div className="border border-border rounded-md bg-card p-8 text-center text-sm text-muted-foreground">No unknown-language sources need review.</div>}
-    {showTop && <button aria-label="Return to top" title="Return to top" className="fixed bottom-5 right-5 z-20 rounded-full border border-primary/50 bg-card p-3 text-primary shadow-lg" onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}><ArrowUp size={17} /></button>}
   </div>
 }

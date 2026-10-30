@@ -6879,7 +6879,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
   // that one gates future imports by raw_name prefix; this is a live filter
   // over the language already computed on every source row, so toggling it
   // takes effect immediately on already-imported content in both directions.
-  const enabledLanguagesQuery = useQuery<{ codes: string[] }>({
+  const enabledLanguagesQuery = useQuery<{ codes: string[]; primary_language?: string }>({
     queryKey: ['vod-enabled-languages'],
     queryFn:  () => api.get('/vod/enabled-languages/').then((r) => r.data),
   })
@@ -6902,6 +6902,18 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
         )
       }
     },
+  })
+  const [primaryLanguageDraft, setPrimaryLanguageDraft] = useState('EN')
+  useEffect(() => {
+    if (enabledLanguagesQuery.data?.primary_language) setPrimaryLanguageDraft(enabledLanguagesQuery.data.primary_language)
+  }, [enabledLanguagesQuery.data?.primary_language])
+  const savePrimaryLanguage = useMutation({
+    mutationFn: (code: string) => api.post('/vod/primary-language/', { code }).then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['vod-enabled-languages'] })
+      notify('Primary language saved.')
+    },
+    onError: (err: any) => notify(err?.response?.data?.detail ?? 'Could not save primary language.'),
   })
 
   // Language backfill + retroactive movie/series language split (beads-974
@@ -11428,6 +11440,36 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
             </div>
           )}
         </SectionCard>
+        <SectionCard title="Primary Language" icon={<Languages size={14} />}>
+          <p className="text-xs text-white">
+            This global setting is the default language used when the application must assign one language during
+            language detection, Unknown Language confirmation, or manual language correction. It does not disable
+            other enabled playback languages. If multiple languages are enabled, choose which one is primary here.
+            When only one language is enabled, that language is used automatically.
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="text-xs font-medium" htmlFor="primary-playback-language">Primary language</label>
+            <select
+              id="primary-playback-language"
+              className={inputCls('min-w-48')}
+              value={primaryLanguageDraft}
+              onChange={(e) => setPrimaryLanguageDraft(e.target.value)}
+              disabled={savePrimaryLanguage.isPending || (enabledLanguagesQuery.data?.codes ?? []).length === 0}
+            >
+              {(enabledLanguagesQuery.data?.codes ?? []).map((code) => (
+                <option key={code} value={code}>{code} — {LANGUAGE_CODE_NAMES[code] ?? code}</option>
+              ))}
+            </select>
+            <Button
+              size="sm"
+              disabled={savePrimaryLanguage.isPending || !(enabledLanguagesQuery.data?.codes ?? []).includes(primaryLanguageDraft)}
+              onClick={() => savePrimaryLanguage.mutate(primaryLanguageDraft)}
+            >
+              {savePrimaryLanguage.isPending ? <Loader2 size={12} className="animate-spin mr-1" /> : null}
+              Save primary language
+            </Button>
+          </div>
+        </SectionCard>
         <SectionCard title="Enabled Playback Languages" icon={<Play size={14} />}>
           <p className="text-xs text-muted-foreground">
             This is a different filter from "Import Language Exclusion". That one decides what gets imported in
@@ -13138,7 +13180,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
       </div>
       {movieSubTab === 'matches' ? <PossibleMetadataMatches contentType="movie" /> : (
       <>
-      <SectionCard title="Movies" icon={<Film size={14} />}>
+      <SectionCard title="Movies" icon={<Film size={14} />} collapsible={false}>
         <div className="flex items-center gap-1.5 flex-wrap">
           <input
             className={inputCls('w-64')}
@@ -13380,7 +13422,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
       </div>
       {seriesSubTab === 'matches' ? <PossibleMetadataMatches contentType="series" /> : (
       <>
-      <SectionCard title="TV Shows" icon={<Tv size={14} />}>
+      <SectionCard title="TV Shows" icon={<Tv size={14} />} collapsible={false}>
         <div className="flex items-center gap-1.5 flex-wrap">
           <input
             className={inputCls('w-64')}
