@@ -1496,6 +1496,49 @@ const LANGUAGE_CODE_NAMES: Record<string, string> = {
   // shorthand with no reliable interpretation). A wrong guess here is
   // worse than just showing the raw code.
 }
+
+// Complete ISO 639-1 catalog for global primary-language selection. This is
+// intentionally independent of the languages currently present in the VOD
+// database or provider inventory.
+const PRIMARY_LANGUAGE_OPTIONS: Array<[string, string]> = [
+  ['AA', 'Afar'], ['AB', 'Abkhazian'], ['AE', 'Avestan'], ['AF', 'Afrikaans'], ['AK', 'Akan'],
+  ['AM', 'Amharic'], ['AN', 'Aragonese'], ['AR', 'Arabic'], ['AS', 'Assamese'], ['AV', 'Avaric'],
+  ['AY', 'Aymara'], ['AZ', 'Azerbaijani'], ['BA', 'Bashkir'], ['BE', 'Belarusian'], ['BG', 'Bulgarian'],
+  ['BH', 'Bihari'], ['BI', 'Bislama'], ['BM', 'Bambara'], ['BN', 'Bengali'], ['BO', 'Tibetan'],
+  ['BR', 'Breton'], ['BS', 'Bosnian'], ['CA', 'Catalan'], ['CE', 'Chechen'], ['CH', 'Chamorro'],
+  ['CO', 'Corsican'], ['CR', 'Cree'], ['CS', 'Czech'], ['CU', 'Church Slavic'], ['CV', 'Chuvash'],
+  ['CY', 'Welsh'], ['DA', 'Danish'], ['DE', 'German'], ['DV', 'Divehi'], ['DZ', 'Dzongkha'],
+  ['EE', 'Ewe'], ['EL', 'Greek'], ['EN', 'English'], ['EO', 'Esperanto'], ['ES', 'Spanish'],
+  ['ET', 'Estonian'], ['EU', 'Basque'], ['FA', 'Persian'], ['FF', 'Fulah'], ['FI', 'Finnish'],
+  ['FJ', 'Fijian'], ['FO', 'Faroese'], ['FR', 'French'], ['FY', 'Western Frisian'], ['GA', 'Irish'],
+  ['GD', 'Scottish Gaelic'], ['GL', 'Galician'], ['GN', 'Guarani'], ['GU', 'Gujarati'], ['GV', 'Manx'],
+  ['HA', 'Hausa'], ['HE', 'Hebrew'], ['HI', 'Hindi'], ['HO', 'Hiri Motu'], ['HR', 'Croatian'],
+  ['HT', 'Haitian'], ['HU', 'Hungarian'], ['HY', 'Armenian'], ['HZ', 'Herero'], ['IA', 'Interlingua'],
+  ['ID', 'Indonesian'], ['IE', 'Interlingue'], ['IG', 'Igbo'], ['II', 'Sichuan Yi'], ['IK', 'Inupiaq'],
+  ['IO', 'Ido'], ['IS', 'Icelandic'], ['IT', 'Italian'], ['IU', 'Inuktitut'], ['JA', 'Japanese'],
+  ['JV', 'Javanese'], ['KA', 'Georgian'], ['KG', 'Kongo'], ['KI', 'Kikuyu'], ['KJ', 'Kuanyama'],
+  ['KK', 'Kazakh'], ['KL', 'Kalaallisut'], ['KM', 'Khmer'], ['KN', 'Kannada'], ['KO', 'Korean'],
+  ['KR', 'Kanuri'], ['KS', 'Kashmiri'], ['KU', 'Kurdish'], ['KV', 'Komi'], ['KW', 'Cornish'],
+  ['KY', 'Kyrgyz'], ['LA', 'Latin'], ['LB', 'Luxembourgish'], ['LG', 'Ganda'], ['LI', 'Limburgish'],
+  ['LN', 'Lingala'], ['LO', 'Lao'], ['LT', 'Lithuanian'], ['LU', 'Luba-Katanga'], ['LV', 'Latvian'],
+  ['MG', 'Malagasy'], ['MH', 'Marshallese'], ['MI', 'Māori'], ['MK', 'Macedonian'], ['ML', 'Malayalam'],
+  ['MN', 'Mongolian'], ['MR', 'Marathi'], ['MS', 'Malay'], ['MT', 'Maltese'], ['MY', 'Burmese'],
+  ['NA', 'Nauru'], ['NB', 'Norwegian Bokmål'], ['ND', 'North Ndebele'], ['NE', 'Nepali'], ['NG', 'Ndonga'],
+  ['NL', 'Dutch'], ['NN', 'Norwegian Nynorsk'], ['NO', 'Norwegian'], ['NR', 'South Ndebele'], ['NV', 'Navajo'],
+  ['NY', 'Chichewa'], ['OC', 'Occitan'], ['OJ', 'Ojibwa'], ['OM', 'Oromo'], ['OR', 'Odia'],
+  ['OS', 'Ossetian'], ['PA', 'Punjabi'], ['PI', 'Pali'], ['PL', 'Polish'], ['PS', 'Pashto'],
+  ['PT', 'Portuguese'], ['QU', 'Quechua'], ['RM', 'Romansh'], ['RN', 'Rundi'], ['RO', 'Romanian'],
+  ['RU', 'Russian'], ['RW', 'Kinyarwanda'], ['SA', 'Sanskrit'], ['SC', 'Sardinian'], ['SD', 'Sindhi'],
+  ['SE', 'Northern Sami'], ['SG', 'Sango'], ['SI', 'Sinhala'], ['SK', 'Slovak'], ['SL', 'Slovenian'],
+  ['SM', 'Samoan'], ['SN', 'Shona'], ['SO', 'Somali'], ['SQ', 'Albanian'], ['SR', 'Serbian'],
+  ['SS', 'Swati'], ['ST', 'Southern Sotho'], ['SU', 'Sundanese'], ['SV', 'Swedish'], ['SW', 'Swahili'],
+  ['TA', 'Tamil'], ['TE', 'Telugu'], ['TG', 'Tajik'], ['TH', 'Thai'], ['TI', 'Tigrinya'],
+  ['TK', 'Turkmen'], ['TL', 'Tagalog'], ['TN', 'Tswana'], ['TO', 'Tongan'], ['TR', 'Turkish'],
+  ['TS', 'Tsonga'], ['TT', 'Tatar'], ['TW', 'Twi'], ['TY', 'Tahitian'], ['UG', 'Uyghur'],
+  ['UK', 'Ukrainian'], ['UR', 'Urdu'], ['UZ', 'Uzbek'], ['VE', 'Venda'], ['VI', 'Vietnamese'],
+  ['VO', 'Volapük'], ['WA', 'Walloon'], ['WO', 'Wolof'], ['XH', 'Xhosa'], ['YI', 'Yiddish'],
+  ['YO', 'Yoruba'], ['ZA', 'Zhuang'], ['ZH', 'Chinese'], ['ZU', 'Zulu'],
+]
 // Country-of-origin suffix codes (backend _KNOWN_COUNTRY_SUFFIX_CODES,
 // vod_db._country_suffix_code) -- a separate, trailing-tag provider
 // convention from the leading language prefixes above, e.g. "Married at
@@ -11462,7 +11505,8 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
           <p className="text-xs text-white">
             This global setting is the default language used when the application must assign one language during
             language detection, Unknown Language confirmation, or manual language correction. It does not disable
-            other enabled playback languages. If multiple languages are enabled, choose which one is primary here.
+            other enabled playback languages. The list below is the complete language catalog, not a list of languages
+            currently found in the database. The selected language must also be enabled under Enabled Playback Languages.
             When only one language is enabled, that language is used automatically.
           </p>
           <div className="flex flex-wrap items-center gap-2">
@@ -11474,8 +11518,8 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
               onChange={(e) => setPrimaryLanguageDraft(e.target.value)}
               disabled={savePrimaryLanguage.isPending || (enabledLanguagesQuery.data?.codes ?? []).length === 0}
             >
-              {(enabledLanguagesQuery.data?.codes ?? []).map((code) => (
-                <option key={code} value={code}>{code} — {LANGUAGE_CODE_NAMES[code] ?? code}</option>
+              {PRIMARY_LANGUAGE_OPTIONS.map(([code, name]) => (
+                <option key={code} value={code}>{code} — {name}</option>
               ))}
             </select>
             <Button
