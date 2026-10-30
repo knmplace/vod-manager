@@ -11335,7 +11335,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
 
       {activeTab === 'curation' && (
       <>
-      {/* KNM: 2026-10-03 -- the three import/playback language and country filters side by side as equal columns */}
+      {/* Keep the three language-policy cards on one row; Primary Language is a separate full-width card below. */}
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.28fr)_minmax(0,1fr)] items-stretch">
         <SectionCard title="Import Language Exclusion" icon={<Trash2 size={14} />}>
           <p className="text-xs text-muted-foreground">
@@ -11496,7 +11496,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
             </div>
           )}
         </SectionCard>
-        <SectionCard title="Primary Language" description="Choose the default language used during detection and correction." className="col-span-full" icon={<Languages size={14} />}>
+        <SectionCard title="Primary Language" description="Choose the default language used during detection and correction." className="col-span-full order-last" icon={<Languages size={14} />}>
           <p className="text-xs text-white">
             This global setting is the default language used when the application must assign one language during
             language detection, Unknown Language confirmation, or manual language correction. It does not disable

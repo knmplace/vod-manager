@@ -44,6 +44,12 @@ included.
   reporting pages. Primary Language now occupies its own full-width section;
   Sync History and Rich Metadata guidance is shown in the headers, while the
   three existing language policy sections retain their in-section help text.
+- Corrected the language-policy layout so Import Language Exclusion, Enabled
+  Playback Languages, and Import Country Exclusion share one row, with Primary
+  Language remaining separate below it.
+- Verified the upstream smart-category reconciliation fix: `main.py` imports
+  `get_refresh_settings`, and added regression coverage for the default-enabled
+  loop, enabled/disabled behavior, and config round-tripping.
 
 These submissions are focused upstream changes. Fork-only release notes remain
 below; PR branches contain no provider identities, private URLs, local network
