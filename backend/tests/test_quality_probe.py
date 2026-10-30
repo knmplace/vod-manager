@@ -331,6 +331,25 @@ def test_language_mismatch_report_approval_updates_tag_and_archives_excluded_sou
     assert not db.list_language_mismatches()["results"]
 
 
+def test_unknown_language_is_separate_and_never_archive_approvable(db, tmp_path):
+    pid = db.upsert_provider("unknown-language-provider", "", "", "", provider_type="library")
+    mid = db.upsert_movie("Unknown Tagged Movie", 2026)
+    path = tmp_path / "unknown.mkv"
+    path.write_bytes(b"fixture")
+    db.add_movie_source(mid, pid, "unknown", "mkv", local_file_path=str(path))
+    conn = db._connect()
+    sid = conn.execute("SELECT id FROM movie_sources WHERE movie_id=?", (mid,)).fetchone()["id"]
+    conn.execute("UPDATE movie_sources SET language='EN' WHERE id=?", (sid,))
+    conn.commit(); conn.close()
+    db.set_source_language_probe("movie", sid, ["UNKNOWN"], "observed", "local_embedded_audio_tags", "low")
+
+    assert not any(row["source_id"] == sid for row in db.list_language_mismatches()["results"])
+    unknown = next(row for row in db.list_language_unknowns()["results"] if row["source_id"] == sid)
+    assert unknown["proposed_archive"] is False
+    with pytest.raises(ValueError, match="unknown or multiple"):
+        db.decide_language_mismatch("movie", sid, "approved")
+
+
 def test_language_provider_error_does_not_pause_provider(monkeypatch):
     provider = {"id": 901, "name": "limited-provider", "provider_type": "xc"}
     source = {"provider_id": 901, "provider_stream_id": "x", "container_extension": "mp4"}

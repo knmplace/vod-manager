@@ -8986,7 +8986,11 @@ def list_language_mismatches(limit: int = 1000) -> dict:
                 observed = sorted(set(json.loads(item.pop("language_probe_languages") or "[]")))
             except (TypeError, ValueError):
                 observed = []
-            if not observed or (item.get("configured_language") and item.get("configured_language") in observed):
+            # Unknown/untagged results are a separate manual-review queue.  They
+            # must never appear as an ordinary mismatch with an archive action.
+            if not observed or all(language == "UNKNOWN" for language in observed):
+                continue
+            if item.get("configured_language") and item.get("configured_language") in observed:
                 continue
             item["observed_languages"] = observed
             item["safe_to_apply"] = len(observed) == 1
@@ -8995,6 +8999,61 @@ def list_language_mismatches(limit: int = 1000) -> dict:
             item["enabled_languages"] = enabled
             rows.append(item)
         return {"enabled_languages": enabled, "count": len(rows), "results": rows}
+    finally:
+        conn.close()
+
+
+def list_language_unknowns(limit: int = 1000) -> dict:
+    """List probe results with no usable embedded language signal.
+
+    Unknown results are intentionally separate from mismatches: they are not
+    evidence that the configured language is wrong and can never imply an
+    archive action.
+    """
+    conn = _connect()
+    try:
+        rows = []
+        for query in ("""
+            SELECT 'movie' AS kind, ms.id AS source_id, m.id AS item_id,
+                   m.name AS title, m.year, m.tmdb_id, ms.container_extension,
+                   ms.language AS configured_language, ms.language_probe_languages,
+                   ms.language_probe_status, ms.language_probe_confidence,
+                   ms.language_probed_at, p.name AS provider_name
+            FROM movie_sources ms JOIN movies m ON m.id=ms.movie_id
+            JOIN providers p ON p.id=ms.provider_id
+            WHERE p.is_active=1 AND m.review_excluded=0
+              AND ms.language_probe_status IN ('unknown','observed')
+              AND ms.language_probe_decision IS NULL
+            ORDER BY ms.language_probed_at DESC LIMIT ?
+        """, """
+            SELECT 'episode' AS kind, es.id AS source_id, s.id AS item_id,
+                   s.name AS title, s.year, s.tmdb_id, es.container_extension,
+                   es.language AS configured_language, es.language_probe_languages,
+                   es.language_probe_status, es.language_probe_confidence,
+                   es.language_probed_at, p.name AS provider_name,
+                   e.season_number, e.episode_number, e.name AS episode_name
+            FROM episode_sources es JOIN episodes e ON e.id=es.episode_id
+            JOIN series s ON s.id=e.series_id JOIN providers p ON p.id=es.provider_id
+            WHERE p.is_active=1 AND s.review_excluded=0
+              AND es.language_probe_status IN ('unknown','observed')
+              AND es.language_probe_decision IS NULL
+            ORDER BY es.language_probed_at DESC LIMIT ?
+        """):
+            for row in conn.execute(query, (limit,)).fetchall():
+                item = dict(row)
+                try:
+                    observed = sorted(set(json.loads(item.pop("language_probe_languages") or "[]")))
+                except (TypeError, ValueError):
+                    observed = []
+                if observed and not all(language == "UNKNOWN" for language in observed):
+                    continue
+                item["observed_languages"] = observed or ["UNKNOWN"]
+                item["safe_to_apply"] = False
+                item["proposed_language"] = None
+                item["proposed_archive"] = False
+                rows.append(item)
+        rows.sort(key=lambda item: item.get("language_probed_at") or "", reverse=True)
+        return {"count": len(rows[:limit]), "results": rows[:limit]}
     finally:
         conn.close()
 
@@ -9111,8 +9170,8 @@ def decide_language_mismatch(kind: str, source_id: int, decision: str) -> dict:
                 observed = sorted(set(json.loads(row["language_probe_languages"] or "[]")))
             except (TypeError, ValueError):
                 observed = []
-            if decision == "approved" and len(observed) != 1:
-                raise ValueError("only a single observed language can be approved automatically")
+            if decision == "approved" and (len(observed) != 1 or observed[0] == "UNKNOWN"):
+                raise ValueError("unknown or multiple observed languages require manual review")
             now = _now()
             if decision == "rejected":
                 conn.execute(f"UPDATE {table} SET language_probe_decision=?, language_probe_decided_at=? WHERE id=?",

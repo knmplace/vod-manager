@@ -12,6 +12,7 @@ import api from '@/lib/api'
 import NoticesBell from '@/components/NoticesBell'
 import LanguageMismatchReport from '@/pages/LanguageMismatchReport'
 import LanguageProbeErrors from '@/pages/LanguageProbeErrors'
+import LanguageUnknowns from '@/pages/LanguageUnknowns'
 
 export const THEMES = ['dark', 'mid', 'light', 'mono', 'warm'] as const
 export type Theme = typeof THEMES[number]
@@ -32,7 +33,7 @@ function initTheme(): Theme {
 }
 
 type AuthState = 'checking' | 'login' | 'ready'
-type AppTab = VodManagerTab | 'tmdb' | 'language-report' | 'language-errors'
+type AppTab = VodManagerTab | 'tmdb' | 'language-report' | 'language-errors' | 'language-unknowns'
 
 interface NavItem {
   label: string
@@ -93,6 +94,7 @@ const NAV_GROUPS: NavGroup[] = [
     { label: 'Configuration', icon: <SettingsIcon size={15} />, tab: 'config' },
     { label: 'Download Configuration', icon: <Download size={15} />, tab: 'downloads' },
     { label: 'Language Mismatch Report', icon: <Languages size={15} />, tab: 'language-report' },
+    { label: 'Unknown Language Review', icon: <Languages size={15} />, tab: 'language-unknowns' },
   ] },
 ]
 
@@ -104,7 +106,7 @@ export default function App() {
 
   const [activeTab, setActiveTabState] = useState<AppTab>(() => {
     const saved = localStorage.getItem('vodmanager-tab')
-    return saved === 'movies' || saved === 'series' || saved === 'metadata' || saved === 'recovery' || saved === 'curation' || saved === 'config' || saved === 'downloads' || saved === 'dvr' || saved === 'artwork' || saved === 'tmdb' || saved === 'language-report' || saved === 'language-errors' ? saved : 'movies'
+    return saved === 'movies' || saved === 'series' || saved === 'metadata' || saved === 'recovery' || saved === 'curation' || saved === 'config' || saved === 'downloads' || saved === 'dvr' || saved === 'artwork' || saved === 'tmdb' || saved === 'language-report' || saved === 'language-errors' || saved === 'language-unknowns' ? saved : 'movies'
   })
   // KNM: let the user hide/unhide the sidebar menu; remembered per browser (2026-10-24)
   const [navHidden, setNavHiddenState] = useState(() => localStorage.getItem('vodmanager-nav-hidden') === '1')
@@ -467,6 +469,8 @@ export default function App() {
             <TmdbStore />
           ) : activeTab === 'language-errors' ? (
             <LanguageProbeErrors />
+          ) : activeTab === 'language-unknowns' ? (
+            <LanguageUnknowns />
           ) : activeTab === 'language-report' ? (
             <LanguageMismatchReport />
           ) : (

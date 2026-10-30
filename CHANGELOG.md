@@ -46,8 +46,18 @@ addresses, credentials, usernames, or user-specific deployment information.
 - Added provider status cards and an unblock action to Monitoring controls.
 - Removed the provider/error-code summary table from the mismatch report while
   retaining the backend history for a better future location.
-- Validation: 37 focused backend tests passed, Python compilation passed, and
-  the frontend production build passed.
+- Separated Unknown or untagged language results into their own review page;
+  they never auto-archive and never imply a language correction.
+- Replaced ambiguous mismatch actions with explicit Apply language, Archive
+  parent, and Keep as-is actions, with confirmation before single-row or bulk
+  changes. Archive prompts now state exactly what will happen.
+- Added sorting, provider filtering, multi-select, confirmation, retry,
+  confirm-current, and delete actions to Unknown Language Review.
+- Kept source-language correction as a separate follow-up feature so review
+  actions do not imply that metadata editing is already available.
+- Validation: 38 focused backend tests passed, Python compilation passed,
+  frontend TypeScript/Vite build passed, and a static visual smoke capture
+  passed.
 
 ## 2026-10-29 (Language report and Probe Issues adjustments)
 
@@ -58,11 +68,8 @@ addresses, credentials, usernames, or user-specific deployment information.
   scrolled.
 - Language mismatch monitoring is now disabled by default; it must be enabled
   explicitly from the report controls.
-- Clarified mismatch decisions with a separate Approve archive result and
-  one-line per-record descriptions for Approve and Keep.
 - Added closed-by-default report sections for monitoring controls, provider
-  history, decision guidance, and provider/error-code counts from the last 48
-  hours.
+  history, and decision guidance.
 - Updated Probe Issues with compact fixed-width columns, Shift selection,
   collapsible deferred/quarantined sections, and plain-language HTTP reason
   details.
