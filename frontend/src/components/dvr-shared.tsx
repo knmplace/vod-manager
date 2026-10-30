@@ -11,7 +11,7 @@ import { ChevronDown } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 
 export function SectionCard({ title, icon, children, collapsible = true }: { title: string; icon: React.ReactNode; children: React.ReactNode; collapsible?: boolean }) {
-  const [open, setOpen] = useState(true)
+  const [open, setOpen] = useState(false)
   return (
     <Card>
       <CardContent className="space-y-3">
