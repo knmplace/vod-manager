@@ -211,6 +211,16 @@ the worker probes. The report labels the second group as **Episodes** so the
 eligible total reconciles with the actual sweep backlog instead of counting
 series parents.
 
+## 2026-10-31 (Reject incomplete TMDB poster URLs)
+
+- Provider catalog imports now discard TMDB image URLs that contain only the
+  image size and no poster path, instead of saving a broken image URL or
+  replacing an existing valid series poster with one.
+- Repaired 65 live catalog posters from recent TMDB cache records (64 series,
+  1 movie). Remaining affected items need a TMDB identity or a usable TMDB
+  poster record before they can be repaired safely.
+- The release containing the import fix has not been deployed.
+
 ### Upstream PR hygiene
 
 Upstream submissions are prepared from a clean branch based on the current

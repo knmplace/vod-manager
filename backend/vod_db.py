@@ -24,6 +24,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from config import (
     DATA_DIR, get_config, get_duplicate_finder_auto_merge_tmdb,
@@ -36,6 +37,23 @@ from secrets_util import decrypt_value, encrypt_value, is_encrypted
 logger = logging.getLogger(__name__)
 
 DB_PATH = DATA_DIR / "vod_db.sqlite"
+
+
+def _usable_provider_poster_url(value: str | None) -> str | None:
+    """Discard TMDB image URLs that contain a size but no poster path.
+
+    Some provider catalogs expose the TMDB image base as though it were a
+    complete poster URL. Persisting that value creates a broken image that
+    cannot be repaired until a confirmed TMDB identity is available.
+    """
+    if not value:
+        return None
+    url = str(value).strip()
+    if url.startswith("https://image.tmdb.org/t/p/"):
+        image_path = urlsplit(url).path.removeprefix("/t/p/").partition("/")[2]
+        if not image_path.strip("/"):
+            return None
+    return url
 
 # Offset export stream_ids well clear of any real provider's own ID range.
 _EXPORT_STREAM_ID_BASE = 900_000_000
@@ -11114,7 +11132,7 @@ def bulk_import_movies(provider_id: int, items: list[dict], _retry_depth: int = 
                         elif not name.strip():
                             placeholder = f"[Untitled] {(item.get('provider_category_name') or '').strip() or 'Unknown'} · stream {item['provider_stream_id']}"
                             insert_index = len(movie_inserts)
-                            movie_inserts.append((placeholder, year, int(category_looks_adult), 1, int(should_archive), item.get("poster_url"), now))
+                            movie_inserts.append((placeholder, year, int(category_looks_adult), 1, int(should_archive), _usable_provider_poster_url(item.get("poster_url")), now))
                             did_create = True
                             did_flag = True
                             did_archive = should_archive
@@ -11158,7 +11176,7 @@ def bulk_import_movies(provider_id: int, items: list[dict], _retry_depth: int = 
                                     # language-filtered one, so a language mismatch
                                     # alone doesn't spuriously flag an otherwise
                                     # unambiguous title for review.
-                                    movie_inserts.append((name, year, int(category_looks_adult), 1 if all_candidates else 0, int(should_archive), item.get("poster_url"), now))
+                                    movie_inserts.append((name, year, int(category_looks_adult), 1 if all_candidates else 0, int(should_archive), _usable_provider_poster_url(item.get("poster_url")), now))
                                     did_create = True
                                     did_archive = should_archive
                                     if all_candidates:
@@ -11183,7 +11201,7 @@ def bulk_import_movies(provider_id: int, items: list[dict], _retry_depth: int = 
                                 # code's separate 5-column INSERT (no needs_year_review
                                 # column, defaulting to its schema default of 0) for
                                 # this exact branch.
-                                movie_inserts.append((name, year, int(category_looks_adult), 0, int(should_archive), item.get("poster_url"), now))
+                                movie_inserts.append((name, year, int(category_looks_adult), 0, int(should_archive), _usable_provider_poster_url(item.get("poster_url")), now))
                                 did_create = True
                                 did_archive = should_archive
                                 # Same same-chunk-visibility fix as the year=None
@@ -11261,7 +11279,8 @@ def bulk_import_movies(provider_id: int, items: list[dict], _retry_depth: int = 
                                     "UPDATE movies SET tmdb_id=COALESCE(tmdb_id, ?) WHERE id=?",
                                     (item["tmdb_id"], entry["movie_id"]),
                                 )
-                            if entry["source_changed"] and item.get("poster_url"):
+                            poster_url = _usable_provider_poster_url(item.get("poster_url"))
+                            if entry["source_changed"] and poster_url:
                                 # A canonical card can have several source variants
                                 # from this (or other) providers. Keep the first
                                 # usable bulk poster rather than letting a later
@@ -11273,7 +11292,7 @@ def bulk_import_movies(provider_id: int, items: list[dict], _retry_depth: int = 
                                            ELSE poster_url
                                        END
                                        WHERE id=?""",
-                                    (item["poster_url"], entry["movie_id"]),
+                                    (poster_url, entry["movie_id"]),
                                 )
                             if entry["source_changed"]:
                                 conn.execute(
@@ -11711,11 +11730,11 @@ def bulk_import_series(provider_id: int, items: list[dict], _retry_depth: int = 
                                 )
                             if entry["source_changed"] and item.get("_has_detail"):
                                 conn.execute(
-                                    "UPDATE series SET genre=?, description=?, cast_list=?, director=?, poster_url=?, "
+                                    "UPDATE series SET genre=?, description=?, cast_list=?, director=?, poster_url=COALESCE(?,poster_url), "
                                     "rating=?, release_date=?, provider_last_modified=?, tmdb_id=COALESCE(tmdb_id, ?) WHERE id=?",
                                     (
                                         item.get("genre"), item.get("description"), item.get("cast_list"),
-                                        item.get("director"), item.get("poster_url"), item.get("rating"),
+                                        item.get("director"), _usable_provider_poster_url(item.get("poster_url")), item.get("rating"),
                                         item.get("release_date"), item.get("provider_last_modified"),
                                         item.get("tmdb_id"), series_id,
                                     ),
