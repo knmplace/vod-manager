@@ -8987,28 +8987,44 @@ def unblock_language_probe_provider(provider_id: int, global_budget: int) -> dic
             conn.close()
 
 
+def _language_eligible_counts(conn) -> tuple[int, int]:
+    movie_eligible = conn.execute("""
+        SELECT COUNT(*) FROM movie_sources ms
+        JOIN movies m ON m.id=ms.movie_id JOIN providers p ON p.id=ms.provider_id
+        WHERE p.is_active=1 AND m.review_excluded=0
+          AND ms.language_probe_decision IS NULL AND ms.language_probed_at IS NULL
+          AND ms.language_probe_quarantined_at IS NULL
+          AND EXISTS (SELECT 1 FROM movie_category_placements cp WHERE cp.movie_id=m.id)
+    """).fetchone()[0]
+    series_eligible = conn.execute("""
+        SELECT COUNT(*) FROM episode_sources es
+        JOIN episodes e ON e.id=es.episode_id JOIN series s ON s.id=e.series_id
+        JOIN providers p ON p.id=es.provider_id
+        WHERE p.is_active=1 AND s.review_excluded=0
+          AND es.language_probe_decision IS NULL AND es.language_probed_at IS NULL
+          AND es.language_probe_quarantined_at IS NULL
+          AND EXISTS (SELECT 1 FROM series_category_placements cp WHERE cp.series_id=s.id)
+    """).fetchone()[0]
+    return int(movie_eligible), int(series_eligible)
+
+
+# Eligible totals scan every source row. Cache the estimate briefly so large
+# catalogs do not repeat the full scan on every report refresh.
+_LANGUAGE_ELIGIBLE_TTL = 300.0
+_language_eligible_cache: dict = {"at": 0.0, "movies": 0, "series": 0}
+
+
 def language_audit_stats(history_limit: int = 31) -> dict:
     """Return live backlog totals plus probe outcomes grouped by local day."""
     enabled = sorted(get_enabled_languages())
     conn = _connect()
     try:
-        movie_eligible = conn.execute("""
-            SELECT COUNT(*) FROM movie_sources ms
-            JOIN movies m ON m.id=ms.movie_id JOIN providers p ON p.id=ms.provider_id
-            WHERE p.is_active=1 AND m.review_excluded=0
-              AND ms.language_probe_decision IS NULL AND ms.language_probed_at IS NULL
-              AND ms.language_probe_quarantined_at IS NULL
-              AND EXISTS (SELECT 1 FROM movie_category_placements cp WHERE cp.movie_id=m.id)
-        """).fetchone()[0]
-        series_eligible = conn.execute("""
-            SELECT COUNT(*) FROM episode_sources es
-            JOIN episodes e ON e.id=es.episode_id JOIN series s ON s.id=e.series_id
-            JOIN providers p ON p.id=es.provider_id
-            WHERE p.is_active=1 AND s.review_excluded=0
-              AND es.language_probe_decision IS NULL AND es.language_probed_at IS NULL
-              AND es.language_probe_quarantined_at IS NULL
-              AND EXISTS (SELECT 1 FROM series_category_placements cp WHERE cp.series_id=s.id)
-        """).fetchone()[0]
+        cached = _language_eligible_cache
+        if time.monotonic() - cached["at"] < _LANGUAGE_ELIGIBLE_TTL and cached["at"]:
+            movie_eligible, series_eligible = cached["movies"], cached["series"]
+        else:
+            movie_eligible, series_eligible = _language_eligible_counts(conn)
+            cached.update(at=time.monotonic(), movies=movie_eligible, series=series_eligible)
         pending = conn.execute("""
             SELECT COUNT(*) FROM (
               SELECT ms.id FROM movie_sources ms JOIN movies m ON m.id=ms.movie_id JOIN providers p ON p.id=ms.provider_id

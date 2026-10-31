@@ -26,10 +26,24 @@ included.
 | TMDB identity picker and Metadata Review | [#67](https://github.com/jstevenscl/vod-manager/pull/67) | Included in upstream v0.3.14 |
 | Artwork Review and safe poster matching | [#68](https://github.com/jstevenscl/vod-manager/pull/68) | Included in upstream v0.3.14 |
 | Plex stale-source reconciliation | [#70](https://github.com/jstevenscl/vod-manager/pull/70) | Included in upstream v0.3.14 |
-| Language Mismatch Report and embedded-audio audit | [#69](https://github.com/jstevenscl/vod-manager/pull/69) | Withdrawn before merge |
-| Language mismatch replacement: capacity holds and Unknown confirmation | [#73](https://github.com/jstevenscl/vod-manager/pull/73) | Open / under review |
+| Language Mismatch Report and embedded-audio audit | [#69](https://github.com/jstevenscl/vod-manager/pull/69) | Withdrawn; replaced by #73 |
+| Language mismatch replacement: capacity holds and Unknown confirmation | [#73](https://github.com/jstevenscl/vod-manager/pull/73) | Included in upstream v0.3.16 |
 | Smart-category reconciliation toggle | [#71](https://github.com/jstevenscl/vod-manager/pull/71) | Included in upstream v0.3.15 |
-| Configuration and reporting page navigation | [#72](https://github.com/jstevenscl/vod-manager/pull/72) | Open / under review |
+| Configuration and reporting page navigation | [#72](https://github.com/jstevenscl/vod-manager/pull/72) | Included in upstream v0.3.16 |
+
+## 2026-10-31 (Upstream v0.3.16 alignment)
+
+- Updated the fork's upstream baseline through v0.3.16 while retaining the
+  fork's own scheduler and language-review extensions.
+- Carried forward upstream's five-minute cache for language-audit eligible
+  totals, automatic clearing of the mismatch approval notice, and the
+  plain-HTTP copy-URL fallback. Added the lifespan-name regression test; the
+  fork's episode scheduler is defined and remains active in the fork.
+- Updated the user guide and added the upstream v0.3.16 language-review and
+  Primary Language screenshots.
+- Recorded fork-only boundaries and the prior PR integration failures in the
+  internal `UPSTREAM_PR_PROCESS.md`. Episode trickle will be proposed
+  separately from a clean upstream-based branch.
 
 ## 2026-10-30 (Upstream v0.3.15 alignment)
 

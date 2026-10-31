@@ -949,16 +949,56 @@ function FlagMismatchControl({ isFlagged, reason, onFlag, onResolve, pending }: 
   )
 }
 
+async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text)
+      return true
+    }
+  } catch { /* use the fallback below */ }
+  const textarea = document.createElement('textarea')
+  textarea.value = text
+  textarea.style.position = 'fixed'
+  textarea.style.opacity = '0'
+  document.body.appendChild(textarea)
+  textarea.select()
+  try {
+    return document.execCommand('copy')
+  } catch {
+    return false
+  } finally {
+    document.body.removeChild(textarea)
+  }
+}
+
 function CopyUrlButton({ url }: { url: string | null }) {
-  const [copied, setCopied] = useState(false)
+  const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle')
   if (!url) return null
+  if (state === 'failed') {
+    return (
+      <input
+        autoFocus
+        readOnly
+        value={url}
+        title="Copy blocked by the browser. Press Ctrl+C to copy this."
+        className="h-5 w-48 rounded border border-warning bg-background px-1 text-[10px]"
+        onFocus={(event) => event.currentTarget.select()}
+        onBlur={() => setState('idle')}
+        onKeyDown={(event) => { if (event.key === 'Escape') setState('idle') }}
+      />
+    )
+  }
   return (
     <button
       title="Copy playable stream URL"
       className="hover:text-foreground"
-      onClick={() => { navigator.clipboard.writeText(url); setCopied(true); setTimeout(() => setCopied(false), 1500) }}
+      onClick={async () => {
+        const copied = await copyText(url)
+        setState(copied ? 'copied' : 'failed')
+        if (copied) setTimeout(() => setState('idle'), 1500)
+      }}
     >
-      {copied ? <CheckCircle2 size={12} /> : <Copy size={12} />}
+      {state === 'copied' ? <CheckCircle2 size={12} /> : <Copy size={12} />}
     </button>
   )
 }

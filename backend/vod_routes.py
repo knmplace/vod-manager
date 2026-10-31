@@ -4433,6 +4433,11 @@ async def language_mismatch_report():
             notices.add, "language_mismatch", "warn", "Language mismatch approval needed",
             f"{report['count']} source language mismatch{'es' if report['count'] != 1 else ''} need review in the Language Mismatch Report."
         )
+    elif not report["count"]:
+        # Clear the bell once every mismatch has been reviewed.
+        for notice in await asyncio.to_thread(notices.list_open):
+            if notice.get("kind") == "language_mismatch":
+                await asyncio.to_thread(notices.acknowledge, notice["id"])
     return report
 
 
