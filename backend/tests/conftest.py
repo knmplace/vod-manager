@@ -24,6 +24,8 @@ def db(tmp_path, monkeypatch):
     leaks into every later test in the same pytest run."""
     db_path = tmp_path / "vod_db.sqlite"
     monkeypatch.setattr(vod_db, "DB_PATH", db_path)
+    # The language report caches its eligible-source totals; never carry that across tests.
+    monkeypatch.setitem(vod_db._language_eligible_cache, "at", 0.0)
     monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "config.json")
     # config._read_raw/_write_raw cache config.json's contents in memory
     # (see their docstring) -- without resetting it here too, a setting

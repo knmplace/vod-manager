@@ -514,6 +514,15 @@ your pool at all; use Enabled Playback Languages when you just want to
 narrow what's currently exported/playable without deciding anything
 permanent about content you might want back later.
 
+**Primary Language** — right below it, a dropdown and **Save primary
+language** button pick one language as the default for language detection and
+correction (it starts as English). It must be one of your enabled playback
+languages; unchecking the language you had chosen moves the choice to the
+first language still enabled. Right now it is the language the
+[Unknown Language Review](#language-mismatch-report) pre-selects.
+
+![Curation & Maintenance with its sections collapsed, and the Primary Language setting open](docs/screenshots/primary-language-config.png)
+
 ### Multiple profiles on one subscription
 
 Some XC resellers split a subscription into several Dispatcharr "profiles"
@@ -1462,6 +1471,12 @@ To get more room, click the **Hide menu** button at the top of the sidebar.
 The **Show menu** button at the left of the top bar brings it back. Your
 browser remembers which one you picked.
 
+On long pages, a round **Return to top** button appears at the bottom right once
+you have scrolled down a little; one click scrolls smoothly back to the top. On
+the **Configuration** and **Curation & Maintenance** pages the sections start
+collapsed, each with a one-line description under its title, so you can scan the
+page and open only what you need.
+
 Above the catalog itself, the dashboard always shows two live cards:
 
 - **Activity** — what's playing right now, across every viewer, refreshed
@@ -1630,7 +1645,12 @@ this does not open the title's detail view. If a title is also marked 18+, that 
 Every movie or episode can have more than one **source** — one entry per
 provider currently serving it. Expand any item to see its full source list;
 each source line has two actions beyond the usual **Play** and **Copy
-playable stream URL**:
+playable stream URL**. (The copied link is VOD & DVR Manager's own
+`/preview/...` address, with your XC login in it, not the provider's link, so
+opening it in VLC tests the whole path through the app. If your browser blocks
+copying, which can happen when you open the app over plain `http://` on your
+network instead of `localhost` or `https://`, the link is shown selected in a
+small box so you can press Ctrl+C.):
 
 - **Move to a different movie/episode** (the ↔ icon) — for when a
   provider's own listing was matched to the wrong title on import (a typo,
@@ -2243,6 +2263,68 @@ re-run any time (each becomes a no-op once nothing's left to fix):
   for a series, its own episodes) and the same category placements. Run
   this after Language Backfill — it depends on accurate per-source
   language.
+
+### Language Mismatch Report
+
+A provider's category or title says what language a movie or episode is
+supposed to be in, but the file itself can disagree. The **Language Mismatch
+Report** (sidebar → System) reads the language tags embedded in the audio of a
+few sources at a time and lists the ones that don't match what the catalog says.
+Nothing is changed until you decide; it is an audit, not an automatic fix.
+
+![The Language Mismatch Report, with monitoring off and nothing waiting for review](docs/screenshots/language-mismatch-report.png)
+
+**How a check works.** The app reads only the first small chunk of a source's
+stream (not the whole file), saves it to a temporary file and runs `ffprobe` on
+it to read the audio tracks' language tags. One source can also be checked by
+hand with the **Check language** button next to a source on a movie or episode.
+A check never changes playback by itself.
+
+- **Matches the catalog** — the source's language is confirmed, it is marked
+  validated and is not checked again. These need no review.
+- **Doesn't match** — it appears in the report with the configured language, the
+  language found in the audio, and the proposed result.
+- **No usable tag** — shown separately under **Unknown language review**, where you
+  choose one of your enabled playback languages (your Primary Language is
+  pre-selected) and confirm it.
+
+**Monitoring is off by default.** Press **Enable monitoring** to let the app check
+sources quietly in the background, or **Run one cycle now** to run a single batch.
+Under **Monitoring controls** you set how many sources are checked per cycle, the
+seconds between cycles and an optional daily cap (leave it blank for no cap). Each
+check uses one provider connection and one short `ffprobe` run, so start small;
+the contributor who built this feature reported roughly one to two CPU cores and
+about 600 MB of memory in use at 30 sources per cycle.
+
+**Provider safeguards.** The checks rotate across your active providers. They use
+the same connection-limit coordination as downloads, so a provider with no free
+connection is never pushed:
+
+- A provider with no free connection is put on a **capacity hold** and retried two
+  hours later. **Provider capacity holds** lists each hold with its next retry
+  time. Other providers carry on meanwhile.
+- A provider that answers with errors or throttling gets its pace reduced, then is
+  paused for the rest of the day. **Provider probe history** shows how each provider
+  is doing, and a paused provider can be put back to normal from there.
+- A source that fails twice is **quarantined**: it is left out of the checks and of
+  normal playback until you look at it. **Probe issues** lists deferred (failed once,
+  still in rotation) and quarantined sources. For each you can approve it after
+  playing it yourself, retry it, or delete it.
+
+**Deciding on a mismatch.** Every action asks you to confirm first, and rows can
+be selected in bulk (shift-click selects a range):
+
+- **Apply language** — records the language found in the audio as the source's
+  language. The movie or series is not archived.
+- **Archive parent** — records that language and archives the movie or series,
+  shown when the language found is outside your enabled playback languages.
+- **Keep as-is** — changes nothing and stops future checks of that source.
+
+When a check finds a mismatch, a notice appears in the bell at the top of the
+screen. It clears itself the next time you open the report and nothing is left to
+review. On a library of a million
+sources the **Eligible sources** total is recalculated at most every five minutes,
+so the report opens quickly after the first load.
 
 ---
 

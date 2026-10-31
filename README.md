@@ -438,7 +438,12 @@ from the import-time Language Exclusion above; nothing archived or deleted,
 just hidden from playback while unchecked; content a provider tags
 [MULTI-LANG]/[MULTI-SUB] is its own always-visible "MULTI" language; a
 language tag at the start or end of a provider category name is read, and
-episode lists aren't fetched for languages you've unchecked), **Duplicate Finder** (matches on
+episode lists aren't fetched for languages you've unchecked; a **Primary Language**
+setting picks the default language for detection and correction), a
+**Language Mismatch Report** (checks a few sources at a time by reading the
+embedded audio language tags, rotates across providers, backs off from any
+provider that is full or throttling, and changes nothing until you approve each
+decision; monitoring is off by default), **Duplicate Finder** (matches on
 punctuation variants, adjacent-year mislabeling, and TMDB id, with one-click
 bulk merges for both fully-corroborated TMDB-confirmed matches and a second,
 separate tier where only one candidate carries a self-consistent TMDB id; an
