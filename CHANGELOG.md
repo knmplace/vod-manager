@@ -30,6 +30,7 @@ included.
 | Language mismatch replacement: capacity holds and Unknown confirmation | [#73](https://github.com/jstevenscl/vod-manager/pull/73) | Included in upstream v0.3.16 |
 | Smart-category reconciliation toggle | [#71](https://github.com/jstevenscl/vod-manager/pull/71) | Included in upstream v0.3.15 |
 | Configuration and reporting page navigation | [#72](https://github.com/jstevenscl/vod-manager/pull/72) | Included in upstream v0.3.16 |
+| Episode list preloading | [#74](https://github.com/jstevenscl/vod-manager/pull/74) | Open / under review |
 
 ## 2026-10-31 (Upstream v0.3.16 alignment)
 
