@@ -31,6 +31,8 @@ from config import (
     get_import_language_exclusion,
     get_lockout_settings,
     get_mdblist_api_key,
+    get_mdblist_artwork_settings,
+    get_mdblist_artwork_usage,
     get_openai_api_key,
     get_primary_language,
     get_refresh_settings,
@@ -49,6 +51,7 @@ from config import (
     save_import_language_exclusion,
     save_lockout_settings,
     save_mdblist_api_key,
+    save_mdblist_artwork_settings,
     save_openai_api_key,
     save_primary_language,
     save_refresh_settings,
@@ -73,6 +76,7 @@ import dispatcharr_dvr_client
 import dispatcharr_dvr_importer
 import duplicate_confirm
 import emby_vod_client
+import mdblist_artwork
 import emby_vod_importer
 import library_importer
 import rclone_client
@@ -112,6 +116,11 @@ class TmdbApiKeyRequest(BaseModel):
 
 class MdblistApiKeyRequest(BaseModel):
     api_key: str
+
+
+class MdblistArtworkSettingsRequest(BaseModel):
+    enabled: bool
+    account_tier: Optional[str] = None
 
 
 class SmtpSettingsRequest(BaseModel):
@@ -918,6 +927,26 @@ async def get_mdblist_settings():
 async def save_mdblist_settings(body: MdblistApiKeyRequest):
     save_mdblist_api_key(body.api_key)
     return {"ok": True}
+
+
+@router.get("/mdblist-artwork-settings/", dependencies=_GUARDS)
+async def get_mdblist_artwork_settings_route():
+    return {
+        "has_api_key": bool(get_mdblist_api_key()),
+        **get_mdblist_artwork_settings(),
+        **get_mdblist_artwork_usage(),
+    }
+
+
+@router.post("/mdblist-artwork-settings/", dependencies=_GUARDS)
+async def save_mdblist_artwork_settings_route(body: MdblistArtworkSettingsRequest):
+    if body.enabled and not get_mdblist_api_key():
+        raise HTTPException(400, detail="Save an MDBList API key before enabling poster search")
+    try:
+        save_mdblist_artwork_settings(body.enabled, body.account_tier)
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc))
+    return await get_mdblist_artwork_settings_route()
 
 
 @router.get("/smtp-settings/", dependencies=_GUARDS)
@@ -3624,13 +3653,59 @@ async def series_language_split_apply():
     return await asyncio.to_thread(vod_db.apply_series_language_split)
 
 
-@router.get("/missing-artwork/{content_type}/{item_id}/suggestions/", dependencies=_GUARDS)
-async def missing_artwork_suggestions(content_type: str, item_id: int, q: Optional[str] = None):
+def _missing_artwork_search_item(content_type: str, item_id: int) -> dict:
     if content_type not in ("movie", "series"):
         raise HTTPException(400, detail="content_type must be 'movie' or 'series'")
     item = vod_db.get_movie(item_id) if content_type == "movie" else vod_db.get_series(item_id)
     if not item:
         raise HTTPException(404, detail=f"{content_type} not found")
+    if item.get("is_adult"):
+        raise HTTPException(403, detail="Adult titles are excluded from artwork searches")
+    return item
+
+
+@router.get("/missing-artwork/{content_type}/{item_id}/tmdb-id-candidate/", dependencies=_GUARDS)
+async def missing_artwork_tmdb_id_candidate(content_type: str, item_id: int):
+    item = _missing_artwork_search_item(content_type, item_id)
+    tmdb_id = str(item.get("tmdb_id") or "").strip()
+    if not tmdb_id:
+        return None
+    media_type = "movie" if content_type == "movie" else "tv"
+    try:
+        details = await tmdb_sync.fetch_title_payload(media_type, tmdb_id)
+    except tmdb_sync.TmdbNotFoundError:
+        return None
+    except Exception as exc:
+        logger.warning("[vod_routes] TMDB artwork preview failed for %s %s: %s", content_type, item_id, exc)
+        raise HTTPException(502, detail="TMDB artwork lookup failed") from exc
+    if details is None:
+        if not get_tmdb_api_key():
+            raise HTTPException(400, detail="TMDB API key is not configured")
+        raise HTTPException(502, detail="TMDB artwork lookup did not return a result")
+    if not details.get("poster_path"):
+        return None
+    date = details.get("release_date") if content_type == "movie" else details.get("first_air_date")
+    year = int(date[:4]) if date and len(date) >= 4 and date[:4].isdigit() else None
+    name = details.get("title") if content_type == "movie" else details.get("name")
+    poster_url = f"https://image.tmdb.org/t/p/w500{details['poster_path']}"
+    return {
+        "source": "tmdb",
+        "tmdb_id": tmdb_id,
+        "name": name or "",
+        "year": year,
+        "poster_url": poster_url,
+        "title_match": (name or "").strip().casefold() == str(item.get("name") or "").strip().casefold(),
+        "year_match": item.get("year") is None or year == item.get("year"),
+        "identity_match": (
+            (name or "").strip().casefold() == str(item.get("name") or "").strip().casefold()
+            and (item.get("year") is None or year == item.get("year"))
+        ),
+    }
+
+
+@router.get("/missing-artwork/{content_type}/{item_id}/suggestions/", dependencies=_GUARDS)
+async def missing_artwork_suggestions(content_type: str, item_id: int, q: Optional[str] = None):
+    item = _missing_artwork_search_item(content_type, item_id)
     try:
         return await tmdb_sync.search_title(vod_db.tmdb_review_search_query(item["name"], q), content_type)
     except ValueError as exc:
@@ -3645,11 +3720,7 @@ async def missing_artwork_ai_suggest(content_type: str, item_id: int, q: Optiona
     AI provider to pick the most likely correct match among real TMDB search
     results, purely a recommendation the reviewer still has to click to
     apply (see resolve/ below)."""
-    if content_type not in ("movie", "series"):
-        raise HTTPException(400, detail="content_type must be 'movie' or 'series'")
-    item = vod_db.get_movie(item_id) if content_type == "movie" else vod_db.get_series(item_id)
-    if not item:
-        raise HTTPException(404, detail=f"{content_type} not found")
+    item = _missing_artwork_search_item(content_type, item_id)
     try:
         candidates = await tmdb_sync.search_title(vod_db.tmdb_review_search_query(item["name"], q), content_type)
     except ValueError as exc:
@@ -3665,6 +3736,35 @@ async def missing_artwork_ai_suggest(content_type: str, item_id: int, q: Optiona
     except Exception as exc:
         logger.warning("[vod_routes] AI missing-artwork suggestion failed: %s", exc)
         raise HTTPException(502, detail=f"AI request failed: {exc}")
+
+
+@router.get("/missing-artwork/{content_type}/{item_id}/mdblist-suggestions/", dependencies=_GUARDS)
+async def missing_artwork_mdblist_suggestions(content_type: str, item_id: int, q: Optional[str] = None):
+    item = _missing_artwork_search_item(content_type, item_id)
+    settings = get_mdblist_artwork_settings()
+    if not settings["enabled"]:
+        raise HTTPException(403, detail="Enable MDBList poster search in Configuration first")
+    if not get_mdblist_api_key():
+        raise HTTPException(400, detail="MDBList API key is not configured")
+    if not settings["account_tier"]:
+        raise HTTPException(400, detail="Select your MDBList account tier in Configuration first")
+    try:
+        tmdb_id = str(item.get("tmdb_id") or "").strip()
+        if tmdb_id:
+            return await mdblist_artwork.lookup_by_tmdb_id(
+                content_type, tmdb_id, item["name"], item.get("year"),
+            )
+        return await mdblist_artwork.search_by_title(
+            content_type, (q or item["name"]).strip(), item.get("year"),
+        )
+    except mdblist_artwork.MdblistRateLimitError as exc:
+        headers = {"Retry-After": exc.retry_after} if exc.retry_after else None
+        raise HTTPException(429, detail=str(exc), headers=headers) from exc
+    except ValueError as exc:
+        if "daily limit reached" in str(exc).lower():
+            raise HTTPException(429, detail=str(exc)) from exc
+        logger.warning("[vod_routes] MDBList artwork lookup failed: %s", exc)
+        raise HTTPException(502, detail=str(exc)) from exc
 
 
 @router.post("/missing-artwork/{content_type}/{item_id}/resolve/", dependencies=_GUARDS)

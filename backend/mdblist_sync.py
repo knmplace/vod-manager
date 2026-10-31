@@ -15,6 +15,7 @@ for GET /lists/{listid}/items: a *split* object, not a flat array --
 import logging
 import re
 
+import config
 import httpx
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,13 @@ async def fetch_list_items(api_key: str, list_id: str) -> list[dict]:
                     f"{_API_BASE}/lists/{list_id}/items",
                     params={"apikey": api_key, "limit": _PAGE_SIZE, "offset": offset},
                 )
+                # Keep artwork lookup's effective quota aligned with the
+                # account-wide limit after public-list sync calls too.
+                try:
+                    config.record_mdblist_artwork_rate_headers(r.headers)
+                except Exception as exc:
+                    # Quota telemetry must never break public-list sync.
+                    logger.warning("[mdblist_sync] could not persist rate-limit headers: %s", exc)
                 r.raise_for_status()
             except Exception as exc:
                 raise ValueError(f"MDBList request failed: {_redact(exc)}") from exc

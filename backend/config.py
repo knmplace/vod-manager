@@ -3,6 +3,7 @@ import os
 import json
 import secrets
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 
 try:
@@ -241,7 +242,124 @@ def get_mdblist_api_key() -> str | None:
 
 
 def save_mdblist_api_key(api_key: str) -> None:
-    _update_raw(lambda data: data.__setitem__("mdblist_api_key", api_key))
+    def mutate(data: dict) -> None:
+        if data.get("mdblist_api_key") != api_key:
+            # Usage and API rate headers belong to the configured account.
+            data.pop("mdblist_artwork_usage", None)
+        data["mdblist_api_key"] = api_key
+    _update_raw(mutate)
+
+
+MDBLIST_ACCOUNT_TIERS = {
+    "free": {"label": "Free", "daily_limit": 1_000},
+    "supporter_1": {"label": "€1", "daily_limit": 10_000},
+    "supporter_2": {"label": "€2", "daily_limit": 25_000},
+    "supporter_3": {"label": "€3", "daily_limit": 100_000},
+    "vip_5": {"label": "€5 VIP", "daily_limit": 250_000},
+}
+
+
+def get_mdblist_artwork_settings() -> dict:
+    data = _read_raw()
+    tier = data.get("mdblist_artwork_account_tier")
+    tier_info = MDBLIST_ACCOUNT_TIERS.get(tier)
+    return {
+        "enabled": bool(data.get("mdblist_artwork_enabled", False)),
+        "account_tier": tier if tier_info else None,
+        "account_tier_label": tier_info["label"] if tier_info else None,
+        "daily_limit": tier_info["daily_limit"] if tier_info else None,
+    }
+
+
+def save_mdblist_artwork_settings(enabled: bool, account_tier: str | None) -> None:
+    if account_tier is not None and account_tier not in MDBLIST_ACCOUNT_TIERS:
+        raise ValueError("Unknown MDBList account tier")
+    if enabled and account_tier is None:
+        raise ValueError("Select your MDBList account tier before enabling poster search")
+    _update_raw(lambda data: data.update({
+        "mdblist_artwork_enabled": bool(enabled),
+        "mdblist_artwork_account_tier": account_tier,
+    }))
+
+
+def _mdblist_artwork_usage_data(data: dict, now: datetime | None = None) -> tuple[dict, int]:
+    now = now or datetime.now(timezone.utc)
+    today = now.date().isoformat()
+    tier = data.get("mdblist_artwork_account_tier")
+    tier_info = MDBLIST_ACCOUNT_TIERS.get(tier)
+    selected_limit = tier_info["daily_limit"] if tier_info else 0
+    usage = data.get("mdblist_artwork_usage") or {}
+    if usage.get("utc_date") != today:
+        usage = {"utc_date": today, "requests": 0}
+    api_limit = usage.get("api_limit")
+    effective_limit = min(selected_limit, int(api_limit)) if selected_limit and api_limit else selected_limit
+    requests = int(usage.get("requests", 0) or 0)
+    remaining = max(0, effective_limit - requests)
+    reset_at = usage.get("reset_at")
+    reported_remaining = usage.get("reported_remaining")
+    try:
+        if reset_at and float(reset_at) > now.timestamp() and reported_remaining is not None:
+            requests_at_header = int(usage.get("requests_at_header", requests) or 0)
+            remaining_since_header = max(0, int(reported_remaining) - max(0, requests - requests_at_header))
+            remaining = min(remaining, remaining_since_header)
+    except (TypeError, ValueError):
+        pass
+    usage["utc_date"] = today
+    return usage, remaining
+
+
+def get_mdblist_artwork_usage() -> dict:
+    data = _read_raw()
+    settings = get_mdblist_artwork_settings()
+    usage, remaining = _mdblist_artwork_usage_data(data)
+    return {
+        "requests_today": int(usage.get("requests", 0) or 0),
+        "daily_limit": min(settings["daily_limit"], int(usage["api_limit"]))
+            if settings["daily_limit"] and usage.get("api_limit") else settings["daily_limit"],
+        "remaining_today": remaining if settings["daily_limit"] else None,
+        "reset_at": usage.get("reset_at"),
+    }
+
+
+def reserve_mdblist_artwork_request() -> dict:
+    """Atomically reserve one artwork API request under the selected tier."""
+    result: dict = {}
+
+    def mutate(data: dict) -> None:
+        settings = get_mdblist_artwork_settings()
+        if not settings["enabled"] or not get_mdblist_api_key():
+            raise ValueError("MDBList poster search is disabled or not configured")
+        usage, remaining = _mdblist_artwork_usage_data(data)
+        if remaining <= 0:
+            raise ValueError("MDBList artwork search daily limit reached")
+        usage["requests"] = int(usage.get("requests", 0) or 0) + 1
+        data["mdblist_artwork_usage"] = usage
+        result.update({"requests_today": usage["requests"], "remaining_today": remaining - 1})
+
+    _update_raw(mutate)
+    return result
+
+
+def record_mdblist_artwork_rate_headers(headers) -> None:
+    """Remember authoritative MDBList quota headers without exposing the key."""
+    normalized = {str(k).lower(): v for k, v in (headers or {}).items()}
+    try:
+        api_limit = int(normalized["x-ratelimit-limit"])
+        reported_remaining = int(normalized["x-ratelimit-remaining"])
+    except (KeyError, TypeError, ValueError):
+        return
+    reset_at = normalized.get("x-ratelimit-reset")
+
+    def mutate(data: dict) -> None:
+        usage, _ = _mdblist_artwork_usage_data(data)
+        usage["api_limit"] = api_limit
+        usage["reported_remaining"] = max(0, reported_remaining)
+        usage["requests_at_header"] = int(usage.get("requests", 0) or 0)
+        if reset_at is not None:
+            usage["reset_at"] = str(reset_at)
+        data["mdblist_artwork_usage"] = usage
+
+    _update_raw(mutate)
 
 
 def get_anthropic_api_key() -> str | None:

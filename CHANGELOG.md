@@ -34,6 +34,14 @@ included.
 
 ## 2026-10-31 (Upstream v0.3.16 alignment)
 
+- Added an opt-in MDBList poster lookup path to Missing Artwork, with account-tier
+  quota controls and links to create an account or retrieve an API key. Public-list
+  sync remains separate, and its MDBList rate headers inform the artwork quota.
+- Split artwork review into single TMDB-ID match, multiple TMDB matches, and
+  explicit MDBList search. Candidate previews no longer save automatically;
+  reviewers must apply a selected poster. Adult titles are blocked from artwork
+  searches, and selecting a manual URL also requires an explicit apply action.
+
 - Updated the fork's upstream baseline through v0.3.16 while retaining the
   fork's own scheduler and language-review extensions.
 - Carried forward upstream's five-minute cache for language-audit eligible

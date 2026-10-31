@@ -449,6 +449,30 @@ interface TmdbSuggestion {
   cast: string[]
 }
 
+interface MdblistArtworkSettings {
+  has_api_key: boolean
+  enabled: boolean
+  account_tier: string | null
+  account_tier_label: string | null
+  daily_limit: number | null
+  requests_today: number
+  remaining_today: number | null
+  reset_at: string | null
+}
+
+interface ArtworkCandidate {
+  source: 'tmdb' | 'mdblist' | 'manual'
+  tmdb_id?: string | null
+  name: string
+  year: number | null
+  poster_url: string | null
+  overview?: string | null
+  vote_average?: number | null
+  cast?: string[]
+  identity_match?: boolean
+  match_reason?: string
+}
+
 interface MissingArtworkItem {
   id: number
   name: string
@@ -2250,6 +2274,15 @@ function NeedsReviewRow({ contentType, item, qc, xcCredentials, queue = 'identit
   )
 }
 
+function ArtworkCandidateCard({ candidate, selected, onSelect }: { candidate: ArtworkCandidate; selected: boolean; onSelect: () => void }) {
+  return (
+    <button type="button" className={`flex items-start gap-2 w-full border rounded px-2 py-1.5 text-left ${selected ? 'border-primary bg-accent' : 'border-border hover:bg-accent'}`} onClick={onSelect}>
+      <PosterThumb url={candidate.poster_url} className="w-10 h-14 object-cover rounded shrink-0" fallback={<div className="w-10 h-14 rounded bg-muted shrink-0 flex items-center justify-center"><ImageOff size={14} className="text-muted-foreground" /></div>} />
+      <span className="min-w-0 text-xs"><strong>{candidate.name} {candidate.year ? `(${candidate.year})` : ''}</strong><span className="block text-muted-foreground">{candidate.source.toUpperCase()}{candidate.match_reason ? `: ${candidate.match_reason}` : ''}</span></span>
+    </button>
+  )
+}
+
 function MissingArtworkRow({ contentType, item, qc, selected, onToggleSelect }: {
   contentType: 'movie' | 'series'
   item: MissingArtworkItem
@@ -2258,19 +2291,10 @@ function MissingArtworkRow({ contentType, item, qc, selected, onToggleSelect }: 
   onToggleSelect: () => void
 }) {
   const [expanded, setExpanded] = useState(false)
+  const [tab, setTab] = useState<'single' | 'multiple' | 'mdblist'>('single')
   const [searchOverride, setSearchOverride] = useState('')
   const [manualPosterUrl, setManualPosterUrl] = useState('')
-  const [autoMatchMessage, setAutoMatchMessage] = useState<string | null>(null)
-  const [autoAppliedKey, setAutoAppliedKey] = useState<string | null>(null)
-
-  const normalizeTitle = (value: string) => value
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/\s*\(\d{4}\)\s*$/, '')
-    .replace(/&/g, ' and ')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim()
+  const [candidate, setCandidate] = useState<ArtworkCandidate | null>(null)
 
   // Same reasoning as NeedsReviewRow's search override -- a mangled/
   // punctuation-stripped stored title (the actual cause of most missing
@@ -2281,8 +2305,26 @@ function MissingArtworkRow({ contentType, item, qc, selected, onToggleSelect }: 
     queryFn:  () => api.get(`/vod/missing-artwork/${contentType}/${item.id}/suggestions/`, {
       params: searchOverride ? { q: searchOverride } : {},
     }).then((r) => r.data),
-    enabled:  expanded,
+    enabled:  expanded && tab === 'multiple',
     retry:    false,
+  })
+
+  const tmdbIdCandidateQuery = useQuery<ArtworkCandidate | null>({
+    queryKey: ['vod-missing-artwork-tmdb-id-candidate', contentType, item.id],
+    queryFn: () => api.get(`/vod/missing-artwork/${contentType}/${item.id}/tmdb-id-candidate/`).then((r) => r.data),
+    enabled: expanded && tab === 'single' && !!item.tmdb_id,
+    retry: false,
+  })
+  const mdblistConfigQuery = useQuery<MdblistArtworkSettings>({
+    queryKey: ['vod-mdblist-artwork-settings'],
+    queryFn: () => api.get('/vod/mdblist-artwork-settings/').then((r) => r.data),
+    enabled: expanded && tab === 'mdblist',
+  })
+  const mdblistQuery = useQuery<ArtworkCandidate[]>({
+    queryKey: ['vod-missing-artwork-mdblist', contentType, item.id, searchOverride],
+    queryFn: () => api.get(`/vod/missing-artwork/${contentType}/${item.id}/mdblist-suggestions/`, { params: searchOverride ? { q: searchOverride } : {} }).then((r) => r.data),
+    enabled: false,
+    retry: false,
   })
 
   const resolve = useMutation({
@@ -2295,34 +2337,8 @@ function MissingArtworkRow({ contentType, item, qc, selected, onToggleSelect }: 
       qc.invalidateQueries({ queryKey: ['vod-missing-artwork-counts'] })
       qc.invalidateQueries({ queryKey: contentType === 'movie' ? ['vod-movies'] : ['vod-series'] })
     },
-    onError: (error: any) => {
-      setAutoMatchMessage(`Automatic exact-match save failed: ${error?.response?.data?.detail ?? error.message}`)
-    },
+    onError: (error: any) => notify(`Artwork could not be saved: ${error?.response?.data?.detail ?? error.message}`),
   })
-
-  // A deterministic match is safe to apply without another click only when
-  // the normalized title and year agree, the candidate has a poster, and an
-  // existing TMDB id is either absent or already agrees. A conflicting id,
-  // missing year, or multiple plausible candidates stays manual so an
-  // original/remake cannot be silently mixed up.
-  useEffect(() => {
-    const candidates = suggestionsQuery.data ?? []
-    const exact = candidates.filter((candidate) => normalizeTitle(candidate.name) === normalizeTitle(item.name) && !!candidate.poster_url)
-    const match = item.year != null
-      ? exact.find((candidate) => candidate.year === item.year && (!item.tmdb_id || item.tmdb_id === candidate.tmdb_id))
-      : undefined
-    if (!match) return
-    const key = `${match.tmdb_id}:${match.year ?? ''}:${item.year ?? ''}`
-    if (autoAppliedKey === key || resolve.isPending) return
-    setAutoAppliedKey(key)
-    setAutoMatchMessage(`Auto-applied exact TMDB match: ${match.name}${match.year ? ` (${match.year})` : ''}.`)
-    resolve.mutate({
-      poster_url: match.poster_url!,
-      tmdb_id: match.tmdb_id,
-      name: match.name !== item.name ? match.name : undefined,
-      year: match.year ?? undefined,
-    })
-  }, [suggestionsQuery.data, item.name, item.year, item.tmdb_id, autoAppliedKey, resolve.isPending])
 
   // Ask AI remains an optional recommendation for cases that are not
   // deterministic exact title/year matches; it never overrides the picker.
@@ -2351,9 +2367,13 @@ function MissingArtworkRow({ contentType, item, qc, selected, onToggleSelect }: 
 
       {expanded && (
         <div className="mt-2 space-y-2">
-          {autoMatchMessage && <p className="text-xs text-green-500 border border-green-500/30 rounded px-2 py-1">{autoMatchMessage}</p>}
+          <div className="flex gap-1 border-b border-border pb-2">
+            {([['single', 'Single Poster Match'], ['multiple', 'Multiple Matches'], ['mdblist', 'MDBList Search']] as const).map(([id, label]) => (
+              <Button key={id} size="sm" variant={tab === id ? 'default' : 'outline'} onClick={() => setTab(id)}>{label}</Button>
+            ))}
+          </div>
           <div className="flex items-center gap-1.5">
-            <span className="text-muted-foreground">search TMDB as:</span>
+            <span className="text-muted-foreground">Search title as:</span>
             <input
               className={inputCls('w-40')}
               placeholder={item.name}
@@ -2362,7 +2382,7 @@ function MissingArtworkRow({ contentType, item, qc, selected, onToggleSelect }: 
               onBlur={(e) => setSearchOverride(e.target.value.trim())}
               title="Try a cleaned-up or differently-punctuated title if the stored name looks mangled — that's usually why the match failed"
             />
-            <Button size="sm" variant="outline" disabled={!suggestionsQuery.data?.length || aiSuggest.isPending} onClick={() => aiSuggest.mutate()}>
+            <Button size="sm" variant="outline" disabled={tab !== 'multiple' || !suggestionsQuery.data?.length || aiSuggest.isPending} onClick={() => aiSuggest.mutate()}>
               {aiSuggest.isPending ? <Loader2 size={12} className="animate-spin" /> : <><Sparkles size={12} className="mr-1" />Ask AI</>}
             </Button>
           </div>
@@ -2377,22 +2397,27 @@ function MissingArtworkRow({ contentType, item, qc, selected, onToggleSelect }: 
                 : <>AI found no confident match — {aiSuggest.data.data.reasoning}</>}
             </p>
           )}
-          {suggestionsQuery.isLoading && <p className="text-muted-foreground">Searching TMDB…</p>}
-          {suggestionsQuery.isError && <p className="text-destructive">TMDB search failed — check the TMDB API key in API Keys settings.</p>}
-          {!!suggestionsQuery.data?.length && (
+          {tab === 'single' && item.tmdb_id && (
+            <div className="space-y-2">
+              {tmdbIdCandidateQuery.isLoading && <p className="text-muted-foreground">Checking the existing TMDB ID for a poster...</p>}
+              {tmdbIdCandidateQuery.data && <ArtworkCandidateCard candidate={tmdbIdCandidateQuery.data} selected={candidate?.source === 'tmdb' && candidate.tmdb_id === tmdbIdCandidateQuery.data.tmdb_id} onSelect={() => setCandidate(tmdbIdCandidateQuery.data!)} />}
+              {tmdbIdCandidateQuery.data && !tmdbIdCandidateQuery.data.identity_match && <p className="text-amber-500 text-xs">Title or year differs from the catalog record; review identity before applying.</p>}
+              {!tmdbIdCandidateQuery.isLoading && !tmdbIdCandidateQuery.isError && !tmdbIdCandidateQuery.data && <p className="text-muted-foreground">TMDB returned no poster for this ID. Try Multiple Matches or MDBList Search.</p>}
+              {tmdbIdCandidateQuery.isError && <p className="text-destructive text-xs">TMDB lookup failed: {(tmdbIdCandidateQuery.error as any)?.response?.data?.detail ?? 'check the TMDB API key and connection.'}</p>}
+            </div>
+          )}
+          {tab === 'single' && !item.tmdb_id && <p className="text-muted-foreground">This title has no TMDB ID. Search Multiple Matches or MDBList by title and year.</p>}
+          {tab === 'multiple' && suggestionsQuery.isLoading && <p className="text-muted-foreground">Searching TMDB…</p>}
+          {tab === 'multiple' && suggestionsQuery.isError && <p className="text-destructive">TMDB search failed — check the TMDB API key in API Keys settings.</p>}
+          {tab === 'multiple' && !!suggestionsQuery.data?.length && (
             <div className="space-y-1.5">
               {suggestionsQuery.data.map((s) => (
                 <button
                   key={s.tmdb_id}
                   disabled={resolve.isPending || !s.poster_url}
                   title={s.poster_url ? undefined : "TMDB has no poster for this candidate either — try another match or enter one manually below"}
-                  className="flex items-start gap-2 w-full border border-border rounded px-2 py-1.5 hover:bg-accent text-left disabled:opacity-50 disabled:hover:bg-transparent"
-                  onClick={() => resolve.mutate({
-                    poster_url: s.poster_url!,
-                    tmdb_id: s.tmdb_id,
-                    name: s.name !== item.name ? s.name : undefined,
-                    year: s.year ?? undefined,
-                  })}
+                  className={`flex items-start gap-2 w-full border rounded px-2 py-1.5 hover:bg-accent text-left disabled:opacity-50 disabled:hover:bg-transparent ${candidate?.source === 'tmdb' && candidate.tmdb_id === s.tmdb_id ? 'border-primary bg-accent' : 'border-border'}`}
+                  onClick={() => setCandidate({ ...s, source: 'tmdb' })}
                 >
                   <PosterThumb
                     url={s.poster_url}
@@ -2411,9 +2436,23 @@ function MissingArtworkRow({ contentType, item, qc, selected, onToggleSelect }: 
               ))}
             </div>
           )}
-          {suggestionsQuery.data && suggestionsQuery.data.length === 0 && (
+          {tab === 'multiple' && suggestionsQuery.data && suggestionsQuery.data.length === 0 && (
             <p className="text-muted-foreground">No TMDB matches found for this name.</p>
           )}
+
+          {tab === 'mdblist' && <div className="space-y-2">
+            <p className="text-xs text-muted-foreground">MDBList is searched only after you click Search MDBList. Results are previews; nothing is saved until you apply a selection.</p>
+            {!mdblistConfigQuery.data?.enabled || !mdblistConfigQuery.data?.has_api_key || !mdblistConfigQuery.data?.account_tier
+              ? <p className="text-xs text-muted-foreground">Configure the MDBList API key, account tier, and poster-search toggle on the Configuration page.</p>
+              : <Button size="sm" variant="outline" disabled={mdblistQuery.isFetching} onClick={() => mdblistQuery.refetch()}>{mdblistQuery.isFetching ? <Loader2 size={12} className="animate-spin" /> : 'Search MDBList'}</Button>}
+            {mdblistQuery.isError && <p className="text-destructive text-xs">MDBList search failed: {(mdblistQuery.error as any)?.response?.data?.detail ?? 'Check MDBList configuration and daily limit.'}</p>}
+            {mdblistQuery.data?.map((result, index) => <ArtworkCandidateCard key={`${result.tmdb_id}-${index}`} candidate={result} selected={candidate?.source === 'mdblist' && candidate.tmdb_id === result.tmdb_id} onSelect={() => setCandidate(result)} />)}
+            {mdblistQuery.data && mdblistQuery.data.length === 0 && <p className="text-muted-foreground">No MDBList poster matches found.</p>}
+          </div>}
+          {candidate && <div className="flex items-center gap-2 border border-primary/40 rounded p-2">
+            <span className="text-xs flex-1">Selected: {candidate.name} {candidate.year ? `(${candidate.year})` : ''} · {candidate.source.toUpperCase()}{candidate.match_reason ? ` · ${candidate.match_reason}` : ''}</span>
+            <Button size="sm" disabled={resolve.isPending || !candidate.poster_url} onClick={() => resolve.mutate({ poster_url: candidate.poster_url!, tmdb_id: candidate.tmdb_id ?? undefined, name: candidate.name !== item.name ? candidate.name : undefined, year: candidate.year ?? undefined })}>{resolve.isPending ? 'Applying...' : 'Apply selected poster'}</Button>
+          </div>}
 
           <div className="flex items-center gap-1.5">
             <span className="text-muted-foreground">or paste a poster URL manually:</span>
@@ -2426,9 +2465,9 @@ function MissingArtworkRow({ contentType, item, qc, selected, onToggleSelect }: 
             <Button
               size="sm"
               disabled={!manualPosterUrl.trim() || resolve.isPending}
-              onClick={() => resolve.mutate({ poster_url: manualPosterUrl.trim() })}
+              onClick={() => setCandidate({ source: 'manual', name: item.name, year: item.year, poster_url: manualPosterUrl.trim() })}
             >
-              Apply
+              Preview
             </Button>
           </div>
         </div>
@@ -6823,8 +6862,17 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
     mutationFn: () => api.post('/vod/mdblist-settings/', { api_key: mdblistApiKeyInput }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['vod-mdblist-settings'] })
+      qc.invalidateQueries({ queryKey: ['vod-mdblist-artwork-settings'] })
       setMdblistApiKeyInput('')
     },
+  })
+  const mdblistArtworkSettingsQuery = useQuery<MdblistArtworkSettings>({
+    queryKey: ['vod-mdblist-artwork-settings'],
+    queryFn: () => api.get('/vod/mdblist-artwork-settings/').then((r) => r.data),
+  })
+  const saveMdblistArtworkSettings = useMutation({
+    mutationFn: (settings: { enabled: boolean; account_tier: string | null }) => api.post('/vod/mdblist-artwork-settings/', settings),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vod-mdblist-artwork-settings'] }),
   })
   // SMTP -- powers notifications.notify_quota_threshold (DVR disk-quota
   // warnings, the only trigger today). Password never round-trips back to
@@ -9228,6 +9276,42 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
           {mdblistSettingsQuery.data?.has_api_key && (
             <span className="text-xs text-muted-foreground flex items-center gap-1"><CheckCircle2 size={12} /> configured</span>
           )}
+          <a className="text-xs text-primary hover:underline" href="https://mdblist.com/" target="_blank" rel="noreferrer">Create account</a>
+          <a className="text-xs text-primary hover:underline" href="https://mdblist.com/preferences/" target="_blank" rel="noreferrer">Get API key</a>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap border border-border/60 rounded px-2 py-2 mt-2">
+          <label className="flex items-center gap-1.5 text-xs">
+            <input
+              type="checkbox"
+              checked={!!mdblistArtworkSettingsQuery.data?.enabled}
+              disabled={!mdblistArtworkSettingsQuery.data?.has_api_key || !mdblistArtworkSettingsQuery.data?.account_tier || saveMdblistArtworkSettings.isPending}
+              onChange={(e) => saveMdblistArtworkSettings.mutate({ enabled: e.target.checked, account_tier: mdblistArtworkSettingsQuery.data?.account_tier ?? null })}
+            />
+            Enable MDBList poster search
+          </label>
+          <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            Account tier
+            <select
+              className={inputCls('w-32')}
+              value={mdblistArtworkSettingsQuery.data?.account_tier ?? ''}
+              disabled={saveMdblistArtworkSettings.isPending}
+              onChange={(e) => saveMdblistArtworkSettings.mutate({ enabled: !!mdblistArtworkSettingsQuery.data?.enabled && !!e.target.value, account_tier: e.target.value || null })}
+            >
+              <option value="">Select tier</option>
+              <option value="free">Free (1,000/day)</option>
+              <option value="supporter_1">Supporter 1 (10,000/day)</option>
+              <option value="supporter_2">Supporter 2 (25,000/day)</option>
+              <option value="supporter_3">Supporter 3 (100,000/day)</option>
+              <option value="vip_5">VIP (250,000/day)</option>
+            </select>
+          </label>
+          {mdblistArtworkSettingsQuery.data?.daily_limit != null && (
+            <span className="text-xs text-muted-foreground">
+              Artwork searches today: {mdblistArtworkSettingsQuery.data.requests_today} / {mdblistArtworkSettingsQuery.data.daily_limit}
+              {mdblistArtworkSettingsQuery.data.remaining_today != null ? ` (${mdblistArtworkSettingsQuery.data.remaining_today} remaining)` : ''}
+            </span>
+          )}
+          <span className="text-xs text-muted-foreground">Off by default. Searches run only when requested from Missing Artwork.</span>
         </div>
         <p className="text-xs text-muted-foreground pt-2">
           AI provider — powers AI-assisted smart category suggestions, Needs Review disambiguation, and Missing
