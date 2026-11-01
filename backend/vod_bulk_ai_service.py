@@ -35,6 +35,13 @@ _MAX_TRACKED_JOBS = 5
 _jobs: dict[str, dict] = {}
 
 
+def _needs_identity_review(item: dict) -> bool:
+    """Mirror Metadata Review's active no-ID/held-year eligibility rules."""
+    if item.get("review_excluded"):
+        return False
+    return bool(item.get("needs_year_review")) or not str(item.get("tmdb_id") or "").strip()
+
+
 def _new_job(total: int) -> str:
     if len(_jobs) >= _MAX_TRACKED_JOBS:
         oldest_id = min(_jobs, key=lambda jid: _jobs[jid]["started_at"])
@@ -110,7 +117,7 @@ async def _resolve_one_needs_review(content_type: str, item_id: int) -> dict:
     # all (both TMDB ID and year absent). They never passed through the older
     # ambiguous-year detector, but a user-selected bulk AI run should be able
     # to resolve them with the exact same high-confidence-only safeguards.
-    if not item.get("needs_year_review") and not (item.get("tmdb_id") is None and item.get("year") is None):
+    if not _needs_identity_review(item):
         return {"id": item_id, "name": item["name"], "status": "skipped", "detail": "no longer needs identity review"}
 
     try:
@@ -208,7 +215,7 @@ async def _user_merge_one_needs_review(content_type: str, item_id: int) -> dict:
     item = vod_db.get_movie(item_id) if content_type == "movie" else vod_db.get_series(item_id)
     if not item:
         return {"id": item_id, "status": "error", "detail": "not found"}
-    if not item.get("needs_year_review") and not (item.get("tmdb_id") is None and item.get("year") is None):
+    if not _needs_identity_review(item):
         return {"id": item_id, "name": item["name"], "status": "skipped", "detail": "no longer needs identity review"}
     try:
         candidates = await tmdb_sync.search_title(vod_db.tmdb_review_search_query(item["name"]), content_type)
