@@ -46,6 +46,9 @@ included.
   the observed tags to save for the provider source, or explicitly archive the
   parent when none of the observed languages is wanted. Unknown Language Review
   explains where to confirm an enabled language for an unknown source.
+- Fixed the preview source row so a manually confirmed language (for example,
+  EN) is shown as `Language: EN (confirmed)` instead of `Audio language: unknown`.
+  The card now refreshes its displayed language when its source data changes.
 - Added an opt-in MDBList poster lookup path to Missing Artwork, with account-tier
   quota controls and links to create an account or retrieve an API key. Public-list
   sync remains separate, and its MDBList rate headers inform the artwork quota.
