@@ -3512,6 +3512,24 @@ async def bulk_resolve_needs_review(body: BulkAiResolveRequest):
     return {"job_id": job_id}
 
 
+@router.post("/needs-review/bulk-user-merge/", dependencies=_GUARDS, status_code=202)
+async def bulk_user_merge_needs_review(body: BulkAiResolveRequest):
+    if body.content_type not in ("movie", "series"):
+        raise HTTPException(400, detail="content_type must be 'movie' or 'series'")
+    if not body.ids or len(body.ids) > 250:
+        raise HTTPException(400, detail="select between 1 and 250 titles")
+    job_id = await vod_bulk_ai_service.start_needs_review_user_merge(body.content_type, body.ids)
+    return {"job_id": job_id}
+
+
+@router.get("/needs-review/bulk-user-merge/{job_id}/", dependencies=_GUARDS)
+async def bulk_user_merge_needs_review_progress(job_id: str):
+    job = vod_bulk_ai_service.get_bulk_ai_job(job_id)
+    if job is None:
+        raise HTTPException(404, detail="job not found")
+    return job
+
+
 @router.get("/needs-review/bulk-resolve/{job_id}/", dependencies=_GUARDS)
 async def bulk_resolve_needs_review_progress(job_id: str):
     job = vod_bulk_ai_service.get_bulk_ai_job(job_id)

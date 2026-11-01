@@ -1775,7 +1775,13 @@ function useBulkAiJob(startEndpoint: string, progressEndpointPrefix: string, can
 
 // Compact "N resolved · M skipped · E errors" summary + expandable per-item
 // detail list, shared by all three bulk-AI panels below.
-function BulkAiJobSummary({ job, labelFor }: { job: BulkAiJobStatus; labelFor: (r: BulkAiJobResult) => string }) {
+function BulkAiJobSummary({ job, labelFor, workingLabel = 'Resolving', completedLabel = 'resolved', skipExplanation = 'Only high-confidence AI matches are applied automatically.' }: {
+  job: BulkAiJobStatus
+  labelFor: (r: BulkAiJobResult) => string
+  workingLabel?: string
+  completedLabel?: string
+  skipExplanation?: string
+}) {
   const [expanded, setExpanded] = useState(false)
   const results = Array.isArray(job.results) ? job.results : []
   // Why items were skipped, most common first -- otherwise "N skipped" gives no hint
@@ -1791,10 +1797,10 @@ function BulkAiJobSummary({ job, labelFor }: { job: BulkAiJobStatus; labelFor: (
     <div className="text-xs px-2 py-1.5 rounded border border-primary/30 bg-primary/5 space-y-1">
       <div className="flex items-center gap-2">
         {job.running ? (
-          <span className="flex items-center gap-1 text-muted-foreground"><Loader2 size={11} className="animate-spin" /> Resolving {job.done}/{job.total}…</span>
+          <span className="flex items-center gap-1 text-muted-foreground"><Loader2 size={11} className="animate-spin" /> {workingLabel} {job.done}/{job.total}…</span>
         ) : (
           <span>
-            <strong>{job.resolved}</strong> resolved · <strong>{job.skipped}</strong> skipped
+            <strong>{job.resolved}</strong> {completedLabel} · <strong>{job.skipped}</strong> skipped
             {job.errors > 0 && <> · <strong>{job.errors}</strong> error{job.errors === 1 ? '' : 's'}</>}
           </span>
         )}
@@ -1807,7 +1813,7 @@ function BulkAiJobSummary({ job, labelFor }: { job: BulkAiJobStatus; labelFor: (
       {!job.running && skipReasons.length > 0 && (
         <p className="text-muted-foreground">
           Skipped because: {skipReasons.slice(0, 3).map(([why, n]) => `${why} (${n})`).join(' · ')}
-          {skipReasons.length > 3 ? ' · …' : ''}. Only high-confidence AI matches are applied automatically.
+          {skipReasons.length > 3 ? ' · …' : ''}. {skipExplanation}
         </p>
       )}
       {job.error && <p className="text-destructive">{job.error}</p>}
@@ -8504,6 +8510,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
     metadataQueue === 'identity' ? '/vod/needs-review/bulk-resolve/' : '/vod/tmdb-lookup-failures/bulk-resolve/',
     metadataQueue === 'identity' ? '/vod/needs-review/bulk-resolve/' : '/vod/tmdb-lookup-failures/bulk-resolve/',
   )
+  const metadataUserMerge = useBulkAiJob('/vod/needs-review/bulk-user-merge/', '/vod/needs-review/bulk-user-merge/')
   const scanTmdbFailures = useMutation({
     mutationFn: () => api.post('/vod/tmdb-lookup-failures/scan/'),
     onSuccess: () => setTimeout(() => qc.invalidateQueries({ queryKey: ['vod-tmdb-lookup-failures'] }), 2500),
@@ -8517,7 +8524,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
     },
   })
   useEffect(() => {
-    if (metadataBulkAi.job && !metadataBulkAi.job.running) {
+    if ((metadataBulkAi.job && !metadataBulkAi.job.running) || (metadataUserMerge.job && !metadataUserMerge.job.running)) {
       setMetadataSelected(new Set())
       qc.invalidateQueries({ queryKey: ['vod-metadata-review'] })
       qc.invalidateQueries({ queryKey: ['vod-tmdb-lookup-failures'] })
@@ -8525,7 +8532,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
       qc.invalidateQueries({ queryKey: metadataContentType === 'movie' ? ['vod-movies'] : ['vod-series'] })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [metadataBulkAi.job?.running])
+  }, [metadataBulkAi.job?.running, metadataUserMerge.job?.running])
 
   // ── Missing artwork counts (badge only -- the modal paginates its own list) ──
   const missingArtworkCountsQuery = useQuery<{ movies: number; series: number }>({
@@ -10587,7 +10594,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
                   <span className="text-muted-foreground">{metadataSelected.size} selected</span>
                   <Button
                     size="sm" variant="outline" className="h-7 text-xs ml-auto text-destructive"
-                    disabled={metadataSelected.size === 0 || archiveMetadata.isPending}
+                    disabled={metadataSelected.size === 0 || archiveMetadata.isPending || metadataUserMerge.starting || !!metadataUserMerge.job?.running}
                     onClick={() => askConfirm(
                       `Archive ${metadataSelected.size} selected ${metadataContentType === 'movie' ? 'movie' : 'TV show'}${metadataSelected.size === 1 ? '' : 's'}? This removes them from categories and hides them from the active pool.`,
                       () => archiveMetadata.mutate(Array.from(metadataSelected)),
@@ -10598,17 +10605,38 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
                   </Button>
                   <Button
                     size="sm" variant="outline" className="h-7 text-xs"
-                    disabled={metadataSelected.size === 0 || metadataBulkAi.starting || !!metadataBulkAi.job?.running}
+                    disabled={metadataSelected.size === 0 || metadataBulkAi.starting || !!metadataBulkAi.job?.running || metadataUserMerge.starting || !!metadataUserMerge.job?.running}
                     title="Searches TMDB for each selected title and applies a year + TMDB ID only when AI is highly confident. Other titles remain for manual review."
                     onClick={() => metadataBulkAi.start({ content_type: metadataContentType, ids: Array.from(metadataSelected) })}
                   >
                     {metadataBulkAi.starting || metadataBulkAi.job?.running ? <Loader2 size={11} className="animate-spin mr-1" /> : <Sparkles size={11} className="mr-1" />}
                     Resolve selected with AI ({metadataSelected.size})
                   </Button>
+                  {metadataQueue === 'identity' && <Button
+                    size="sm" variant="outline" className="h-7 text-xs border-primary/50"
+                    disabled={metadataSelected.size === 0 || metadataUserMerge.starting || !!metadataUserMerge.job?.running || metadataBulkAi.starting || !!metadataBulkAi.job?.running}
+                    title="For each selected title, apply the TMDB result only when the filtered search returns exactly one candidate. Titles with no or multiple results stay unchanged."
+                    onClick={() => askConfirm(
+                      `User Merge will search ${metadataSelected.size} selected titles and apply the TMDB result only when exactly one candidate is found. Titles with no or multiple results will be skipped. Continue?`,
+                      () => metadataUserMerge.start({ content_type: metadataContentType, ids: Array.from(metadataSelected) }),
+                    )}
+                  >
+                    {metadataUserMerge.starting || metadataUserMerge.job?.running ? <Loader2 size={11} className="animate-spin mr-1" /> : <ArrowRightLeft size={11} className="mr-1" />}
+                    User Merge ({metadataSelected.size})
+                  </Button>}
                 </div>
                 {metadataBulkAi.startError && <p className="text-xs text-destructive">{metadataBulkAi.startError}</p>}
                 {metadataBulkAi.progressError && <p className="text-xs text-destructive">{metadataBulkAi.progressError}</p>}
                 {metadataBulkAi.job && <BulkAiJobSummary job={metadataBulkAi.job} labelFor={(r) => r.name ?? `#${r.id}`} />}
+                {metadataUserMerge.startError && <p className="text-xs text-destructive">{metadataUserMerge.startError}</p>}
+                {metadataUserMerge.progressError && <p className="text-xs text-destructive">{metadataUserMerge.progressError}</p>}
+                {metadataUserMerge.job && <BulkAiJobSummary
+                  job={metadataUserMerge.job}
+                  labelFor={(r) => r.name ?? `#${r.id}`}
+                  workingLabel="Applying user-approved matches"
+                  completedLabel="merged/applied"
+                  skipExplanation="User Merge applies only when the filtered TMDB search returns exactly one candidate; other titles remain unchanged."
+                />}
                 <Pager total={filteredMetadataItems.length} limit={METADATA_PAGE_SIZE} offset={metadataOffset} onOffset={setMetadataOffset} />
                 <ul className="divide-y divide-border/50">
                   {metadataPageItems.map((item) => (

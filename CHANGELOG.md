@@ -45,6 +45,11 @@ included.
   years; missing years remain reviewable. TMDB results without meaningful title
   overlap are filtered before detail lookup, and the sidebar review counts use
   the same adult-filtered identity queue as the page.
+- ✅ Added a user-approved bulk User Merge action to Missing Identity. It applies
+  the TMDB result without AI only when each selected title has exactly one
+  relevant candidate; missing or ambiguous results stay unchanged with a
+  per-title reason. Exact existing TMDB identity collisions merge into the
+  catalog entry.
 - ✅ The Return to top control appears after scrolling 5% while Metadata Review
   is open; its threshold on other pages is unchanged.
 
