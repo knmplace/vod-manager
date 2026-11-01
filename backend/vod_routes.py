@@ -605,6 +605,16 @@ class BulkPossibleMetadataMatchesRequest(BaseModel):
     pairs: list[PossibleMetadataMatchPair]
 
 
+class PossibleMetadataIgnoreItem(BaseModel):
+    item_id: int
+    candidate_ids: list[int]
+
+
+class BulkPossibleMetadataIgnoreRequest(BaseModel):
+    content_type: str
+    items: list[PossibleMetadataIgnoreItem]
+
+
 class SeriesRequest(BaseModel):
     name: str
     year: Optional[int] = None
@@ -3389,16 +3399,29 @@ async def needs_review_existing_matches(content_type: str, item_id: int):
 
 
 @router.get("/possible-matches/", dependencies=_GUARDS)
-async def list_possible_metadata_matches(content_type: Optional[str] = None, limit: int = 50, offset: int = 0):
+async def list_possible_metadata_matches(content_type: Optional[str] = None, limit: int = 50, offset: int = 0, hide_adult: bool = True):
     if content_type not in ("movie", "series"):
         raise HTTPException(400, detail="content_type must be 'movie' or 'series'")
-    return await asyncio.to_thread(vod_db.list_possible_metadata_matches, content_type, limit, offset)
+    return await asyncio.to_thread(vod_db.list_possible_metadata_matches, content_type, limit, offset, hide_adult)
+
+
+@router.post("/possible-matches/bulk-keep-separate/", dependencies=_GUARDS)
+async def bulk_keep_possible_metadata_matches_separate(body: BulkPossibleMetadataIgnoreRequest):
+    if body.content_type not in ("movie", "series"):
+        raise HTTPException(400, detail="content_type must be 'movie' or 'series'")
+    return {"kept_separate": await asyncio.to_thread(
+        vod_db.bulk_ignore_possible_metadata_matches,
+        body.content_type,
+        [item.model_dump() for item in body.items],
+    )}
 
 
 @router.post("/possible-matches/bulk-merge/", dependencies=_GUARDS)
 async def bulk_merge_possible_metadata_matches(body: BulkPossibleMetadataMatchesRequest):
     if body.content_type not in ("movie", "series"):
         raise HTTPException(400, detail="content_type must be 'movie' or 'series'")
+    if not body.pairs or len(body.pairs) > 250:
+        raise HTTPException(400, detail="select between 1 and 250 matches")
     return await asyncio.to_thread(
         vod_db.bulk_merge_possible_metadata_matches,
         body.content_type,

@@ -60,7 +60,7 @@ def test_metadata_review_existing_match_is_ranked_and_reports_sources(db):
     assert matches[0]["id"] == match_id
     assert matches[0]["tmdb_id"] == "123"
     assert matches[0]["source_count"] == 1
-    assert matches[0]["match_reason"] == "same normalized title"
+    assert matches[0]["match_reason"] == "same normalized title; incoming year missing"
 
 
 def test_title_a_reviewer_settled_without_an_id_stays_out_of_the_queue(db):

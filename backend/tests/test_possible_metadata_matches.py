@@ -54,9 +54,7 @@ def test_possible_matches_do_not_list_reciprocal_unresolved_pairs(db):
     assert [c["id"] for c in page["items"][0]["candidates"]] == [min(ids)]
 
 
-def test_possible_matches_hide_candidates_with_no_shared_language(db):
-    # KNM: 2026-10-03 G2 -- the merge rejects pairs with no shared source
-    # language, so listing them made a pair that can never merge reappear forever.
+def test_possible_matches_include_same_title_despite_source_language_difference(db):
     provider_id = db.upsert_provider("Provider", "http://provider.invalid", "u", "p", provider_type="xc")
     now = db._now()
     conn = db._connect()
@@ -67,7 +65,9 @@ def test_possible_matches_hide_candidates_with_no_shared_language(db):
     conn.commit()
     conn.close()
 
-    assert db.list_possible_metadata_matches("movie")["total"] == 0
+    assert db.list_possible_metadata_matches("movie")["total"] == 1
+    result = db.bulk_merge_possible_metadata_matches("movie", [{"item_id": item_id, "candidate_id": candidate_id}])
+    assert result == {"merged": 1, "skipped": []}
 
 
 def test_possible_match_candidates_are_ordered_best_first(db):
@@ -87,6 +87,40 @@ def test_possible_match_candidates_are_ordered_best_first(db):
 
     item = next(i for i in db.list_possible_metadata_matches("movie")["items"] if i["id"] == item_id)
     assert [c["id"] for c in item["candidates"]] == [resolved_id, year_only_id, unresolved_id]
+
+
+def test_possible_matches_include_same_year_and_up_to_three_year_difference(db):
+    now = db._now()
+    conn = db._connect()
+    same_year_id = _insert(conn, "movies", "Year Match", 2020, "10", now)
+    near_year_id = _insert(conn, "movies", "Year Match", 2023, "11", now)
+    too_far_id = _insert(conn, "movies", "Year Match", 2024, "12", now)
+    incoming_id = _insert(conn, "movies", "Year Match", 2020, None, now)
+    conn.commit()
+    conn.close()
+
+    row = next(item for item in db.list_possible_metadata_matches("movie")["items"] if item["id"] == incoming_id)
+    assert [candidate["id"] for candidate in row["candidates"]] == [same_year_id, near_year_id]
+    assert row["candidates"][0]["match_reason"] == "same title and year"
+    assert "differs by 3" in row["candidates"][1]["match_reason"]
+
+
+def test_keep_separate_dismisses_reviewed_candidate_pair_only(db):
+    now = db._now()
+    conn = db._connect()
+    existing_id = _insert(conn, "movies", "Separate Title", 2020, "10", now)
+    incoming_id = _insert(conn, "movies", "Separate Title", None, None, now)
+    other_id = _insert(conn, "movies", "Separate Title", 2021, "11", now)
+    conn.commit()
+    conn.close()
+
+    assert db.bulk_ignore_possible_metadata_matches("movie", [{
+        "item_id": incoming_id, "candidate_ids": [existing_id],
+    }]) == 1
+    items = db.list_possible_metadata_matches("movie")["items"]
+    incoming = next(item for item in items if item["id"] == incoming_id)
+    assert [candidate["id"] for candidate in incoming["candidates"]] == [other_id]
+    assert db.get_movie(incoming_id) is not None
 
 
 def test_bulk_merge_reports_failing_pair_and_continues(db, monkeypatch):

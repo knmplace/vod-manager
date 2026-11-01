@@ -32,12 +32,12 @@ function initTheme(): Theme {
   return t
 }
 
-function ScrollToTopButton() {
+function ScrollToTopButton({ threshold = 0.075 }: { threshold?: number }) {
   const [visible, setVisible] = useState(false)
   useEffect(() => {
     const update = () => {
       const max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight)
-      setVisible(max > 0 && window.scrollY >= max * 0.075)
+      setVisible(max > 0 && window.scrollY >= max * threshold)
     }
     update()
     window.addEventListener('scroll', update, { passive: true })
@@ -46,7 +46,7 @@ function ScrollToTopButton() {
       window.removeEventListener('scroll', update)
       window.removeEventListener('resize', update)
     }
-  }, [])
+  }, [threshold])
   if (!visible) return null
   return (
     <button
@@ -206,6 +206,13 @@ export default function App() {
     },
     retry: false,
   })
+  const metadataReviewCountsQuery = useQuery<Record<'movies' | 'series', { total: number; adult: number }>>({
+    queryKey: ['vod-metadata-review', 'counts'],
+    queryFn: () => api.get('/vod/metadata-review/counts/').then((r) => r.data),
+    enabled: authState === 'ready',
+    refetchInterval: 15_000,
+    retry: false,
+  })
   const externalIpQuery = useQuery<{ ip: string | null; available: boolean }>({
     queryKey: ['external-ip'],
     queryFn: () => api.get('/external-ip/').then((r) => r.data),
@@ -227,8 +234,14 @@ export default function App() {
   const enrichmentDurationSeconds = workflow?.enrichment_started_at && workflow?.enrichment_finished_at
     ? Math.max(0, Math.round(workflow.enrichment_finished_at - workflow.enrichment_started_at))
     : null
-  const missingIdentitySummary = reviewSummary
-    ? `${reviewSummary.missing_identity.movies} movie${reviewSummary.missing_identity.movies === 1 ? '' : 's'} · ${reviewSummary.missing_identity.series} TV show${reviewSummary.missing_identity.series === 1 ? '' : 's'} need identity review`
+  const missingIdentityCounts = metadataReviewCountsQuery.data
+    ? {
+        movies: Math.max(0, metadataReviewCountsQuery.data.movies.total - metadataReviewCountsQuery.data.movies.adult),
+        series: Math.max(0, metadataReviewCountsQuery.data.series.total - metadataReviewCountsQuery.data.series.adult),
+      }
+    : null
+  const missingIdentitySummary = missingIdentityCounts
+    ? `${missingIdentityCounts.movies} movie${missingIdentityCounts.movies === 1 ? '' : 's'} · ${missingIdentityCounts.series} TV show${missingIdentityCounts.series === 1 ? '' : 's'} need identity review`
     : 'Loading review summary…'
   const invalidTmdbTotal = reviewSummary
     ? reviewSummary.invalid_tmdb.movies + reviewSummary.invalid_tmdb.series
@@ -505,7 +518,7 @@ export default function App() {
             <VodManager activeTab={activeTab} setActiveTab={setActiveTab} dvrSubTab={dvrSubTab} setDvrSubTabPersisted={setDvrSubTabPersisted} />
           )}
         </main>
-        <ScrollToTopButton />
+        <ScrollToTopButton threshold={activeTab === 'metadata' ? 0.05 : 0.075} />
       </div>
     </div>
   )

@@ -13761,7 +13761,9 @@ def find_existing_metadata_matches(content_type: str, item_id: int) -> list[dict
             (item_id,),
         ).fetchall()
         conn.close()
-        matches = [dict(row) for row in rows if _normalize_title_for_dedup(row["name"]) == normalized]
+        matches = [dict(row) for row in rows if _normalize_title_for_dedup(row["name"]) == normalized
+                   and (item["year"] is None or row["year"] is None
+                        or abs(int(item["year"]) - int(row["year"])) <= 3)]
         year = item["year"]
         matches.sort(key=lambda row: (
             0 if year is not None and row["year"] == year else 1,
@@ -13770,13 +13772,20 @@ def find_existing_metadata_matches(content_type: str, item_id: int) -> list[dict
             row["id"],
         ))
         for row in matches:
-            row["match_reason"] = "same title and year" if year is not None and row["year"] == year else "same normalized title"
+            if year is None:
+                row["match_reason"] = "same normalized title; incoming year missing"
+            elif row["year"] is None:
+                row["match_reason"] = "same normalized title; existing year missing"
+            elif row["year"] == year:
+                row["match_reason"] = "same title and year"
+            else:
+                row["match_reason"] = f"same normalized title; year differs by {abs(int(year) - int(row['year']))}"
         return matches[:5]
     finally:
         conn.close()
 
 
-def list_possible_metadata_matches(content_type: str, limit: int = 50, offset: int = 0) -> dict:
+def list_possible_metadata_matches(content_type: str, limit: int = 50, offset: int = 0, hide_adult: bool = True) -> dict:
     """List unresolved cards that have a same-normalized-title catalog candidate.
 
     This is intentionally a review surface, not an automatic merge. The
@@ -13786,40 +13795,57 @@ def list_possible_metadata_matches(content_type: str, limit: int = 50, offset: i
     if content_type not in ("movie", "series"):
         raise ValueError("content_type must be 'movie' or 'series'")
     table = "movies" if content_type == "movie" else "series"
-    sources_table = "movie_sources" if content_type == "movie" else "series_sources"
-    fk_column = "movie_id" if content_type == "movie" else "series_id"
     conn = _connect()
     try:
         rows = [dict(row) for row in conn.execute(
             f"""SELECT id, name, year, tmdb_id, needs_year_review, review_excluded
                 FROM {table}
-                WHERE review_excluded=0 AND tmdb_id IS NULL AND year IS NULL
+                WHERE review_excluded=0 AND (tmdb_id IS NULL OR TRIM(tmdb_id)='')
+                  AND (?=0 OR COALESCE(is_adult, 0)=0)
                 ORDER BY name, id"""
-        ).fetchall()]
+            , (0 if not hide_adult else 1,)).fetchall()]
         all_rows = [dict(row) for row in conn.execute(
             f"""SELECT id, name, year, tmdb_id
-                FROM {table} WHERE review_excluded=0 ORDER BY name, id"""
+                FROM {table} WHERE review_excluded=0
+                  AND (?=0 OR COALESCE(is_adult, 0)=0)
+                ORDER BY name, id""",
+            (0 if not hide_adult else 1,),
         ).fetchall()]
         by_key: dict[str, list[dict]] = {}
         for row in all_rows:
             by_key.setdefault(_dedup_name_key(row["name"] or ""), []).append(row)
 
+        ignored = set(list_ignored_duplicate_signatures(content_type))
         matched: list[dict] = []
         for row in rows:
-            # KNM: 2026-10-03 two unresolved cards would list each other; emit the
-            # pair once, from the higher id, so the lower id stays canonical.
+            # Emit each pair of unresolved, no-ID cards once, from the higher
+            # id, so rows with provider-supplied years do not duplicate it.
             candidates = [
                 candidate for candidate in by_key.get(_dedup_name_key(row["name"] or ""), [])
                 if candidate["id"] != row["id"]
-                and not (candidate["tmdb_id"] is None and candidate["year"] is None and candidate["id"] > row["id"])
-                # KNM: 2026-10-03 the merge rejects pairs with no shared source
-                # language; listing them made an unmergeable pair reappear forever.
-                and _shares_a_language(conn, sources_table, fk_column, row["id"], candidate["id"])
+                and _duplicate_ignore_signature([row["id"], candidate["id"]]) not in ignored
+                and not (not str(candidate["tmdb_id"] or "").strip() and candidate["id"] > row["id"])
+                and (row["year"] is None or candidate["year"] is None or abs(int(row["year"]) - int(candidate["year"])) <= 3)
             ]
-            # KNM: 2026-10-03 the UI pre-selects candidates[0], so resolved cards first.
-            candidates.sort(key=lambda c: (c["tmdb_id"] is None, c["year"] is None, c["id"]))
+            # Prefer a confirmed same-year identity, then the closest year.
+            candidates.sort(key=lambda c: (
+                0 if row["year"] is not None and c["year"] == row["year"] else 1,
+                abs(int(row["year"]) - int(c["year"])) if row["year"] is not None and c["year"] is not None else 9999,
+                not str(c["tmdb_id"] or "").strip(), c["year"] is None, c["id"],
+            ))
             if not candidates:
                 continue
+            for candidate in candidates:
+                if row["tmdb_id"] and candidate["tmdb_id"] and row["tmdb_id"] != candidate["tmdb_id"]:
+                    candidate["match_reason"] = "same normalized title; TMDB IDs differ, verify carefully"
+                elif row["year"] is None:
+                    candidate["match_reason"] = "same normalized title; incoming year missing"
+                elif candidate["year"] is None:
+                    candidate["match_reason"] = "same normalized title; existing year missing"
+                elif int(row["year"]) == int(candidate["year"]):
+                    candidate["match_reason"] = "same title and year"
+                else:
+                    candidate["match_reason"] = f"same normalized title; year differs by {abs(int(row['year']) - int(candidate['year']))}"
             matched.append({
                 "id": row["id"],
                 "name": row["name"],
@@ -13831,7 +13857,7 @@ def list_possible_metadata_matches(content_type: str, limit: int = 50, offset: i
                         "name": candidate["name"],
                         "year": candidate["year"],
                         "tmdb_id": candidate["tmdb_id"],
-                        "match_reason": "same normalized title",
+                        "match_reason": candidate["match_reason"],
                     }
                     for candidate in candidates[:5]
                 ],
@@ -13843,13 +13869,53 @@ def list_possible_metadata_matches(content_type: str, limit: int = 50, offset: i
         conn.close()
 
 
+def bulk_ignore_possible_metadata_matches(content_type: str, rows: list[dict]) -> int:
+    """Mark explicitly reviewed candidate pairs as separate entries."""
+    if content_type not in ("movie", "series"):
+        raise ValueError("content_type must be 'movie' or 'series'")
+    if not rows or len(rows) > 250:
+        raise ValueError("select between 1 and 250 items")
+    table = "movies" if content_type == "movie" else "series"
+    pairs: set[tuple[int, int]] = set()
+    conn = _connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        for row in rows:
+            item_id = int(row["item_id"])
+            item = conn.execute(f"SELECT name, year, tmdb_id, review_excluded FROM {table} WHERE id=?", (item_id,)).fetchone()
+            if not item or item["review_excluded"] or str(item["tmdb_id"] or "").strip():
+                continue
+            for candidate_id in row.get("candidate_ids", []):
+                candidate_id = int(candidate_id)
+                candidate = conn.execute(f"SELECT name, year, review_excluded FROM {table} WHERE id=?", (candidate_id,)).fetchone()
+                if not candidate or candidate["review_excluded"] or candidate_id == item_id:
+                    continue
+                if _dedup_name_key(item["name"] or "") != _dedup_name_key(candidate["name"] or ""):
+                    continue
+                if item["year"] is not None and candidate["year"] is not None and abs(int(item["year"]) - int(candidate["year"])) > 3:
+                    continue
+                pairs.add((min(item_id, candidate_id), max(item_id, candidate_id)))
+        if not pairs:
+            conn.rollback()
+            return 0
+        conn.executemany(
+            "INSERT OR IGNORE INTO duplicate_ignores (content_type, signature, created_at) VALUES (?,?,?)",
+            [(content_type, _duplicate_ignore_signature(list(pair)), _now()) for pair in sorted(pairs)],
+        )
+        _commit_with_retry(conn)
+        return len(pairs)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def bulk_merge_possible_metadata_matches(content_type: str, pairs: list[dict]) -> dict:
     """Approve explicitly selected probable matches with final safety checks."""
     if content_type not in ("movie", "series"):
         raise ValueError("content_type must be 'movie' or 'series'")
     table = "movies" if content_type == "movie" else "series"
-    sources_table = "movie_sources" if content_type == "movie" else "series_sources"
-    fk_column = "movie_id" if content_type == "movie" else "series_id"
     merged = 0
     skipped: list[dict] = []
     for pair in pairs:
@@ -13867,16 +13933,16 @@ def bulk_merge_possible_metadata_matches(content_type: str, pairs: list[dict]) -
             item = conn.execute(f"SELECT id, name, year, tmdb_id, review_excluded FROM {table} WHERE id=?", (item_id,)).fetchone()
             candidate = conn.execute(f"SELECT id, name, year, tmdb_id, review_excluded FROM {table} WHERE id=?", (candidate_id,)).fetchone()
             same_name = bool(item and candidate and _dedup_name_key(item["name"] or "") == _dedup_name_key(candidate["name"] or ""))
-            same_language = bool(item and candidate and _shares_a_language(conn, sources_table, fk_column, item_id, candidate_id))
             conn.close()
             if not item or not candidate or item["review_excluded"] or candidate["review_excluded"]:
                 skipped.append({"item_id": item_id, "candidate_id": candidate_id, "reason": "row no longer active"})
                 continue
-            if item["tmdb_id"] is not None or item["year"] is not None or not same_name:
+            years_compatible = item and candidate and (
+                item["year"] is None or candidate["year"] is None
+                or abs(int(item["year"]) - int(candidate["year"])) <= 3
+            )
+            if str(item["tmdb_id"] or "").strip() or not same_name or not years_compatible:
                 skipped.append({"item_id": item_id, "candidate_id": candidate_id, "reason": "identity changed or title no longer matches"})
-                continue
-            if not same_language:
-                skipped.append({"item_id": item_id, "candidate_id": candidate_id, "reason": "no shared source language"})
                 continue
             # KNM: 2026-10-03 one failing merge used to abort the batch with a 500
             # and hide the merges already done; report it and keep going.

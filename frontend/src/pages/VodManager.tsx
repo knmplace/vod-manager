@@ -6410,13 +6410,19 @@ interface PossibleMetadataMatchItem {
   candidates: PossibleMetadataMatchCandidate[]
 }
 
-function PossibleMetadataMatches({ contentType }: { contentType: 'movie' | 'series' }) {
+function PossibleMetadataMatches({ contentType, hideAdult = true }: { contentType: 'movie' | 'series'; hideAdult?: boolean }) {
   const qc = useQueryClient()
   const [offset, setOffset] = useState(0)
   const [selected, setSelected] = useState<Map<number, number>>(new Map())
+  const lastSelectedIndex = useRef<number | null>(null)
+  useEffect(() => {
+    setSelected(new Map())
+    setOffset(0)
+    lastSelectedIndex.current = null
+  }, [contentType, hideAdult])
   const query = useQuery<{ items: PossibleMetadataMatchItem[]; total: number; limit: number; offset: number }>({
-    queryKey: ['vod-possible-matches', contentType, offset],
-    queryFn: () => api.get('/vod/possible-matches/', { params: { content_type: contentType, limit: 50, offset } }).then((r) => r.data),
+    queryKey: ['vod-possible-matches', contentType, hideAdult, offset],
+    queryFn: () => api.get('/vod/possible-matches/', { params: { content_type: contentType, limit: 50, offset, hide_adult: hideAdult } }).then((r) => r.data),
   })
   const merge = useMutation({
     mutationFn: (pairs: { item_id: number; candidate_id: number }[]) => api.post('/vod/possible-matches/bulk-merge/', { content_type: contentType, pairs }),
@@ -6432,6 +6438,28 @@ function PossibleMetadataMatches({ contentType }: { contentType: 'movie' | 'seri
       notify(e?.response?.data?.detail ?? 'Bulk merge failed.')
     },
   })
+  const keepSeparate = useMutation({
+    mutationFn: (rows: { item_id: number; candidate_ids: number[] }[]) => api.post('/vod/possible-matches/bulk-keep-separate/', { content_type: contentType, items: rows }),
+    onSuccess: (r) => {
+      setSelected(new Map())
+      lastSelectedIndex.current = null
+      qc.invalidateQueries({ queryKey: ['vod-possible-matches', contentType] })
+      qc.invalidateQueries({ queryKey: ['vod-metadata-review'] })
+      notify(`Kept ${r.data.kept_separate} item${r.data.kept_separate === 1 ? '' : 's'} as separate entries.`)
+    },
+    onError: (e: any) => notify(e?.response?.data?.detail ?? 'Could not keep selected items separate.'),
+  })
+  const archive = useMutation({
+    mutationFn: (ids: number[]) => api.post('/vod/bulk-archive/', { content_type: contentType, ids, archived: true }),
+    onSuccess: (r) => {
+      setSelected(new Map())
+      lastSelectedIndex.current = null
+      qc.invalidateQueries({ queryKey: ['vod-possible-matches', contentType] })
+      qc.invalidateQueries({ queryKey: ['vod-metadata-review'] })
+      notify(`Archived ${r.data.changed} item${r.data.changed === 1 ? '' : 's'}.`)
+    },
+    onError: (e: any) => notify(e?.response?.data?.detail ?? 'Could not archive selected items.'),
+  })
   const items = query.data?.items ?? []
   const allVisibleSelected = items.length > 0 && items.every((item) => selected.has(item.id))
   const selectAllVisible = () => {
@@ -6442,46 +6470,84 @@ function PossibleMetadataMatches({ contentType }: { contentType: 'movie' | 'seri
       return next
     })
   }
+  const toggleRow = (item: PossibleMetadataMatchItem, index: number, shift: boolean) => {
+    setSelected((current) => {
+      const next = new Map(current)
+      if (shift && lastSelectedIndex.current != null) {
+        const start = Math.min(lastSelectedIndex.current, index)
+        const end = Math.max(lastSelectedIndex.current, index)
+        for (let i = start; i <= end; i++) {
+          const row = items[i]
+          const candidate = row?.candidates[0]
+          if (candidate) next.set(row.id, candidate.id)
+        }
+      } else if (current.has(item.id)) {
+        next.delete(item.id)
+      } else if (item.candidates[0]) {
+        next.set(item.id, item.candidates[0].id)
+      }
+      lastSelectedIndex.current = index
+      return next
+    })
+  }
+  const reviewControls = (position: 'top' | 'bottom') => (
+    <div className="flex items-center gap-2 flex-wrap rounded border border-border/50 bg-muted/30 px-2 py-1.5">
+      <button className="text-xs text-muted-foreground hover:text-foreground underline decoration-dotted" onClick={selectAllVisible}>
+        {allVisibleSelected ? 'Clear visible' : `Select all visible (${items.length})`}
+      </button>
+      <span className="text-xs text-muted-foreground">{selected.size} selected</span>
+      <Button size="sm" disabled={!selected.size || merge.isPending} onClick={() => {
+        if (window.confirm(`Approve and merge ${selected.size} selected ${contentType === 'movie' ? 'movie' : 'TV show'} matches?`)) {
+          merge.mutate(Array.from(selected, ([item_id, candidate_id]) => ({ item_id, candidate_id })))
+        }
+      }}>
+        {merge.isPending ? <Loader2 size={12} className="mr-1 animate-spin" /> : <ArrowRightLeft size={12} className="mr-1" />}
+        Approve merge ({selected.size})
+      </Button>
+      <Button size="sm" variant="outline" disabled={!selected.size || keepSeparate.isPending} onClick={() => {
+        const rows = items.filter((item) => selected.has(item.id)).map((item) => ({ item_id: item.id, candidate_ids: item.candidates.map((candidate) => candidate.id) }))
+        if (window.confirm(`Keep ${rows.length} selected entries separate? They will stay active in the catalog and these matches will be dismissed.`)) keepSeparate.mutate(rows)
+      }}>
+        Keep separate
+      </Button>
+      <Button size="sm" variant="outline" className="text-destructive" disabled={!selected.size || archive.isPending} onClick={() => {
+        const ids = Array.from(selected.keys())
+        if (window.confirm(`Archive ${ids.length} selected entries from review and remove them from category placements?`)) archive.mutate(ids)
+      }}>
+        <Archive size={12} className="mr-1" /> Archive selected
+      </Button>
+      {query.data && position === 'top' && <span className="ml-auto text-xs text-muted-foreground">{query.data.total.toLocaleString()} possible matches</span>}
+    </div>
+  )
   return (
-    <SectionCard title={`Possible ${contentType === 'movie' ? 'Movie' : 'TV Show'} Matches`} description="Review candidate metadata matches before merging." icon={<ArrowRightLeft size={14} />}>
+    <SectionCard title={`Existing ${contentType === 'movie' ? 'Movie' : 'TV Show'} Matches`} description="Compare same-title catalog entries and decide which imports to merge, keep separate, or archive." icon={<ArrowRightLeft size={14} />}>
       <p className="text-xs text-muted-foreground">
-        Review same-title candidates from other providers. Selecting a row approves the displayed candidate; final title and language checks still run on the server before merging.
+        All candidate titles are shown expanded for review. Shift-click selects a range; review year differences before approving a bulk merge.
       </p>
-      <div className="flex items-center gap-2 flex-wrap rounded border border-border/50 bg-muted/30 px-2 py-1.5">
-        <span className="text-xs text-muted-foreground">{selected.size} selected</span>
-        <button className="text-xs text-muted-foreground hover:text-foreground underline decoration-dotted" onClick={selectAllVisible}>
-          {allVisibleSelected ? 'Clear visible' : `Select all visible (${items.length})`}
-        </button>
-        <Button size="sm" disabled={!selected.size || merge.isPending} onClick={() => merge.mutate(Array.from(selected, ([item_id, candidate_id]) => ({ item_id, candidate_id })))}>
-          {merge.isPending ? <Loader2 size={12} className="mr-1 animate-spin" /> : <ArrowRightLeft size={12} className="mr-1" />}
-          Approve and merge ({selected.size})
-        </Button>
-        {query.data && <span className="ml-auto text-xs text-muted-foreground">{query.data.total.toLocaleString()} possible matches</span>}
-      </div>
+      <Button size="sm" variant="outline" disabled={query.isFetching} onClick={() => query.refetch()}>
+        {query.isFetching ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+        <span className="ml-1">Refresh matches</span>
+      </Button>
+      {reviewControls('top')}
       {query.isLoading && <p className="text-xs text-muted-foreground">Finding possible matches…</p>}
       {query.isError && <p className="text-xs text-destructive">Could not load possible matches.</p>}
       {!query.isLoading && !items.length && <p className="text-xs text-muted-foreground">No possible matches found.</p>}
       <div className="space-y-2">
-        {items.map((item) => {
+        {items.map((item, index) => {
           const chosen = selected.get(item.id)
           return (
             <div key={item.id} className={`rounded border p-2 ${chosen ? 'border-primary/60 bg-primary/5' : 'border-border/50'}`}>
               <div className="flex items-start gap-2">
-                <input type="checkbox" checked={chosen != null} onChange={() => setSelected((current) => {
-                  const next = new Map(current)
-                  if (next.has(item.id)) next.delete(item.id)
-                  else if (item.candidates[0]) next.set(item.id, item.candidates[0].id)
-                  return next
-                })} />
+                <input type="checkbox" aria-label={`Select ${item.name}`} checked={chosen != null} onChange={(event) => toggleRow(item, index, event.nativeEvent instanceof MouseEvent && event.nativeEvent.shiftKey)} />
                 <div className="min-w-0 flex-1">
-                  <div className="font-medium">{item.name} <span className="text-xs text-amber-400">missing TMDB/year</span></div>
+                  <div className="font-medium">{item.name} <span className="text-xs text-amber-400">{item.year ? `${item.year} · no TMDB ID` : 'no year or TMDB ID'}</span></div>
                   <div className="text-[11px] text-muted-foreground">Select the existing catalog card to receive this provider source.</div>
                   <div className="mt-1 space-y-1">
                     {item.candidates.map((candidate) => (
                       <label key={candidate.id} className="flex items-center gap-2 rounded border border-border/40 bg-background/30 px-2 py-1 text-xs cursor-pointer">
                         <input type="radio" name={`match-${contentType}-${item.id}`} checked={chosen === candidate.id} onChange={() => setSelected((current) => new Map(current).set(item.id, candidate.id))} />
                         <span className="font-medium">{candidate.name}</span>
-                        <span className="text-muted-foreground">{candidate.year ?? 'no year'}{candidate.tmdb_id ? ` · TMDB ${candidate.tmdb_id}` : ''} · {candidate.match_reason}</span>
+                        <span className={`text-muted-foreground ${candidate.match_reason.includes('differs by') ? 'text-amber-500' : ''}`}>{candidate.year ?? 'no year'}{candidate.tmdb_id ? ` · TMDB ${candidate.tmdb_id}` : ''} · {candidate.match_reason}</span>
                       </label>
                     ))}
                   </div>
@@ -6491,7 +6557,8 @@ function PossibleMetadataMatches({ contentType }: { contentType: 'movie' | 'seri
           )
         })}
       </div>
-      {query.data && <Pager total={query.data.total} limit={query.data.limit} offset={offset} onOffset={(value) => { setOffset(value); setSelected(new Map()) }} />}
+      {items.length > 0 && reviewControls('bottom')}
+      {query.data && <Pager total={query.data.total} limit={query.data.limit} offset={offset} onOffset={(value) => { setOffset(value); setSelected(new Map()); lastSelectedIndex.current = null }} />}
     </SectionCard>
   )
 }
@@ -6521,7 +6588,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
   const [categoriesModalOpen, setCategoriesModalOpen] = useState<'movie' | 'series' | null>(null)
   const [needsReviewModalOpen, setNeedsReviewModalOpen] = useState<'movie' | 'series' | null>(null)
   const [metadataContentType, setMetadataContentType] = useState<'movie' | 'series'>('movie')
-  const [metadataQueue, setMetadataQueue] = useState<'identity' | 'invalid_tmdb'>('identity')
+  const [metadataQueue, setMetadataQueue] = useState<'identity' | 'possible_matches' | 'invalid_tmdb'>('identity')
   const [metadataSelected, setMetadataSelected] = useState<Set<number>>(new Set())
   const [metadataHideAdult, setMetadataHideAdult] = useState(true)
   const [metadataOffset, setMetadataOffset] = useState(0)
@@ -8418,7 +8485,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
     queryFn: () => api.get('/vod/tmdb-lookup-failures/').then((r) => r.data),
     enabled: activeTab === 'metadata',
   })
-  const activeMetadataQuery = metadataQueue === 'identity' ? metadataReviewQuery : tmdbLookupFailuresQuery
+  const activeMetadataQuery = metadataQueue === 'invalid_tmdb' ? tmdbLookupFailuresQuery : metadataReviewQuery
   const metadataMovieItems = activeMetadataQuery.data?.movies ?? []
   const metadataSeriesItems = activeMetadataQuery.data?.series ?? []
   const hideAdultsInMetadata = metadataQueue === 'identity' && metadataHideAdult
@@ -10433,13 +10500,18 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
         <p className="text-xs text-muted-foreground">
           {metadataQueue === 'identity'
             ? 'Fix active movies and shows the provider left without a usable TMDB identity, whether or not a year is present, plus the held ambiguous-year queue.'
-            : 'Correct stored TMDB IDs that TMDB confirmed no longer exist. Search TMDB, choose the exact match, or clear the invalid ID.'}
+            : metadataQueue === 'possible_matches'
+              ? 'Review likely same-title items already in your catalog. Approve merges, keep entries separate, or archive them.'
+              : 'Correct stored TMDB IDs that TMDB confirmed no longer exist. Search TMDB, choose the exact match, or clear the invalid ID.'}
         </p>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 pt-1">
           <span className="text-[11px] font-medium text-muted-foreground">Review issue</span>
           <div className="flex items-center gap-1.5">
             <Button size="sm" variant={metadataQueue === 'identity' ? 'default' : 'outline'} title="Titles with no usable TMDB ID and no release year" onClick={() => { setMetadataQueue('identity'); setMetadataSelected(new Set()); setMetadataOffset(0) }}>
               Missing identity
+            </Button>
+            <Button size="sm" variant={metadataQueue === 'possible_matches' ? 'default' : 'outline'} title="Missing-identity items with a same-title catalog candidate" onClick={() => { setMetadataQueue('possible_matches'); setMetadataSelected(new Set()); setMetadataOffset(0) }}>
+              Existing matches
             </Button>
             <Button size="sm" variant={metadataQueue === 'invalid_tmdb' ? 'default' : 'outline'} title="Stored TMDB IDs that TMDB returned as not found" onClick={() => { setMetadataQueue('invalid_tmdb'); setMetadataSelected(new Set()); setMetadataOffset(0) }}>
               Incorrect TMDB IDs{tmdbLookupFailuresQuery.data?.movies.length || tmdbLookupFailuresQuery.data?.series.length ? ` (${(tmdbLookupFailuresQuery.data?.movies.length ?? 0) + (tmdbLookupFailuresQuery.data?.series.length ?? 0)})` : ''}
@@ -10452,14 +10524,14 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
             variant={metadataContentType === 'movie' ? 'default' : 'outline'}
             onClick={() => { setMetadataContentType('movie'); setMetadataSelected(new Set()); setMetadataOffset(0) }}
           >
-            Movies{` (${visibleMetadataMovies.length})`}
+            Movies{metadataQueue === 'possible_matches' ? '' : ` (${visibleMetadataMovies.length})`}
           </Button>
           <Button
             size="sm"
             variant={metadataContentType === 'series' ? 'default' : 'outline'}
             onClick={() => { setMetadataContentType('series'); setMetadataSelected(new Set()); setMetadataOffset(0) }}
           >
-            TV Shows{` (${visibleMetadataSeries.length})`}
+            TV Shows{metadataQueue === 'possible_matches' ? '' : ` (${visibleMetadataSeries.length})`}
           </Button>
           <Button size="sm" variant="outline" disabled={activeMetadataQuery.isFetching} onClick={() => activeMetadataQuery.refetch()}>
             {activeMetadataQuery.isFetching ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
@@ -10475,6 +10547,9 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
           <span><strong className="text-foreground">Missing identity:</strong> no usable TMDB ID, with or without a year, or an ambiguous year held for review. A same-title row elsewhere is only a candidate until the year/identity is safe to copy.</span>
           <span><strong className="text-foreground">Incorrect TMDB IDs:</strong> stored IDs TMDB returned as not found.</span>
         </div>
+        {metadataQueue === 'possible_matches' ? (
+          <PossibleMetadataMatches contentType={metadataContentType} hideAdult={metadataHideAdult} />
+        ) : <>
         {metadataQueue === 'identity' && <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer">
           <input
             type="checkbox"
@@ -10556,6 +10631,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
             )}
           </>
         )}
+        </>}
       </SectionCard>
       </>
       )}

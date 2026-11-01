@@ -34,6 +34,19 @@ included.
 | Configuration and reporting page navigation | [#72](https://github.com/jstevenscl/vod-manager/pull/72) | Included in upstream v0.3.16 |
 | Episode list preloading | [#74](https://github.com/jstevenscl/vod-manager/pull/74) | Open / under review |
 
+## 2026-11-01 (Metadata identity matching)
+
+- ✅ Added an Existing Matches tab to Metadata Review for movies and TV shows.
+  It shows same-title catalog candidates with year differences, supports
+  shift-range and page selection, and offers bulk merge, keep-separate, and
+  archive actions without leaving the review screen.
+- ✅ Existing candidates now include same-year titles and titles within three
+  years; missing years remain reviewable. TMDB results without meaningful title
+  overlap are filtered before detail lookup, and the sidebar review counts use
+  the same adult-filtered identity queue as the page.
+- ✅ The Return to top control appears after scrolling 5% while Metadata Review
+  is open; its threshold on other pages is unchanged.
+
 ## 2026-10-31 (Upstream v0.3.16 alignment)
 
 - Added confirmed single-item and bulk parent-archive actions to Unknown
