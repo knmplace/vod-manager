@@ -6410,7 +6410,7 @@ interface PossibleMetadataMatchItem {
   candidates: PossibleMetadataMatchCandidate[]
 }
 
-function PossibleMetadataMatches({ contentType, hideAdult = true }: { contentType: 'movie' | 'series'; hideAdult?: boolean }) {
+function PossibleMetadataMatches({ contentType, hideAdult = true, collapsible = true }: { contentType: 'movie' | 'series'; hideAdult?: boolean; collapsible?: boolean }) {
   const qc = useQueryClient()
   const [offset, setOffset] = useState(0)
   const [selected, setSelected] = useState<Map<number, number>>(new Map())
@@ -6520,7 +6520,7 @@ function PossibleMetadataMatches({ contentType, hideAdult = true }: { contentTyp
     </div>
   )
   return (
-    <SectionCard title={`Existing ${contentType === 'movie' ? 'Movie' : 'TV Show'} Matches`} description="Compare same-title catalog entries and decide which imports to merge, keep separate, or archive." icon={<ArrowRightLeft size={14} />}>
+    <SectionCard title={`Existing ${contentType === 'movie' ? 'Movie' : 'TV Show'} Matches`} description="Compare same-title catalog entries and decide which imports to merge, keep separate, or archive." icon={<ArrowRightLeft size={14} />} collapsible={collapsible}>
       <p className="text-xs text-muted-foreground">
         All candidate titles are shown expanded for review. Shift-click selects a range; review year differences before approving a bulk merge.
       </p>
@@ -10496,7 +10496,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
 
       {activeTab === 'metadata' && (
       <>
-      <SectionCard title="Metadata Review" description="Review titles needing metadata attention." icon={<Search size={14} />}>
+      <SectionCard title="Metadata Review" description="Review titles needing metadata attention." icon={<Search size={14} />} collapsible={false}>
         <p className="text-xs text-muted-foreground">
           {metadataQueue === 'identity'
             ? 'Fix active movies and shows the provider left without a usable TMDB identity, whether or not a year is present, plus the held ambiguous-year queue.'
@@ -10548,7 +10548,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
           <span><strong className="text-foreground">Incorrect TMDB IDs:</strong> stored IDs TMDB returned as not found.</span>
         </div>
         {metadataQueue === 'possible_matches' ? (
-          <PossibleMetadataMatches contentType={metadataContentType} hideAdult={metadataHideAdult} />
+          <PossibleMetadataMatches contentType={metadataContentType} hideAdult={metadataHideAdult} collapsible={false} />
         ) : <>
         {metadataQueue === 'identity' && <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer">
           <input
