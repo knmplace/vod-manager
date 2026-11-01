@@ -4489,6 +4489,11 @@ class LanguageProbeErrorActionRequest(BaseModel):
     language: Optional[str] = None  # manually confirmed enabled language
 
 
+class LanguageProbeBulkApprovalRequest(BaseModel):
+    sources: list[dict[str, object]]
+    language: str
+
+
 class LanguageTrickleSettingsRequest(BaseModel):
     probes_per_cycle: int
     interval_seconds: int
@@ -4600,6 +4605,14 @@ async def language_probe_error_action(kind: str, source_id: int, body: LanguageP
             return {"action": "retry_queued"}
         await asyncio.to_thread(vod_db.delete_language_probe_source, kind, source_id)
         return {"action": "deleted"}
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc))
+
+
+@router.post("/language-probe-errors/bulk-approve/", dependencies=_GUARDS)
+async def bulk_approve_language_probe_errors(body: LanguageProbeBulkApprovalRequest):
+    try:
+        return await asyncio.to_thread(vod_db.approve_language_probe_sources, body.sources, body.language)
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc))
 

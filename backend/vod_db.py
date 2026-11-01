@@ -8579,6 +8579,97 @@ def approve_language_probe_source(kind: str, source_id: int, language: str | Non
             conn.close()
 
 
+def approve_language_probe_sources(sources: list[dict], language: str) -> dict:
+    """Confirm one language for a batch of unknown sources in one transaction."""
+    confirmed_language = str(language or "").strip().upper()
+    enabled = set(get_enabled_languages())
+    if not confirmed_language or confirmed_language not in enabled:
+        raise ValueError("confirmed language must be enabled for playback")
+    if not sources or len(sources) > 250:
+        raise ValueError("select between 1 and 250 sources")
+
+    grouped: dict[str, list[int]] = {"movie": [], "episode": []}
+    seen: set[tuple[str, int]] = set()
+    for source in sources:
+        kind = str(source.get("kind") or "")
+        if kind not in grouped:
+            raise ValueError("source kind must be movie or episode")
+        try:
+            source_id = int(source.get("source_id"))
+        except (TypeError, ValueError):
+            raise ValueError("source id must be an integer") from None
+        key = (kind, source_id)
+        if source_id <= 0 or key in seen:
+            raise ValueError("source ids must be positive and unique")
+        seen.add(key)
+        grouped[kind].append(source_id)
+
+    now = _now()
+    audit_rows: list[tuple] = []
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            for kind, source_ids in grouped.items():
+                if not source_ids:
+                    continue
+                table = "movie_sources" if kind == "movie" else "episode_sources"
+                placeholders = ",".join("?" for _ in source_ids)
+                rows = conn.execute(
+                    f"""SELECT src.id, src.provider_id, src.language_probe_status,
+                               src.language_probe_decision, src.language_probe_languages
+                        FROM {table} src JOIN providers p ON p.id=src.provider_id
+                        WHERE src.id IN ({placeholders}) AND p.is_active=1""",
+                    source_ids,
+                ).fetchall()
+                by_id = {int(row["id"]): row for row in rows}
+                if len(by_id) != len(source_ids):
+                    raise ValueError("one or more selected sources no longer exist or their provider is inactive")
+                for source_id in source_ids:
+                    row = by_id[source_id]
+                    try:
+                        observed = json.loads(row["language_probe_languages"] or "[]")
+                    except (TypeError, ValueError):
+                        observed = []
+                    if row["language_probe_status"] not in ("unknown", "observed") or row["language_probe_decision"] is not None or any(tag not in (None, "", "UNKNOWN") for tag in observed):
+                        raise ValueError("one or more selected sources are no longer unknown; refresh the report and try again")
+                    audit_rows.append((kind, source_id, row["provider_id"], now,
+                                       "manual_approved", confirmed_language,
+                                       json.dumps([confirmed_language]),
+                                       json.dumps(sorted(enabled)), 0,
+                                       int(confirmed_language in enabled),
+                                       "Language manually confirmed after playback review."))
+
+            for kind, source_ids in grouped.items():
+                if not source_ids:
+                    continue
+                table = "movie_sources" if kind == "movie" else "episode_sources"
+                placeholders = ",".join("?" for _ in source_ids)
+                conn.execute(
+                    f"""UPDATE {table}
+                        SET language=?, language_probe_status='manual_approved',
+                            language_probe_decision='approved', language_probe_decided_at=?,
+                            language_probe_error=NULL, language_probe_method='manual_language_confirmed',
+                            language_probe_confidence='manual', language_probe_languages=?,
+                            language_probed_at=?, language_probe_failures=0,
+                            language_probe_last_failed_at=NULL, language_probe_quarantined_at=NULL
+                        WHERE id IN ({placeholders})""",
+                    [confirmed_language, now, json.dumps([confirmed_language]), now, *source_ids],
+                )
+            conn.executemany("""INSERT INTO language_probe_runs
+                (kind, source_id, provider_id, checked_at, status,
+                 configured_language, observed_languages, wanted_languages,
+                 mismatch, wanted_match, error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", audit_rows)
+            _commit_with_retry(conn)
+            return {"action": "approved", "language": confirmed_language, "count": len(audit_rows)}
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
 def delete_language_probe_source(kind: str, source_id: int) -> None:
     """Permanently remove a quarantined source while preserving other copies."""
     table, parent_table, parent_fk = _language_probe_table(kind)

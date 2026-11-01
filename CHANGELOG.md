@@ -34,6 +34,9 @@ included.
 
 ## 2026-10-31 (Upstream v0.3.16 alignment)
 
+- Bulk confirmation of selected Unknown Language Review rows now uses one API
+  request and one database transaction, with a single report refresh after the
+  selected sources and their audit records are saved.
 - Made ambiguous language mismatches actionable: reviewers can choose one of
   the observed tags to save for the provider source, or explicitly archive the
   parent when none of the observed languages is wanted. Unknown Language Review
