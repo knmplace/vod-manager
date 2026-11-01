@@ -662,9 +662,10 @@ function LanguageProbe({ kind, source, size = 11 }: { kind: 'movie' | 'episode';
   }
   const labels = res.observed.map((code) => LANGUAGE_CODE_NAMES[code] ? `${code} (${LANGUAGE_CODE_NAMES[code]})` : code)
   const confirmedLanguage = res.configured || labels[0]
+  const hasDetectedAudioLanguage = ['observed', 'auto_approved'].includes(res.status ?? '') && labels.length > 0
   const languageSummary = res.status === 'manual_approved'
     ? confirmedLanguage ? `Language: ${confirmedLanguage} (confirmed)` : 'Audio language: unknown'
-    : res.status === 'observed' && labels.length ? `Audio: ${labels.join(', ')}` : 'Audio language: unknown'
+    : hasDetectedAudioLanguage ? `Audio: ${labels.join(', ')}` : 'Audio language: unknown'
   return (
     <span className="flex items-center gap-1.5">
       {note && <span className="text-destructive">{note}</span>}

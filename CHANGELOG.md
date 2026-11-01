@@ -48,7 +48,8 @@ included.
   explains where to confirm an enabled language for an unknown source.
 - Fixed the preview source row so a manually confirmed language (for example,
   EN) is shown as `Language: EN (confirmed)` instead of `Audio language: unknown`.
-  The card now refreshes its displayed language when its source data changes.
+  Detected audio tags remain visible after automatic approval, and the card
+  refreshes its displayed language when its source data changes.
 - Added an opt-in MDBList poster lookup path to Missing Artwork, with account-tier
   quota controls and links to create an account or retrieve an API key. Public-list
   sync remains separate, and its MDBList rate headers inform the artwork quota.
