@@ -39,8 +39,8 @@ included.
 
 - ✅ Added an Existing Matches tab to Metadata Review for movies and TV shows.
   It shows same-title catalog candidates with year differences, supports
-  shift-range and page selection, and offers bulk merge, keep-separate, and
-  archive actions without leaving the review screen.
+  side-by-side poster review, shift-range and page selection, and offers bulk
+  merge, keep-separate, and archive actions without leaving the review screen.
 - ✅ Existing candidates now include same-year titles and titles within three
   years; missing years remain reviewable. TMDB results without meaningful title
   overlap are filtered before detail lookup, and the sidebar review counts use

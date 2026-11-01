@@ -6400,6 +6400,7 @@ interface PossibleMetadataMatchCandidate {
   name: string
   year: number | null
   tmdb_id: string | null
+  poster_url: string | null
   match_reason: string
 }
 
@@ -6407,6 +6408,7 @@ interface PossibleMetadataMatchItem {
   id: number
   name: string
   year: number | null
+  poster_url: string | null
   candidates: PossibleMetadataMatchCandidate[]
 }
 
@@ -6539,6 +6541,7 @@ function PossibleMetadataMatches({ contentType, hideAdult = true, collapsible = 
             <div key={item.id} className={`rounded border p-2 ${chosen ? 'border-primary/60 bg-primary/5' : 'border-border/50'}`}>
               <div className="flex items-start gap-2">
                 <input type="checkbox" aria-label={`Select ${item.name}`} checked={chosen != null} onChange={(event) => toggleRow(item, index, event.nativeEvent instanceof MouseEvent && event.nativeEvent.shiftKey)} />
+                <PosterThumb url={item.poster_url} className="w-10 h-[60px] rounded object-cover shrink-0" fallback={<div className="w-10 h-[60px] rounded bg-muted flex items-center justify-center"><Film size={14} className="text-muted-foreground" /></div>} />
                 <div className="min-w-0 flex-1">
                   <div className="font-medium">{item.name} <span className="text-xs text-amber-400">{item.year ? `${item.year} · no TMDB ID` : 'no year or TMDB ID'}</span></div>
                   <div className="text-[11px] text-muted-foreground">Select the existing catalog card to receive this provider source.</div>
@@ -6546,6 +6549,7 @@ function PossibleMetadataMatches({ contentType, hideAdult = true, collapsible = 
                     {item.candidates.map((candidate) => (
                       <label key={candidate.id} className="flex items-center gap-2 rounded border border-border/40 bg-background/30 px-2 py-1 text-xs cursor-pointer">
                         <input type="radio" name={`match-${contentType}-${item.id}`} checked={chosen === candidate.id} onChange={() => setSelected((current) => new Map(current).set(item.id, candidate.id))} />
+                        <PosterThumb url={candidate.poster_url} className="w-8 h-12 rounded object-cover shrink-0" fallback={<div className="w-8 h-12 rounded bg-muted flex items-center justify-center"><Film size={12} className="text-muted-foreground" /></div>} />
                         <span className="font-medium">{candidate.name}</span>
                         <span className={`text-muted-foreground ${candidate.match_reason.includes('differs by') ? 'text-amber-500' : ''}`}>{candidate.year ?? 'no year'}{candidate.tmdb_id ? ` · TMDB ${candidate.tmdb_id}` : ''} · {candidate.match_reason}</span>
                       </label>

@@ -105,6 +105,24 @@ def test_possible_matches_include_same_year_and_up_to_three_year_difference(db):
     assert "differs by 3" in row["candidates"][1]["match_reason"]
 
 
+def test_possible_matches_include_incoming_and_candidate_posters(db):
+    now = db._now()
+    conn = db._connect()
+    conn.execute("INSERT INTO movies (name, year, tmdb_id, poster_url, created_at) VALUES (?, ?, ?, ?, ?)",
+                 ("Poster Match", 2020, "88", "https://images.invalid/existing.jpg", now))
+    candidate_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute("INSERT INTO movies (name, year, tmdb_id, poster_url, created_at) VALUES (?, ?, ?, ?, ?)",
+                 ("Poster Match", 2020, None, "https://images.invalid/incoming.jpg", now))
+    incoming_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.commit()
+    conn.close()
+
+    row = next(item for item in db.list_possible_metadata_matches("movie")["items"] if item["id"] == incoming_id)
+    assert row["poster_url"] == "https://images.invalid/incoming.jpg"
+    assert row["candidates"][0]["id"] == candidate_id
+    assert row["candidates"][0]["poster_url"] == "https://images.invalid/existing.jpg"
+
+
 def test_keep_separate_dismisses_reviewed_candidate_pair_only(db):
     now = db._now()
     conn = db._connect()

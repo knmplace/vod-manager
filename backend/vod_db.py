@@ -13798,14 +13798,14 @@ def list_possible_metadata_matches(content_type: str, limit: int = 50, offset: i
     conn = _connect()
     try:
         rows = [dict(row) for row in conn.execute(
-            f"""SELECT id, name, year, tmdb_id, needs_year_review, review_excluded
+            f"""SELECT id, name, year, tmdb_id, poster_url, needs_year_review, review_excluded
                 FROM {table}
                 WHERE review_excluded=0 AND (tmdb_id IS NULL OR TRIM(tmdb_id)='')
                   AND (?=0 OR COALESCE(is_adult, 0)=0)
                 ORDER BY name, id"""
             , (0 if not hide_adult else 1,)).fetchall()]
         all_rows = [dict(row) for row in conn.execute(
-            f"""SELECT id, name, year, tmdb_id
+            f"""SELECT id, name, year, tmdb_id, poster_url
                 FROM {table} WHERE review_excluded=0
                   AND (?=0 OR COALESCE(is_adult, 0)=0)
                 ORDER BY name, id""",
@@ -13851,12 +13851,14 @@ def list_possible_metadata_matches(content_type: str, limit: int = 50, offset: i
                 "name": row["name"],
                 "year": row["year"],
                 "tmdb_id": row["tmdb_id"],
+                "poster_url": row["poster_url"],
                 "candidates": [
                     {
                         "id": candidate["id"],
                         "name": candidate["name"],
                         "year": candidate["year"],
                         "tmdb_id": candidate["tmdb_id"],
+                        "poster_url": candidate["poster_url"],
                         "match_reason": candidate["match_reason"],
                     }
                     for candidate in candidates[:5]
