@@ -34,6 +34,10 @@ included.
 
 ## 2026-10-31 (Upstream v0.3.16 alignment)
 
+- Added confirmed single-item and bulk parent-archive actions to Unknown
+  Language Review. Archives remove category placements while keeping content
+  and provider source records. The global Return to top button now appears
+  after scrolling 7.5% of the page; it is available across report views.
 - Bulk confirmation of selected Unknown Language Review rows now uses one API
   request and one database transaction, with a single report refresh after the
   selected sources and their audit records are saved.

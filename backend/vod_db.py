@@ -15513,6 +15513,55 @@ def bulk_set_review_excluded(content_type: str, ids: list[int], excluded: bool) 
             conn.close()
 
 
+def bulk_archive_language_probe_parents(items: list[dict]) -> dict:
+    """Archive unique movie/series parents from Unknown Language Review atomically."""
+    if not items or len(items) > 250:
+        raise ValueError("select between 1 and 250 parent items")
+    grouped: dict[str, set[int]] = {"movie": set(), "episode": set()}
+    for item in items:
+        kind = str(item.get("kind") or "")
+        if kind not in grouped:
+            raise ValueError("parent kind must be movie or episode")
+        try:
+            parent_id = int(item.get("item_id"))
+        except (TypeError, ValueError):
+            raise ValueError("parent id must be an integer") from None
+        if parent_id <= 0:
+            raise ValueError("parent ids must be positive")
+        grouped[kind].add(parent_id)
+
+    count = sum(len(ids) for ids in grouped.values())
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            for kind, ids in grouped.items():
+                if not ids:
+                    continue
+                table = "movies" if kind == "movie" else "series"
+                placements = "movie_category_placements" if kind == "movie" else "series_category_placements"
+                fk = "movie_id" if kind == "movie" else "series_id"
+                ordered_ids = sorted(ids)
+                placeholders = ",".join("?" for _ in ordered_ids)
+                found = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE id IN ({placeholders})", ordered_ids).fetchone()[0]
+                if int(found) != len(ordered_ids):
+                    raise ValueError("one or more selected parent items no longer exist")
+                conn.execute(
+                    f"UPDATE {table} SET review_excluded=1, review_excluded_manual=1, "
+                    f"review_excluded_language=0, review_excluded_import_policy=0, updated_at=? "
+                    f"WHERE id IN ({placeholders})",
+                    (_now(), *ordered_ids),
+                )
+                conn.execute(f"DELETE FROM {placements} WHERE {fk} IN ({placeholders})", ordered_ids)
+            _commit_with_retry(conn)
+            return {"action": "archived", "count": count}
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
 def smart_bulk_exclude(content_type: str, ids: list[int], keep_codes: list[str] | None, dry_run: bool = False) -> dict:
     """Archives each id UNLESS it's the only copy of that content in the
     pool -- e.g. don't archive "AR| Apex" if there's no "EN| Apex" (or

@@ -4494,6 +4494,10 @@ class LanguageProbeBulkApprovalRequest(BaseModel):
     language: str
 
 
+class LanguageProbeBulkArchiveRequest(BaseModel):
+    items: list[dict[str, object]]
+
+
 class LanguageTrickleSettingsRequest(BaseModel):
     probes_per_cycle: int
     interval_seconds: int
@@ -4613,6 +4617,14 @@ async def language_probe_error_action(kind: str, source_id: int, body: LanguageP
 async def bulk_approve_language_probe_errors(body: LanguageProbeBulkApprovalRequest):
     try:
         return await asyncio.to_thread(vod_db.approve_language_probe_sources, body.sources, body.language)
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc))
+
+
+@router.post("/language-probe-errors/bulk-archive/", dependencies=_GUARDS)
+async def bulk_archive_language_probe_errors(body: LanguageProbeBulkArchiveRequest):
+    try:
+        return await asyncio.to_thread(vod_db.bulk_archive_language_probe_parents, body.items)
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc))
 
