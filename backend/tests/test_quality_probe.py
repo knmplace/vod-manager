@@ -514,9 +514,40 @@ def test_unknown_language_report_count_is_not_limited_to_loaded_rows(db):
     assert len(report["results"]) == 2
 
 
-def test_unknown_language_bulk_approval_limit_is_300(db):
-    with pytest.raises(ValueError, match="1 and 300 sources"):
-        db.approve_language_probe_sources([{"kind": "movie", "source_id": index} for index in range(1, 302)], "EN")
+def test_unknown_language_provider_filter_is_applied_before_result_limit(db):
+    for provider_name, title, year, checked_at in (
+        ("provider-a", "Newest Unknown Movie", 2025, "2030-01-01T00:00:00Z"),
+        ("provider-b", "Older Unknown Movie", 2020, "2020-01-01T00:00:00Z"),
+    ):
+        provider_id = db.upsert_provider(provider_name, "", "", "", provider_type="library")
+        movie_id = db.upsert_movie(title, year)
+        db.add_movie_source(movie_id, provider_id, f"source-{provider_name}", "mkv")
+        conn = db._connect()
+        source_id = conn.execute("SELECT id FROM movie_sources WHERE movie_id=?", (movie_id,)).fetchone()["id"]
+        conn.close()
+        db.set_source_language_probe("movie", source_id, ["UNKNOWN"], "observed", "embedded_audio_tags", "low")
+        conn = db._connect()
+        conn.execute("UPDATE movie_sources SET language_probed_at=? WHERE id=?", (checked_at, source_id))
+        conn.commit()
+        conn.close()
+
+    latest_window = db.list_language_unknowns(limit=1)
+    filtered = db.list_language_unknowns(limit=1, provider_name="provider-b")
+
+    assert [row["provider_name"] for row in latest_window["results"]] == ["provider-a"]
+    assert [row["provider_name"] for row in filtered["results"]] == ["provider-b"]
+    assert filtered["count"] == 2
+    assert filtered["provider_counts"] == {"provider-a": 1, "provider-b": 1}
+
+
+def test_unknown_language_bulk_approval_limit_is_600(db):
+    with pytest.raises(ValueError, match="1 and 600 sources"):
+        db.approve_language_probe_sources([{"kind": "movie", "source_id": index} for index in range(1, 602)], "EN")
+
+
+def test_unknown_language_bulk_archive_limit_is_600(db):
+    with pytest.raises(ValueError, match="1 and 600 parent items"):
+        db.bulk_archive_language_probe_parents([{"kind": "movie", "item_id": index} for index in range(1, 602)])
 
 
 def test_unknown_language_confirmation_rejects_disabled_language(db, tmp_path, monkeypatch):

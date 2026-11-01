@@ -4593,8 +4593,8 @@ async def language_mismatch_report():
 
 
 @router.get("/language-unknown-report/", dependencies=_GUARDS)
-async def language_unknown_report():
-    return await asyncio.to_thread(vod_db.list_language_unknowns)
+async def language_unknown_report(provider: str | None = None):
+    return await asyncio.to_thread(vod_db.list_language_unknowns, provider_name=provider)
 
 
 @router.get("/language-trickle/settings/", dependencies=_GUARDS)

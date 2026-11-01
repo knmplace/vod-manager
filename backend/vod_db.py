@@ -8585,8 +8585,8 @@ def approve_language_probe_sources(sources: list[dict], language: str) -> dict:
     enabled = set(get_enabled_languages())
     if not confirmed_language or confirmed_language not in enabled:
         raise ValueError("confirmed language must be enabled for playback")
-    if not sources or len(sources) > 300:
-        raise ValueError("select between 1 and 300 sources")
+    if not sources or len(sources) > 600:
+        raise ValueError("select between 1 and 600 sources")
 
     grouped: dict[str, list[int]] = {"movie": [], "episode": []}
     seen: set[tuple[str, int]] = set()
@@ -9274,7 +9274,7 @@ def list_language_mismatches(limit: int = 1000) -> dict:
         conn.close()
 
 
-def list_language_unknowns(limit: int = 1000) -> dict:
+def list_language_unknowns(limit: int = 1000, provider_name: str | None = None) -> dict:
     """List probe results with no usable embedded language signal.
 
     Unknown results are intentionally separate from mismatches: they are not
@@ -9317,6 +9317,7 @@ def list_language_unknowns(limit: int = 1000) -> dict:
         """).fetchall()
         provider_counts = {row["provider_name"]: int(row["total"]) for row in count_rows}
         total_count = sum(provider_counts.values())
+        provider_name = str(provider_name or "").strip() or None
         for query in (f"""
             SELECT 'movie' AS kind, ms.id AS source_id, m.id AS item_id,
                    m.name AS title, m.year, m.tmdb_id, ms.container_extension,
@@ -9329,6 +9330,7 @@ def list_language_unknowns(limit: int = 1000) -> dict:
               AND ms.language_probe_status IN ('unknown','observed')
               AND ms.language_probe_decision IS NULL
               AND {unknown_language_filter('ms.language_probe_languages')}
+              AND (? IS NULL OR p.name=?)
             ORDER BY ms.language_probed_at DESC LIMIT ?
         """, f"""
             SELECT 'episode' AS kind, es.id AS source_id, s.id AS item_id,
@@ -9343,9 +9345,10 @@ def list_language_unknowns(limit: int = 1000) -> dict:
               AND es.language_probe_status IN ('unknown','observed')
               AND es.language_probe_decision IS NULL
               AND {unknown_language_filter('es.language_probe_languages')}
+              AND (? IS NULL OR p.name=?)
             ORDER BY es.language_probed_at DESC LIMIT ?
         """):
-            for row in conn.execute(query, (limit,)).fetchall():
+            for row in conn.execute(query, (provider_name, provider_name, limit)).fetchall():
                 item = dict(row)
                 try:
                     observed = sorted(set(json.loads(item.pop("language_probe_languages") or "[]")))
@@ -15619,8 +15622,8 @@ def bulk_set_review_excluded(content_type: str, ids: list[int], excluded: bool) 
 
 def bulk_archive_language_probe_parents(items: list[dict]) -> dict:
     """Archive unique movie/series parents from Unknown Language Review atomically."""
-    if not items or len(items) > 250:
-        raise ValueError("select between 1 and 250 parent items")
+    if not items or len(items) > 600:
+        raise ValueError("select between 1 and 600 parent items")
     grouped: dict[str, set[int]] = {"movie": set(), "episode": set()}
     for item in items:
         kind = str(item.get("kind") or "")

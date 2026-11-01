@@ -57,9 +57,10 @@ included.
 ## 2026-11-01 (Unknown Language Review batch counts)
 
 - ✅ The Unknown Language Review count now reports the full pending queue and
-  provider totals while showing the loaded review window separately. Bulk
-  language confirmation now has a selectable batch size up to 300 and retains
-  unprocessed selections for the next confirmation.
+  provider totals while showing the loaded review window separately. Provider
+  filtering now happens before the result window is limited, so older sources
+  for a selected provider remain visible. Confirmation and archive batches
+  default to 600; unprocessed selections remain selected for the next batch.
 
 ## 2026-10-31 (Upstream v0.3.16 alignment)
 
