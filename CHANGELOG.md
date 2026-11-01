@@ -61,6 +61,12 @@ included.
   filtering now happens before the result window is limited, so older sources
   for a selected provider remain visible. Confirmation and archive batches
   default to 600; unprocessed selections remain selected for the next batch.
+- Bead trail: `beads-2ct` records the rationale, implementation, and test
+  evidence; handoff `beads-3kpp` tracks the later clean upstream PR after its
+  bulk-approval prerequisite lands. Fork commits `7fd07ee` and `203c0cb` passed
+  47 language-probe tests and the frontend build; Docker Build [41354228904]
+  succeeded for `203c0cbc`. The user confirmed the resulting behavior. This
+  remains fork-only until a clean upstream PR is opened.
 
 ## 2026-10-31 (Upstream v0.3.16 alignment)
 
