@@ -4481,6 +4481,7 @@ class SourceLanguageProbeRequest(BaseModel):
 
 class LanguageMismatchDecisionRequest(BaseModel):
     decision: str                   # approved or rejected
+    language: Optional[str] = None   # selected observed language for ambiguous results
 
 
 class LanguageProbeErrorActionRequest(BaseModel):
@@ -4606,7 +4607,7 @@ async def language_probe_error_action(kind: str, source_id: int, body: LanguageP
 @router.post("/language-mismatch/{kind}/{source_id}/decision/", dependencies=_GUARDS)
 async def language_mismatch_decision(kind: str, source_id: int, body: LanguageMismatchDecisionRequest):
     try:
-        return await asyncio.to_thread(vod_db.decide_language_mismatch, kind, source_id, body.decision)
+        return await asyncio.to_thread(vod_db.decide_language_mismatch, kind, source_id, body.decision, body.language)
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc))
 

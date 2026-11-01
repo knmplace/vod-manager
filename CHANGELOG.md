@@ -34,6 +34,10 @@ included.
 
 ## 2026-10-31 (Upstream v0.3.16 alignment)
 
+- Made ambiguous language mismatches actionable: reviewers can choose one of
+  the observed tags to save for the provider source, or explicitly archive the
+  parent when none of the observed languages is wanted. Unknown Language Review
+  explains where to confirm an enabled language for an unknown source.
 - Added an opt-in MDBList poster lookup path to Missing Artwork, with account-tier
   quota controls and links to create an account or retrieve an API key. Public-list
   sync remains separate, and its MDBList rate headers inform the artwork quota.

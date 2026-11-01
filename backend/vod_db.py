@@ -9170,7 +9170,12 @@ def list_language_mismatches(limit: int = 1000) -> dict:
             item["observed_languages"] = observed
             item["safe_to_apply"] = len(observed) == 1
             item["proposed_language"] = observed[0] if len(observed) == 1 else None
-            item["proposed_archive"] = bool(len(observed) == 1 and observed[0] not in enabled)
+            # Archive eligibility is independent of whether the probe returned
+            # one tag or several: if none of the observed tags is wanted, the
+            # user can explicitly archive the parent without guessing a source
+            # language.
+            usable_observed = {language for language in observed if language and language != "UNKNOWN"}
+            item["proposed_archive"] = bool(usable_observed) and not bool(usable_observed & set(enabled))
             item["enabled_languages"] = enabled
             rows.append(item)
         return {"enabled_languages": enabled, "count": len(rows), "results": rows}
@@ -9335,8 +9340,8 @@ def next_language_probe_targets(
         conn.close()
 
 
-def decide_language_mismatch(kind: str, source_id: int, decision: str) -> dict:
-    """Approve or reject one report row; approved safe mismatches update and gate it."""
+def decide_language_mismatch(kind: str, source_id: int, decision: str, language: str | None = None) -> dict:
+    """Approve/reject one mismatch, optionally choosing one observed language."""
     if decision not in ("approved", "rejected"):
         raise ValueError("decision must be approved or rejected")
     table, parent_table, parent_fk = _language_probe_table(kind)
@@ -9356,8 +9361,15 @@ def decide_language_mismatch(kind: str, source_id: int, decision: str) -> dict:
                 observed = sorted(set(json.loads(row["language_probe_languages"] or "[]")))
             except (TypeError, ValueError):
                 observed = []
-            if decision == "approved" and (len(observed) != 1 or observed[0] == "UNKNOWN"):
-                raise ValueError("unknown or multiple observed languages require manual review")
+            usable_observed = [tag for tag in observed if tag and tag != "UNKNOWN"]
+            chosen_language = str(language or "").strip().upper() or None
+            if decision == "approved":
+                if not usable_observed:
+                    raise ValueError("unknown observed languages require Unknown Language Review")
+                if chosen_language is None and len(usable_observed) == 1:
+                    chosen_language = usable_observed[0]
+                if chosen_language not in usable_observed:
+                    raise ValueError("choose one of the observed languages")
             now = _now()
             if decision == "rejected":
                 conn.execute(f"UPDATE {table} SET language_probe_decision=?, language_probe_decided_at=? WHERE id=?",
@@ -9365,7 +9377,7 @@ def decide_language_mismatch(kind: str, source_id: int, decision: str) -> dict:
                 _commit_with_retry(conn)
                 return {"decision": decision, "source_id": source_id, "applied": False}
 
-            language = observed[0]
+            language = chosen_language
             conn.execute(f"UPDATE {table} SET language=?, language_probe_decision=?, language_probe_decided_at=? WHERE id=?",
                          (language, decision, now, source_id))
             parent_id = row["parent_id"]
