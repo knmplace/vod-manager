@@ -28,6 +28,7 @@ included.
 | Plex stale-source reconciliation | [#70](https://github.com/jstevenscl/vod-manager/pull/70) | Included in upstream v0.3.14 |
 | Language Mismatch Report and embedded-audio audit | [#69](https://github.com/jstevenscl/vod-manager/pull/69) | Withdrawn; replaced by #73 |
 | Language mismatch replacement: capacity holds and Unknown confirmation | [#73](https://github.com/jstevenscl/vod-manager/pull/73) | Included in upstream v0.3.16 |
+| Language review actions, batch approval/archive, and report scroll | [#75](https://github.com/jstevenscl/vod-manager/pull/75) | ✅🔄 Open / under review |
 | Smart-category reconciliation toggle | [#71](https://github.com/jstevenscl/vod-manager/pull/71) | Included in upstream v0.3.15 |
 | Configuration and reporting page navigation | [#72](https://github.com/jstevenscl/vod-manager/pull/72) | Included in upstream v0.3.16 |
 | Episode list preloading | [#74](https://github.com/jstevenscl/vod-manager/pull/74) | Open / under review |
