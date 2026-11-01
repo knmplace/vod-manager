@@ -459,7 +459,7 @@ def test_unknown_language_is_separate_and_never_archive_approvable(db, tmp_path)
     assert not any(row["source_id"] == sid for row in db.list_language_mismatches()["results"])
     unknown = next(row for row in db.list_language_unknowns()["results"] if row["source_id"] == sid)
     assert unknown["proposed_archive"] is False
-    with pytest.raises(ValueError, match="unknown or multiple"):
+    with pytest.raises(ValueError, match="unknown observed languages"):
         db.decide_language_mismatch("movie", sid, "approved")
 
     result = db.approve_language_probe_source("movie", sid, "EN")
@@ -495,6 +495,28 @@ def test_unknown_language_can_be_manually_set_to_another_enabled_language(db, tm
     assert source["language_probe_languages"] == '["RU"]'
     assert db.list_language_unknowns()["enabled_languages"] == ["EN", "ES", "RU"]
     assert not any(row["source_id"] == sid for row in db.list_language_unknowns()["results"])
+
+
+def test_unknown_language_report_count_is_not_limited_to_loaded_rows(db):
+    provider_id = db.upsert_provider("count-provider", "", "", "", provider_type="library")
+    for index in range(4):
+        movie_id = db.upsert_movie(f"Unknown Count Movie {index}", 2020 + index)
+        db.add_movie_source(movie_id, provider_id, f"unknown-count-{index}", "mkv")
+        conn = db._connect()
+        source_id = conn.execute("SELECT id FROM movie_sources WHERE movie_id=?", (movie_id,)).fetchone()["id"]
+        conn.close()
+        db.set_source_language_probe("movie", source_id, ["UNKNOWN"], "observed", "embedded_audio_tags", "low")
+
+    report = db.list_language_unknowns(limit=2)
+
+    assert report["count"] == 4
+    assert report["provider_counts"] == {"count-provider": 4}
+    assert len(report["results"]) == 2
+
+
+def test_unknown_language_bulk_approval_limit_is_300(db):
+    with pytest.raises(ValueError, match="1 and 300 sources"):
+        db.approve_language_probe_sources([{"kind": "movie", "source_id": index} for index in range(1, 302)], "EN")
 
 
 def test_unknown_language_confirmation_rejects_disabled_language(db, tmp_path, monkeypatch):

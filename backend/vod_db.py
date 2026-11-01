@@ -8585,8 +8585,8 @@ def approve_language_probe_sources(sources: list[dict], language: str) -> dict:
     enabled = set(get_enabled_languages())
     if not confirmed_language or confirmed_language not in enabled:
         raise ValueError("confirmed language must be enabled for playback")
-    if not sources or len(sources) > 250:
-        raise ValueError("select between 1 and 250 sources")
+    if not sources or len(sources) > 300:
+        raise ValueError("select between 1 and 300 sources")
 
     grouped: dict[str, list[int]] = {"movie": [], "episode": []}
     seen: set[tuple[str, int]] = set()
@@ -9284,7 +9284,40 @@ def list_language_unknowns(limit: int = 1000) -> dict:
     conn = _connect()
     try:
         rows = []
-        for query in ("""
+        unknown_language_filter = lambda column: f"""CASE
+            WHEN {column} IS NULL OR {column}='' THEN 1
+            WHEN json_valid({column})=0 THEN 1
+            WHEN json_type({column})='array' THEN
+                CASE WHEN json_array_length({column})=0 THEN 1
+                     ELSE NOT EXISTS (
+                         SELECT 1 FROM json_each({column})
+                         WHERE type!='text' OR value!='UNKNOWN'
+                     )
+                END
+            ELSE 0
+        END=1"""
+        count_rows = conn.execute(f"""
+            SELECT provider_name, COUNT(*) AS total FROM (
+                SELECT p.name AS provider_name, ms.language_probe_languages
+                FROM movie_sources ms JOIN movies m ON m.id=ms.movie_id
+                JOIN providers p ON p.id=ms.provider_id
+                WHERE p.is_active=1 AND m.review_excluded=0
+                  AND ms.language_probe_status IN ('unknown','observed')
+                  AND ms.language_probe_decision IS NULL
+                UNION ALL
+                SELECT p.name AS provider_name, es.language_probe_languages
+                FROM episode_sources es JOIN episodes e ON e.id=es.episode_id
+                JOIN series s ON s.id=e.series_id JOIN providers p ON p.id=es.provider_id
+                WHERE p.is_active=1 AND s.review_excluded=0
+                  AND es.language_probe_status IN ('unknown','observed')
+                  AND es.language_probe_decision IS NULL
+            ) candidates
+            WHERE {unknown_language_filter('language_probe_languages')}
+            GROUP BY provider_name
+        """).fetchall()
+        provider_counts = {row["provider_name"]: int(row["total"]) for row in count_rows}
+        total_count = sum(provider_counts.values())
+        for query in (f"""
             SELECT 'movie' AS kind, ms.id AS source_id, m.id AS item_id,
                    m.name AS title, m.year, m.tmdb_id, ms.container_extension,
                    ms.language AS configured_language, ms.language_probe_languages,
@@ -9295,8 +9328,9 @@ def list_language_unknowns(limit: int = 1000) -> dict:
             WHERE p.is_active=1 AND m.review_excluded=0
               AND ms.language_probe_status IN ('unknown','observed')
               AND ms.language_probe_decision IS NULL
+              AND {unknown_language_filter('ms.language_probe_languages')}
             ORDER BY ms.language_probed_at DESC LIMIT ?
-        """, """
+        """, f"""
             SELECT 'episode' AS kind, es.id AS source_id, s.id AS item_id,
                    s.name AS title, s.year, s.tmdb_id, es.container_extension,
                    es.language AS configured_language, es.language_probe_languages,
@@ -9308,6 +9342,7 @@ def list_language_unknowns(limit: int = 1000) -> dict:
             WHERE p.is_active=1 AND s.review_excluded=0
               AND es.language_probe_status IN ('unknown','observed')
               AND es.language_probe_decision IS NULL
+              AND {unknown_language_filter('es.language_probe_languages')}
             ORDER BY es.language_probed_at DESC LIMIT ?
         """):
             for row in conn.execute(query, (limit,)).fetchall():
@@ -9324,7 +9359,8 @@ def list_language_unknowns(limit: int = 1000) -> dict:
                 item["proposed_archive"] = False
                 rows.append(item)
         rows.sort(key=lambda item: item.get("language_probed_at") or "", reverse=True)
-        return {"count": len(rows[:limit]), "enabled_languages": sorted(get_enabled_languages()),
+        return {"count": total_count, "provider_counts": provider_counts,
+                "enabled_languages": sorted(get_enabled_languages()),
                 "primary_language": get_primary_language(), "results": rows[:limit]}
     finally:
         conn.close()

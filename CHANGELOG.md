@@ -54,6 +54,13 @@ included.
 - ✅ The Return to top control appears after scrolling 5% while Metadata Review
   is open; its threshold on other pages is unchanged.
 
+## 2026-11-01 (Unknown Language Review batch counts)
+
+- ✅ The Unknown Language Review count now reports the full pending queue and
+  provider totals while showing the loaded review window separately. Bulk
+  language confirmation now has a selectable batch size up to 300 and retains
+  unprocessed selections for the next confirmation.
+
 ## 2026-10-31 (Upstream v0.3.16 alignment)
 
 - Added confirmed single-item and bulk parent-archive actions to Unknown
