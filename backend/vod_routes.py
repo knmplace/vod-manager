@@ -3363,7 +3363,10 @@ async def year_review_suggestions(content_type: str, item_id: int, q: Optional[s
         # different region (e.g. international vs. North American title),
         # and the default search (item's own stored name) won't find a match
         # TMDB's index doesn't already associate with that exact string.
-        return await tmdb_sync.search_title(vod_db.tmdb_review_search_query(item["name"], q), content_type)
+        return await tmdb_sync.search_title(
+            vod_db.tmdb_review_search_query(item["name"], q), content_type,
+            year=item.get("year"),
+        )
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc))
     except Exception as exc:
@@ -3464,7 +3467,10 @@ async def year_review_ai_suggest(content_type: str, item_id: int, q: Optional[st
     if not item:
         raise HTTPException(404, detail=f"{content_type} not found")
     try:
-        candidates = await tmdb_sync.search_title(vod_db.tmdb_review_search_query(item["name"], q), content_type)
+        candidates = await tmdb_sync.search_title(
+            vod_db.tmdb_review_search_query(item["name"], q), content_type,
+            year=item.get("year"),
+        )
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc))
     except Exception as exc:
@@ -5230,6 +5236,18 @@ async def enrich_all_cancel():
     return {"cancel_requested": True}
 
 
+@router.get("/episode-discovery/status/", dependencies=_GUARDS)
+async def episode_discovery_status():
+    return vod_importer.get_episode_discovery_progress()
+
+
+@router.post("/episode-discovery/cancel/", dependencies=_GUARDS)
+async def episode_discovery_cancel():
+    if not vod_importer.cancel_episode_discovery():
+        raise HTTPException(409, detail="episode discovery is not running")
+    return {"cancel_requested": True}
+
+
 @router.get("/enrich-tmdb/status/", dependencies=_GUARDS)
 async def enrich_tmdb_status():
     """Progress for automatic provider-free metadata ingestion."""
@@ -5242,6 +5260,7 @@ async def runtime_status():
     return {
         "import": vod_importer.get_import_progress(),
         "enrichment": vod_importer.get_enrich_progress(),
+        "episode_discovery": vod_importer.get_episode_discovery_progress(),
         "tmdb": vod_importer.get_tmdb_enrich_progress(),
         "bulk_ai": vod_bulk_ai_service.get_active_bulk_ai_status(),
         "catalog_workflow": vod_importer.get_catalog_workflow_progress(),

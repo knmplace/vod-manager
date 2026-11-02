@@ -88,8 +88,27 @@ def test_current_lang_settings_uses_import_policy_not_playback_policy(monkeypatc
         lambda: {"exclude_prefixes": [" es ", "gr"], "exclude_non_latin": True},
     )
     monkeypatch.setattr(vod_importer.config, "get_enabled_languages", lambda: ["EN", "ES"])
+    monkeypatch.setattr(vod_importer.vod_db, "get_known_source_language_codes", lambda: {"EN", "ES"})
 
     assert vod_importer._current_lang_settings() == {
-        "exclude_prefixes": ["ES", "GR"],
+        "exclude_prefixes": {"ES", "GR"},
         "exclude_non_latin": True,
+        "known_language_codes": {"EN", "ES", "GR"},
     }
+
+
+def test_first_seen_language_is_persistently_excluded_from_import(monkeypatch):
+    lang = {
+        "exclude_prefixes": set(), "exclude_non_latin": False,
+        "known_language_codes": {"EN", "ES"},
+    }
+    saved = []
+    monkeypatch.setattr(
+        vod_importer.config, "save_import_language_exclusion",
+        lambda codes, non_latin: saved.append((codes, non_latin)),
+    )
+
+    assert vod_importer._should_auto_archive("PT - Novo Filme", lang=lang) is True
+    assert lang["exclude_prefixes"] == {"PT"}
+    assert lang["known_language_codes"] == {"EN", "ES", "PT"}
+    assert saved == [(["PT"], False)]

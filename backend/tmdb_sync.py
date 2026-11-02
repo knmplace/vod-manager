@@ -16,6 +16,7 @@ import asyncio
 import logging
 import re
 import time
+import unicodedata
 
 import httpx
 
@@ -255,6 +256,13 @@ def _review_search_title_relevant(query: str, title: str | None, original: str |
     return False
 
 
+def _review_search_title_key(value: str) -> str:
+    """Accent-, case-, and punctuation-insensitive key for exact hits."""
+    value = "".join(c for c in unicodedata.normalize("NFKD", value) if not unicodedata.combining(c))
+    value = value.lower().replace("&", " and ")
+    return re.sub(r"[^a-z0-9]+", " ", value).strip()
+
+
 async def tmdb_search(media_type: str, query: str, year: int | None = None) -> tuple[dict, bool]:
     """TMDB /search/{movie|tv}: the kept answer, else asked and kept."""
     params = {"api_key": get_tmdb_api_key(), "query": query}
@@ -266,6 +274,18 @@ async def tmdb_search(media_type: str, query: str, year: int | None = None) -> t
         items = [item for item in data.get("results", []) if _review_search_title_relevant(
             query, item.get(title_key), item.get(original_key),
         )]
+        query_key = _review_search_title_key(query)
+        exact = [item for item in items if any(
+            _review_search_title_key(item.get(key) or "") == query_key
+            for key in (title_key, original_key)
+        )]
+        if exact:
+            items = exact
+        if year:
+            date_key = "release_date" if media_type == "movie" else "first_air_date"
+            same_year = [item for item in items if (item.get(date_key) or "")[:4] == str(year)]
+            if same_year:
+                items = same_year
         return {media_type: _result_ids(items)}
     return await _kept_or_fetch(
         f"search/{media_type}", query, year, f"{_API_BASE}/search/{media_type}", params,
@@ -419,7 +439,7 @@ def as_search_item(media_type: str, row: dict) -> dict:
     }
 
 
-async def search_title(query: str, content_type: str) -> list[dict]:
+async def search_title(query: str, content_type: str, year: int | None = None) -> list[dict]:
     """Real TMDB search results for a query -- used by the year-review flow so
     a user picks from actual candidates (title/year/poster/tmdb_id/cast)
     instead of researching each one themselves. content_type is 'movie' or
@@ -451,7 +471,7 @@ async def search_title(query: str, content_type: str) -> list[dict]:
     is preserved within each group, only the exact/non-exact split is
     forced to the front."""
     endpoint = "movie" if content_type == "movie" else "tv"
-    local = await search_local(endpoint, query)
+    local = await search_local(endpoint, query, year)
     if local:
         await note_lookup(True)
         data = {"results": [as_search_item(endpoint, row) for row in local]}
@@ -460,7 +480,7 @@ async def search_title(query: str, content_type: str) -> list[dict]:
         # API key. Only the live fallback requires credentials.
         if not get_tmdb_api_key():
             raise ValueError("TMDB API key not configured")
-        data, _ = await tmdb_search(endpoint, query)
+        data, _ = await tmdb_search(endpoint, query, year)
 
     async def _build(item: dict) -> dict:
         date = item.get("release_date") if content_type == "movie" else item.get("first_air_date")
@@ -497,11 +517,30 @@ async def search_title(query: str, content_type: str) -> list[dict]:
     # "Girl Rising" for "10x10"). Hide results without any meaningful title
     # token in common before fetching detail/cast payloads.
     results = [item for item in results if relevant(item)]
-    query_lower = query.strip().casefold()
+    query_key = _review_search_title_key(query)
+
+    def exact_title(item: dict) -> bool:
+        title = item.get("title") if content_type == "movie" else item.get("name")
+        original = item.get("original_title") if content_type == "movie" else item.get("original_name")
+        return any(_review_search_title_key(value) == query_key for value in (title, original) if value)
+
+    exact_results = [item for item in results if exact_title(item)]
+    if exact_results:
+        if year:
+            year_key = "release_date" if content_type == "movie" else "first_air_date"
+            exact_same_year = [
+                item for item in exact_results
+                if (item.get(year_key) or "")[:4] == str(year)
+            ]
+            if exact_same_year:
+                exact_results = exact_same_year
+        # Once TMDB provides the exact title, near-title fuzzy matches add
+        # choice without useful evidence. Keep every exact-title release
+        # for the catalog year when available, and hide only fuzzy hits.
+        results = exact_results
 
     def _not_exact(item: dict) -> bool:
-        title = item.get("title") if content_type == "movie" else item.get("name")
-        return (title or "").strip().casefold() != query_lower
+        return not exact_title(item)
 
     results.sort(key=_not_exact)  # stable sort: exact matches (False) float ahead of fuzzy ones (True)
     candidates = results[:5]

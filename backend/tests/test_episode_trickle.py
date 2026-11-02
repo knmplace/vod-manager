@@ -40,6 +40,8 @@ def trickle_env(monkeypatch):
     monkeypatch.setattr(vod_importer, "_trickle_sleep", fake_sleep)
     monkeypatch.setattr(vod_importer, "_provider_backoff_remaining", lambda provider_id: 0.0)
     monkeypatch.setitem(vod_importer._ENRICH_PROGRESS, "running", False)
+    monkeypatch.setitem(vod_importer._EPISODE_DISCOVERY_PROGRESS, "running", False)
+    monkeypatch.setattr(vod_importer, "_EPISODE_DISCOVERY_CANCEL_REQUESTED", False)
     return {"calls": calls, "sleeps": sleeps}
 
 

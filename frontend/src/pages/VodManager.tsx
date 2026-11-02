@@ -1927,7 +1927,6 @@ interface EnrichProgress {
   movies_total: number; movies_done: number; movies_errors: number; movies_backoff_skipped: number
   series_total: number; series_done: number; series_errors: number; series_backoff_skipped: number
   series_sources_total: number; series_sources_done: number
-  progress_phase?: 'catalog' | 'series_episodes'
   started_at: number | null; finished_at: number | null
   cancelled?: boolean
   providers_backing_off: { provider_id: number; seconds_remaining: number }[]
@@ -1938,6 +1937,13 @@ interface TmdbEnrichProgress {
   running: boolean
   total: number; done: number; errors: number
   started_at: number | null; finished_at: number | null
+}
+interface EpisodeDiscoveryProgress {
+  running: boolean
+  series_sources_total: number; series_sources_done: number
+  series_errors: number; series_backoff_skipped: number
+  started_at: number | null; finished_at: number | null
+  cancelled?: boolean
 }
 
 interface Page<T> { items: T[]; total: number; limit: number; offset: number }
@@ -6898,6 +6904,11 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
     // handoff without requiring a browser refresh.
     refetchInterval: (query) => (query.state.data?.running ? 2000 : 10000),
   })
+  const episodeDiscoveryQuery = useQuery<EpisodeDiscoveryProgress>({
+    queryKey: ['vod-episode-discovery-progress'],
+    queryFn: () => api.get('/vod/episode-discovery/status/').then((r) => r.data),
+    refetchInterval: (query) => query.state.data?.running ? 2000 : 10000,
+  })
   const tmdbEnrichProgressQuery = useQuery<TmdbEnrichProgress>({
     queryKey: ['vod-tmdb-enrich-progress'],
     queryFn: () => api.get('/vod/enrich-tmdb/status/').then((r) => r.data),
@@ -7570,7 +7581,12 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
     mutationFn: () => api.post('/vod/enrich-all/cancel/'),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vod-enrich-progress'] }),
   })
+  const cancelEpisodeDiscovery = useMutation({
+    mutationFn: () => api.post('/vod/episode-discovery/cancel/'),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vod-episode-discovery-progress'] }),
+  })
   const enrichProgress = enrichProgressQuery.data
+  const episodeDiscovery = episodeDiscoveryQuery.data
   const tmdbEnrichProgress = tmdbEnrichProgressQuery.data
   const wasEnrichRunning = useRef(false)
   useEffect(() => {
@@ -10727,9 +10743,8 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
               // syncing) and read "101%" -- same Math.min(100, ...) guard
               // the playback-progress bar already uses elsewhere.
               const mPct = enrichProgress.movies_total ? Math.min(100, Math.round((enrichProgress.movies_done / enrichProgress.movies_total) * 100)) : 100
-              const episodePhase = enrichProgress.progress_phase === 'series_episodes'
-              const sDone = episodePhase ? enrichProgress.series_sources_done : enrichProgress.series_done
-              const sTotal = episodePhase ? enrichProgress.series_sources_total : enrichProgress.series_total
+              const sDone = enrichProgress.series_done
+              const sTotal = enrichProgress.series_total
               const sPct = sTotal ? Math.min(100, Math.round((sDone / sTotal) * 100)) : 100
               return (
                 <>
@@ -10742,7 +10757,7 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
                   </div>
                   <div>
                     <div className="flex items-center justify-between text-[11px] text-muted-foreground mb-0.5">
-                      <span>{episodePhase ? 'Episode sources' : 'Series'}</span>
+                      <span>Series</span>
                       <span className="tabular-nums">{sDone.toLocaleString()} / {sTotal.toLocaleString()}{enrichProgress.series_errors > 0 && ` (${enrichProgress.series_errors} errors)`}{enrichProgress.series_backoff_skipped > 0 && ` (${enrichProgress.series_backoff_skipped} paused for backoff)`}</span>
                     </div>
                     <div className="h-1.5 rounded-full bg-secondary overflow-hidden"><div className="h-full bg-primary" style={{ width: `${sPct}%` }} /></div>
@@ -10752,6 +10767,27 @@ export default function VodManager({ activeTab, setActiveTab, dvrSubTab, setDvrS
             })()}
           </div>
         )}
+      </SectionCard>
+      <SectionCard title="Episode discovery" description="Fetch missing provider episode listings on the separate trickle schedule. Catalog enrichment does not make these provider requests." icon={<List size={14} />}>
+        <div className="flex items-center gap-2">
+          {episodeDiscovery?.running ? (
+            <Button size="sm" variant="outline" disabled={cancelEpisodeDiscovery.isPending} onClick={() => cancelEpisodeDiscovery.mutate()}>
+              Cancel episode discovery
+            </Button>
+          ) : <span className="text-xs text-muted-foreground">Waiting for the next scheduled tick.</span>}
+          {episodeDiscovery?.finished_at && <span className="text-xs text-muted-foreground">{episodeDiscovery.cancelled ? 'Stopped' : 'Last tick complete'}</span>}
+        </div>
+        {episodeDiscovery && (episodeDiscovery.running || episodeDiscovery.finished_at) && (() => {
+          const pct = episodeDiscovery.series_sources_total
+            ? Math.min(100, Math.round(episodeDiscovery.series_sources_done / episodeDiscovery.series_sources_total * 100)) : 100
+          return <div className="mt-2 space-y-1">
+            <div className="flex justify-between text-[11px] text-muted-foreground">
+              <span>{episodeDiscovery.running ? 'Discovering provider episodes' : 'Last tick'}</span>
+              <span className="tabular-nums">{episodeDiscovery.series_sources_done.toLocaleString()} / {episodeDiscovery.series_sources_total.toLocaleString()} sources{episodeDiscovery.series_errors ? ` · ${episodeDiscovery.series_errors} errors` : ''}{episodeDiscovery.series_backoff_skipped ? ` · ${episodeDiscovery.series_backoff_skipped} paused` : ''}</span>
+            </div>
+            <div className="h-1.5 rounded-full bg-secondary overflow-hidden"><div className="h-full bg-cyan-500" style={{ width: `${pct}%` }} /></div>
+          </div>
+        })()}
       </SectionCard>
       <SectionCard title="Sync History" description="Review provider-run catalog changes and automatic merges." icon={<List size={14} />}>
         <div className="flex items-center gap-2">

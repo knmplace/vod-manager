@@ -152,6 +152,53 @@ def test_review_search_drops_unrelated_fuzzy_titles_before_fetching_details(stor
     assert "/movie/11" not in tmdb.calls
 
 
+def test_review_search_hides_fuzzy_candidates_when_exact_normalized_title_exists(store, tmdb):
+    tmdb.routes = {
+        "/search/movie": (200, {"results": [
+            {"id": 20, "title": "A Christmas Romance", "release_date": "1994-01-01"},
+            {"id": 21, "title": "A Carpenter Christmas Romance", "release_date": "2024-01-01"},
+            {"id": 22, "title": "A Christmas-Romance", "release_date": "2023-01-01"},
+        ]}),
+        "/movie/20": (200, _movie(20, "A Christmas Romance", "1994")),
+        "/movie/22": (200, _movie(22, "A Christmas-Romance", "2023")),
+    }
+
+    results = asyncio.run(tmdb_sync.search_title("A Christmas Romance", "movie"))
+
+    assert [result["name"] for result in results] == ["A Christmas Romance", "A Christmas-Romance"]
+    assert "/movie/21" not in tmdb.calls
+
+
+def test_review_search_keeps_fuzzy_candidates_when_no_exact_title_exists(store, tmdb):
+    tmdb.routes = {
+        "/search/movie": (200, {"results": [
+            {"id": 30, "title": "Dune: Part Two", "release_date": "2024-01-01"},
+        ]}),
+        "/movie/30": (200, _movie(30, "Dune: Part Two", "2024")),
+    }
+
+    results = asyncio.run(tmdb_sync.search_title("Dune", "movie"))
+
+    assert [result["name"] for result in results] == ["Dune: Part Two"]
+
+
+def test_review_search_prefers_exact_title_from_catalog_year(store, tmdb):
+    tmdb.routes = {
+        "/search/movie": (200, {"results": [
+            {"id": 41, "title": "3:10 to Yuma", "release_date": "2007-09-07"},
+            {"id": 42, "title": "3:10 to Yuma", "release_date": "1957-08-07"},
+            {"id": 43, "title": "Yuma", "release_date": "2007-01-01"},
+        ]}),
+        "/movie/41": (200, _movie(41, "3:10 to Yuma", "2007")),
+    }
+
+    results = asyncio.run(tmdb_sync.search_title("3:10 to Yuma", "movie", year=2007))
+
+    assert [(result["tmdb_id"], result["year"]) for result in results] == [("41", 2007)]
+    assert "/movie/42" not in tmdb.calls
+    assert "/movie/43" not in tmdb.calls
+
+
 # --- TMDB Library page lookup ---------------------------------------------------
 
 def test_library_page_lookup_answer_kept(store, tmdb):

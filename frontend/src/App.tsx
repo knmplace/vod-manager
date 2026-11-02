@@ -73,9 +73,24 @@ interface NavGroup {
   label: string
   items: NavItem[]
 }
+interface EnrichProgressStatus {
+  running: boolean
+  movies_done: number
+  movies_total: number
+  series_done: number
+  series_total: number
+}
+interface EpisodeDiscoveryStatus {
+  running: boolean
+  series_sources_done: number
+  series_sources_total: number
+  series_errors: number
+  cancelled?: boolean
+}
 interface RuntimeStatus {
   import: { running: boolean; queued?: boolean; queue_position?: number | null; provider_name: string | null; error: string | null }
   enrichment: { running: boolean; movies_done: number; movies_total: number; series_done: number; series_total: number }
+  episode_discovery?: EpisodeDiscoveryStatus
   tmdb: { running: boolean; done: number; total: number }
   bulk_ai: { running: boolean; done: number; total: number; jobs: number }
   catalog_workflow: {
@@ -202,8 +217,16 @@ export default function App() {
     enabled: authState === 'ready',
     refetchInterval: (query) => {
       const status = query.state.data
-      return status?.import.running || status?.enrichment.running || status?.tmdb.running || status?.bulk_ai.running ? 2000 : 10_000
+      return status?.import.running || status?.enrichment.running || status?.episode_discovery?.running || status?.tmdb.running || status?.bulk_ai.running ? 2000 : 10_000
     },
+    retry: false,
+  })
+  // Share catalog enrichment progress with the Curation page.
+  const enrichProgressQuery = useQuery<EnrichProgressStatus>({
+    queryKey: ['vod-enrich-progress'],
+    queryFn: () => api.get('/vod/enrich-all/status/').then((r) => r.data),
+    enabled: authState === 'ready',
+    refetchInterval: (query) => query.state.data?.running ? 2000 : 10_000,
     retry: false,
   })
   const metadataReviewCountsQuery = useQuery<Record<'movies' | 'series', { total: number; adult: number }>>({
@@ -221,6 +244,8 @@ export default function App() {
     retry: false,
   })
   const workflow = runtimeStatusQuery.data?.catalog_workflow
+  const enrichProgress = enrichProgressQuery.data
+  const episodeDiscovery = runtimeStatusQuery.data?.episode_discovery
   const reviewSummary = runtimeStatusQuery.data?.review_summary
   const workflowIsActive = workflow?.state === 'queued' || workflow?.state === 'running'
   const workflowIsReady = workflow?.state === 'ready'
@@ -248,8 +273,8 @@ export default function App() {
     : 0
   const activeWorkflowDetail = runtimeStatusQuery.data?.tmdb.running
     ? `TMDB identities ${runtimeStatusQuery.data.tmdb.done}/${runtimeStatusQuery.data.tmdb.total}`
-    : runtimeStatusQuery.data?.enrichment.running
-      ? `Details: ${runtimeStatusQuery.data.enrichment.movies_done}/${runtimeStatusQuery.data.enrichment.movies_total} movies · ${runtimeStatusQuery.data.enrichment.series_done}/${runtimeStatusQuery.data.enrichment.series_total} series`
+    : enrichProgress?.running
+      ? `Details: ${enrichProgress.movies_done}/${enrichProgress.movies_total} movies · ${enrichProgress.series_done}/${enrichProgress.series_total} series`
       : workflow?.phase ?? 'Working on catalog…'
   const navGroups = hideDvrTabQuery.data?.hidden ? NAV_GROUPS.filter((g) => g.label !== 'DVR') : NAV_GROUPS
   // KNM: 2026-10-14 -- upstream v0.3.00 failed_imports status, in the fork's own status panel.
@@ -378,7 +403,7 @@ export default function App() {
           ))}
           <div className="rounded-md border border-border bg-background/60 px-2.5 py-2 text-[11px] text-muted-foreground">
             <div className="flex items-center gap-1.5 font-semibold text-foreground">
-              <Activity size={13} className={workflowIsActive || runtimeStatusQuery.data?.bulk_ai.running ? 'text-primary animate-pulse' : workflowIsReady ? 'text-emerald-400' : workflowHasFailed ? 'text-destructive' : 'text-muted-foreground'} />
+              <Activity size={13} className={workflowIsActive || enrichProgress?.running || episodeDiscovery?.running || runtimeStatusQuery.data?.bulk_ai.running ? 'text-primary animate-pulse' : workflowIsReady ? 'text-emerald-400' : workflowHasFailed ? 'text-destructive' : 'text-muted-foreground'} />
               Catalog status
             </div>
             {runtimeStatusQuery.data?.import.queued ? (
@@ -389,8 +414,8 @@ export default function App() {
               <p className="mt-1">AI review: {runtimeStatusQuery.data.bulk_ai.done}/{runtimeStatusQuery.data.bulk_ai.total}</p>
             ) : runtimeStatusQuery.data?.tmdb.running ? (
               <p className="mt-1">TMDB: {runtimeStatusQuery.data.tmdb.done}/{runtimeStatusQuery.data.tmdb.total}</p>
-            ) : runtimeStatusQuery.data?.enrichment.running ? (
-              <p className="mt-1">Enriching: {runtimeStatusQuery.data.enrichment.movies_done}/{runtimeStatusQuery.data.enrichment.movies_total} movies · {runtimeStatusQuery.data.enrichment.series_done}/{runtimeStatusQuery.data.enrichment.series_total} series</p>
+            ) : enrichProgress?.running ? (
+              <p className="mt-1">Enriching: {enrichProgress.movies_done}/{enrichProgress.movies_total} movies · {enrichProgress.series_done}/{enrichProgress.series_total} series</p>
             ) : catalogFailed ? (
               // KNM: 2026-10-04 -- imports run in the background now; without this a failed one just fell back to "Idle" (upstream PR #31 review).
               <p className="mt-1 text-destructive">Import failed for {failedSummary}. Check {failedImports.length > 1 ? 'those providers' : 'that provider'} in Providers and retry.</p>
@@ -399,6 +424,7 @@ export default function App() {
                 {workflowIsReady ? 'Catalog ready for review' : workflowHasFailed ? (workflow?.error ?? 'Automatic catalog work needs attention.') : 'Idle'}
               </p>
             )}
+            {episodeDiscovery?.running && <p className="mt-1">Episode discovery: {episodeDiscovery.series_sources_done}/{episodeDiscovery.series_sources_total} sources</p>}
             <p className="mt-1 text-[10px] text-muted-foreground/80">App CPU: {runtimeStatusQuery.data?.process_cpu_percent == null ? 'sampling…' : `${runtimeStatusQuery.data.process_cpu_percent}%`}</p>
             <p className="mt-1 flex items-center gap-1 text-[10px] text-muted-foreground/80" title="Public address seen by external services">
               <Globe2 size={11} /> External IP: {externalIpQuery.isLoading ? 'checking…' : externalIpQuery.data?.ip ?? 'unavailable'}

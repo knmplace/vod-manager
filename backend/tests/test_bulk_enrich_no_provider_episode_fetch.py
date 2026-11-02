@@ -77,3 +77,27 @@ def test_trickle_lane_still_fetches_pending_source(xc_env, monkeypatch):
     monkeypatch.setattr(vod_importer, "_trickle_sleep", no_sleep)
     asyncio.run(vod_importer.run_episode_trickle_tick(batch_size=5, spacing_seconds=0))
     assert xc_env == ["555"]
+
+
+def test_trickle_skips_while_catalog_enrichment_owns_activity_lock(monkeypatch):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    listed = []
+
+    async def hold_catalog_run(*args, **kwargs):
+        entered.set()
+        await release.wait()
+
+    monkeypatch.setattr(vod_importer, "_bulk_enrich_all_inner", hold_catalog_run)
+    monkeypatch.setattr(vod_importer.vod_db, "list_providers", lambda: listed.append(True) or [XC_PROVIDER])
+
+    async def run():
+        catalog = asyncio.create_task(vod_importer.bulk_enrich_all())
+        await entered.wait()
+        result = await vod_importer.bulk_enrich_series_episodes(limit=5)
+        release.set()
+        await catalog
+        return result
+
+    assert asyncio.run(run()) == []
+    assert listed == []

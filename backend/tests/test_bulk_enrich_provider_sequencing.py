@@ -59,6 +59,10 @@ def test_episode_progress_counts_provider_sources_separately(monkeypatch):
         return {"fetched": True, "reason": None}
 
     monkeypatch.setattr(vod_importer, "enrich_series_source_only", fake_enrich_series)
+    vod_importer._EPISODE_DISCOVERY_PROGRESS.update({
+        "series_sources_total": 2, "series_sources_done": 0,
+        "series_errors": 0, "series_backoff_skipped": 0,
+    })
     vod_importer._ENRICH_PROGRESS.update({
         "series_sources_total": 2, "series_sources_done": 0,
         "series_total": 1, "series_done": 0,
@@ -78,7 +82,7 @@ def test_episode_progress_counts_provider_sources_separately(monkeypatch):
         )
 
     asyncio.run(run())
-    assert vod_importer._ENRICH_PROGRESS["series_sources_done"] == 2
+    assert vod_importer._EPISODE_DISCOVERY_PROGRESS["series_sources_done"] == 2
     assert vod_importer._ENRICH_PROGRESS["series_done"] == 0
 
 

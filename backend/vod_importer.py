@@ -21,6 +21,7 @@ import os
 import re
 import sqlite3
 import time
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 
 import httpx
@@ -92,9 +93,14 @@ def _current_lang_settings() -> dict:
     Single shared builder keeps XC, Plex, Emby/Jellyfin, and library imports in
     sync rather than letting a provider path re-derive the policy."""
     settings = config.get_import_language_exclusion()
+    excluded = {str(code).strip().upper() for code in settings["exclude_prefixes"] if str(code).strip()}
+    known = set(vod_db.get_known_source_language_codes())
+    known.update(excluded)
+    known.update(str(code).strip().upper() for code in config.get_enabled_languages() if str(code).strip())
     return {
-        "exclude_prefixes": [str(code).strip().upper() for code in settings["exclude_prefixes"] if str(code).strip()],
+        "exclude_prefixes": excluded,
         "exclude_non_latin": settings["exclude_non_latin"],
+        "known_language_codes": known,
     }
 
 
@@ -177,6 +183,19 @@ def _should_auto_archive(
     # titles in e.g. "Movies Spanish [ES]" were stored ES but gated as EN.
     code = vod_db._source_language(raw_name if raw_name is not None else name, provider_category_name)
     excluded_prefixes = {str(value).strip().upper() for value in lang.get("exclude_prefixes", ()) if str(value).strip()}
+    known_codes = lang.get("known_language_codes")
+    if known_codes is not None and code not in known_codes and code != vod_db.MULTI_LANGUAGE:
+        # First sighting is held out of this sync and persisted to the existing
+        # Import Language Exclusion control for explicit user review. Playback
+        # remains independently allowlisted by enabled playback languages.
+        excluded_prefixes.add(code)
+        lang["exclude_prefixes"] = excluded_prefixes
+        known_codes.add(code)
+        config.save_import_language_exclusion(sorted(excluded_prefixes), lang["exclude_non_latin"])
+        logger.warning(
+            "[import_language_policy] newly identified language %s was excluded from import; review Import Language Exclusion",
+            code,
+        )
     if code in excluded_prefixes:
         return True
     if lang["exclude_non_latin"] and vod_db._is_non_latin_name(raw_name if raw_name is not None else name):
@@ -2188,13 +2207,41 @@ async def bulk_enrich_series_episodes(
     request_spacing: float = 0, max_consecutive_failures: int | None = None,
     yield_to_import: bool = False,
 ) -> list[dict]:
+    """Run the low-priority provider episode trickle outside catalog enrichment."""
+    global _EPISODE_DISCOVERY_CANCEL_REQUESTED, _EPISODE_DISCOVERY_TASK
+    lock = _enrichment_activity_lock()
+    if lock.locked() or _ENRICH_PROGRESS["running"] or (_POST_IMPORT_ENRICH_TASK and not _POST_IMPORT_ENRICH_TASK.done()):
+        logger.info("[episode_trickle] skipped while catalog enrichment is active or queued")
+        return []
+    await lock.acquire()
+    task = asyncio.current_task()
+    _EPISODE_DISCOVERY_TASK = task
+    _EPISODE_DISCOVERY_CANCEL_REQUESTED = False
+    try:
+        return await _bulk_enrich_series_episodes_locked(
+            concurrency=concurrency, limit=limit, series_ids=series_ids,
+            request_spacing=request_spacing, max_consecutive_failures=max_consecutive_failures,
+            yield_to_import=yield_to_import,
+        )
+    finally:
+        if _EPISODE_DISCOVERY_TASK is task:
+            _EPISODE_DISCOVERY_TASK = None
+        lock.release()
+
+
+async def _bulk_enrich_series_episodes_locked(
+    concurrency: int = 6, limit: int | None = None, series_ids: set[int] | None = None,
+    request_spacing: float = 0, max_consecutive_failures: int | None = None,
+    yield_to_import: bool = False,
+) -> list[dict]:
     """Fetch provider detail only for pending series episode sources.
 
     TMDB remains authoritative for series metadata; the provider call exists
     only because XC series detail supplies episode listings and stream IDs.
+    This is the separate low-priority trickle, never catalog enrichment.
     """
-    if _ENRICH_PROGRESS["running"]:
-        logger.info("[vod_importer] episode enrichment already running; skipping overlapping request")
+    if _ENRICH_PROGRESS["running"] or (_POST_IMPORT_ENRICH_TASK and not _POST_IMPORT_ENRICH_TASK.done()):
+        logger.info("[episode_trickle] skipped while catalog enrichment is active or queued")
         return []
     providers = [p for p in await _to_thread(vod_db.list_providers)
                  if p.get("is_active", True)]
@@ -2214,11 +2261,8 @@ async def bulk_enrich_series_episodes(
     episode_before = await _to_thread(vod_db.get_series_episode_summaries, pending_series_ids)
     tmdb_before = await _to_thread(vod_db.get_series_tmdb_ids, pending_series_ids)
 
-    _ENRICH_PROGRESS.update({
-        "running": True, "movies_total": 0, "movies_done": 0,
-        "movies_errors": 0, "series_total": len(pending_series_ids), "series_done": 0,
-        "series_sources_total": source_count, "series_sources_done": 0,
-        "progress_phase": "series_episodes",
+    _EPISODE_DISCOVERY_PROGRESS.update({
+        "running": True, "series_sources_total": source_count, "series_sources_done": 0,
         "series_errors": 0, "series_backoff_skipped": 0,
         "started_at": time.time(), "finished_at": None,
         "cancelled": False, "providers_incomplete": [],
@@ -2239,7 +2283,7 @@ async def bulk_enrich_series_episodes(
         ))
         for provider, result in zip(selected, results):
             if not result[0]:
-                _ENRICH_PROGRESS["providers_incomplete"].append({
+                _EPISODE_DISCOVERY_PROGRESS["providers_incomplete"].append({
                     "provider_id": provider["id"],
                     "provider_name": provider.get("name"), "phase": "series",
                 })
@@ -2281,11 +2325,34 @@ async def bulk_enrich_series_episodes(
     finally:
         if not writer_task.done():
             writer_task.cancel()
-        _ENRICH_PROGRESS["running"] = False
-        _ENRICH_PROGRESS["finished_at"] = time.time()
+        _EPISODE_DISCOVERY_PROGRESS["running"] = False
+        _EPISODE_DISCOVERY_PROGRESS["finished_at"] = time.time()
+        _EPISODE_DISCOVERY_PROGRESS["cancelled"] = _EPISODE_DISCOVERY_CANCEL_REQUESTED
 
 
 async def _post_import_enrichment(
+    *, track_catalog_workflow: bool = True,
+    changed_movie_ids: set[int] | None = None,
+    changed_series_ids: set[int] | None = None,
+    workflow_run_id: int | None = None,
+) -> None:
+    """Give import-time catalog work priority over the provider trickle."""
+    lock = _enrichment_activity_lock()
+    if _EPISODE_DISCOVERY_TASK is not None:
+        cancel_episode_discovery()
+    await lock.acquire()
+    try:
+        await _post_import_enrichment_locked(
+            track_catalog_workflow=track_catalog_workflow,
+            changed_movie_ids=changed_movie_ids,
+            changed_series_ids=changed_series_ids,
+            workflow_run_id=workflow_run_id,
+        )
+    finally:
+        lock.release()
+
+
+async def _post_import_enrichment_locked(
     *, track_catalog_workflow: bool = True,
     changed_movie_ids: set[int] | None = None,
     changed_series_ids: set[int] | None = None,
@@ -2382,10 +2449,15 @@ async def _background_tmdb_enrichment() -> None:
     Episode discovery is not done here: run_episode_trickle_tick paces it on
     its own schedule, and a show opened by a user uses the on-demand path.
     """
-    if await _to_thread(vod_db.count_movies_pending_tmdb_enrichment):
-        await bulk_enrich_tmdb_movies(concurrency=2, limit=_TMDB_BACKGROUND_BATCH)
-    if await _to_thread(vod_db.count_series_pending_tmdb_metadata_enrichment):
-        await bulk_enrich_tmdb_series_metadata(concurrency=2, limit=_TMDB_BACKGROUND_BATCH)
+    lock = _enrichment_activity_lock()
+    await lock.acquire()
+    try:
+        if await _to_thread(vod_db.count_movies_pending_tmdb_enrichment):
+            await bulk_enrich_tmdb_movies(concurrency=2, limit=_TMDB_BACKGROUND_BATCH)
+        if await _to_thread(vod_db.count_series_pending_tmdb_metadata_enrichment):
+            await bulk_enrich_tmdb_series_metadata(concurrency=2, limit=_TMDB_BACKGROUND_BATCH)
+    finally:
+        lock.release()
 
 
 # KNM: 2026-10-03 -- indirection so tests can observe the trickle's pacing.
@@ -2439,6 +2511,44 @@ _ENRICH_PROGRESS: dict = {
     "providers_incomplete": [],
 }
 _ENRICH_CANCEL_REQUESTED = False
+_EPISODE_DISCOVERY_PROGRESS: dict = {
+    "running": False,
+    "series_sources_total": 0, "series_sources_done": 0,
+    "series_errors": 0, "series_backoff_skipped": 0,
+    "started_at": None, "finished_at": None, "cancelled": False,
+    "providers_incomplete": [],
+}
+_EPISODE_DISCOVERY_CANCEL_REQUESTED = False
+_EPISODE_DISCOVERY_TASK: asyncio.Task | None = None
+# Bulk catalog enrichment and the scheduled episode trickle share a single
+# activity lock. The trickle is lower priority: it skips if enrichment owns
+# the lock, and an enrichment request cancels a running trickle after its
+# current provider source finishes.
+_ENRICHMENT_ACTIVITY_LOCKS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _enrichment_activity_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _ENRICHMENT_ACTIVITY_LOCKS.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _ENRICHMENT_ACTIVITY_LOCKS[loop] = lock
+    return lock
+
+
+def get_episode_discovery_progress() -> dict:
+    return dict(_EPISODE_DISCOVERY_PROGRESS)
+
+
+def cancel_episode_discovery() -> bool:
+    global _EPISODE_DISCOVERY_CANCEL_REQUESTED
+    if not _EPISODE_DISCOVERY_PROGRESS["running"] and _EPISODE_DISCOVERY_TASK is None:
+        return False
+    _EPISODE_DISCOVERY_CANCEL_REQUESTED = True
+    logger.info("[episode_trickle] cancellation requested")
+    return True
+
+
 # KNM: 2026-10-11 -- bulk enrichment (scheduled or manual) never asks a
 # provider for episodes; the episode trickle and on-open/play own that.
 _BULK_NO_PROVIDER_FETCH: contextvars.ContextVar[bool] = contextvars.ContextVar(
@@ -2616,7 +2726,10 @@ async def _enrich_one(
             # Doesn't touch last_enriched_at, so this item stays eligible
             # and gets picked up again on the next bulk-enrich run (or later
             # in this same run, once the provider's backoff expires).
-            _ENRICH_PROGRESS[f"{prefix}_backoff_skipped"] += 1
+            if progress_mode == "source":
+                _EPISODE_DISCOVERY_PROGRESS["series_backoff_skipped"] += 1
+            else:
+                _ENRICH_PROGRESS[f"{prefix}_backoff_skipped"] += 1
             return _BACKOFF_SKIPPED
         except Exception as exc:
             # httpx.HTTPStatusError/ConnectError's own str() embeds the full
@@ -2635,7 +2748,10 @@ async def _enrich_one(
             # ReadTimeout all logged blank).
             detail = _redact_upstream_url(str(exc)) or type(exc).__name__
             logger.warning("[vod_importer] bulk enrich %s=%s failed: %s", kind, item_id, detail)
-            _ENRICH_PROGRESS[f"{prefix}_errors"] += 1
+            if progress_mode == "source":
+                _EPISODE_DISCOVERY_PROGRESS["series_errors"] += 1
+            else:
+                _ENRICH_PROGRESS[f"{prefix}_errors"] += 1
             return False
         finally:
             # Only count each item id once toward *_done, even if this same
@@ -2646,7 +2762,7 @@ async def _enrich_one(
                 source_key = source_id if source_id is not None else item_id
                 if source_key not in _ENRICH_DONE_SOURCE_IDS:
                     _ENRICH_DONE_SOURCE_IDS.add(source_key)
-                    _ENRICH_PROGRESS["series_sources_done"] += 1
+                    _EPISODE_DISCOVERY_PROGRESS["series_sources_done"] += 1
             else:
                 done_ids = _ENRICH_DONE_IDS[kind]
                 if item_id not in done_ids:
@@ -2821,7 +2937,7 @@ async def _run_provider_series_phase(
     async def _worker() -> None:
         nonlocal ok, consecutive_failures, started
         while True:
-            if _ENRICH_CANCEL_REQUESTED:
+            if _EPISODE_DISCOVERY_CANCEL_REQUESTED:
                 return
             if max_consecutive_failures and consecutive_failures >= max_consecutive_failures:
                 return
@@ -2835,6 +2951,10 @@ async def _run_provider_series_phase(
                 return
             if request_spacing and started:
                 await _trickle_sleep(request_spacing)
+            if episodes_only and _EPISODE_DISCOVERY_CANCEL_REQUESTED:
+                return
+            if yield_to_import and _XC_IMPORT_LOCK.locked():
+                return
             started = True
             try:
                 if pending_sources is not None:
@@ -2978,6 +3098,10 @@ async def bulk_enrich_all(concurrency: int = 8, force: bool = False, pending_onl
     if _ENRICH_PROGRESS["running"] or (_BACKGROUND_TMDB_TASK and not _BACKGROUND_TMDB_TASK.done()):
         logger.info("[vod_importer] enrichment already running; skipping overlapping catalog run")
         return
+    lock = _enrichment_activity_lock()
+    if _EPISODE_DISCOVERY_TASK is not None:
+        cancel_episode_discovery()
+    await lock.acquire()
     _ENRICH_CANCEL_REQUESTED = False
     no_fetch_token = _BULK_NO_PROVIDER_FETCH.set(True)
     pool_token = _in_bulk_enrich.set(True)
@@ -2988,6 +3112,7 @@ async def bulk_enrich_all(concurrency: int = 8, force: bool = False, pending_onl
         _BULK_CHANGED_IDS.reset(changed_token)
         _in_bulk_enrich.reset(pool_token)
         _BULK_NO_PROVIDER_FETCH.reset(no_fetch_token)
+        lock.release()
 
 
 async def _bulk_enrich_all_inner(concurrency: int, force: bool, pending_only: bool) -> None:

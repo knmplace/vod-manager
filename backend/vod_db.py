@@ -5169,6 +5169,15 @@ def _dedup_name_key(name: str) -> str:
 # a silent data change.
 _TRAILING_YEAR_RE = re.compile(r"\s*\(\d{4}\)\s*$")
 
+# Strip explicit quality labels from the default TMDB lookup only. Requiring
+# a separator keeps a real title such as "4K Collection" intact.
+_TMDB_RESOLUTION_TOKENS = r"(?:8k|4k|uhd|qhd|fhd|hd|2160p|1440p|1080p|720p|576p|480p)"
+_TMDB_RESOLUTION_PREFIX_RE = re.compile(
+    rf"^\s*(?:\[\s*{_TMDB_RESOLUTION_TOKENS}\s*\]\s*(?::|\||-|–|—)?\s*"
+    rf"|{_TMDB_RESOLUTION_TOKENS}\s*(?::|\||-|–|—)\s*)",
+    re.IGNORECASE,
+)
+
 
 def _base_name_for_dedup(name: str) -> str:
     return _normalize_title_for_dedup(_TRAILING_YEAR_RE.sub("", name))
@@ -5208,11 +5217,17 @@ def tmdb_review_search_query(name: str | None, q: str | None = None) -> str:
     """Default TMDB search text for review/AI flows.
 
     KNM: 2026-10-03 a reviewer's own q is used verbatim; otherwise strip one
-    trailing "(US)" and one "(YYYY)" tag, which TMDB search fails to match.
+    trailing "(US)" and one "(YYYY)" tag, then a leading quality label such
+    as "4K:". These provider tags make TMDB title search fail to match.
     """
     if q and q.strip():
         return q.strip()
-    return _import_match_key_name(name or "") or (name or "").strip()
+    cleaned = _import_match_key_name(name or "") or (name or "").strip()
+    quality_language = _QUALITY_LANG_DASH_RE.match(cleaned)
+    if quality_language and quality_language.group(2).upper() in _KNOWN_LANGUAGE_CODES:
+        cleaned = cleaned[quality_language.end():].strip()
+    cleaned = _TMDB_RESOLUTION_PREFIX_RE.sub("", cleaned, count=1).strip()
+    return cleaned or (name or "").strip()
 
 
 def _duplicate_ignore_signature(item_ids: list[int]) -> str:
@@ -15927,6 +15942,21 @@ def list_playback_language_inventory() -> list[dict]:
                 entry[count_key] = int(row["count"])
         conn.close()
         return sorted(({"code": code, **entry} for code, entry in counts.items()), key=lambda item: item["code"])
+    finally:
+        conn.close()
+
+
+def get_known_source_language_codes() -> set[str]:
+    """Return distinct language codes already stored on provider sources."""
+    conn = _connect()
+    try:
+        codes: set[str] = set()
+        for table in ("movie_sources", "series_sources", "episode_sources"):
+            rows = conn.execute(
+                f"SELECT DISTINCT language FROM {table} WHERE language IS NOT NULL AND language != ''"
+            ).fetchall()
+            codes.update(str(row[0]).strip().upper() for row in rows if row[0])
+        return codes
     finally:
         conn.close()
 

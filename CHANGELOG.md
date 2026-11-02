@@ -35,6 +35,24 @@ included.
 | Episode list preloading | [#74](https://github.com/jstevenscl/vod-manager/pull/74) | Open / under review |
 | Metadata identity matching | [#77](https://github.com/jstevenscl/vod-manager/pull/77) | ✅🔄 Open / under review |
 
+## 2026-11-02 (TMDB review title matching)
+
+- Default TMDB review searches now remove recognized leading resolution labels
+  from provider titles while leaving catalog display names and manually entered
+  search text unchanged. When TMDB returns an exact normalized title match,
+  nearby fuzzy titles are hidden; if no exact match exists, relevant fuzzy
+  results remain available for alternate-title searches. If exact releases
+  span multiple years, a matching catalog year narrows the selectable result.
+- Scheduled/import catalog enrichment remains provider-free. The independent
+  episode trickle now yields to import and catalog enrichment, reports its own
+  counters and cancel action, and no longer appears as Rich Metadata progress.
+  Episode rows continue to be written locally in one batch per provider source.
+- A first-seen provider language code is skipped from that sync and added to
+  Import Language Exclusion for review. Playback retains its separate enabled
+  language allowlist. Removed the ambiguous slow-transfer log line; resume
+  behavior is unchanged.
+- Fork image build and deployment status will be recorded after validation.
+
 ## 2026-11-01 (Metadata identity matching)
 
 - ✅ Added an Existing Matches tab to Metadata Review for movies and TV shows.

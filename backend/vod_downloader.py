@@ -796,8 +796,6 @@ async def _download_http(url: str, part: Path, user_agent: str | None, ctx: _Ctx
                                 if rate is not None:
                                     peak = max(peak, rate)
                                     if rate < max(_SLOW_FLOOR_BPS, _SLOW_FRACTION * peak):
-                                        logger.info("[download] job=%s slow (%.1f MB/s, best so far %.1f) on server %s; reconnecting (%d/%d)",
-                                                    ctx.job_id, rate / 1e6, peak / 1e6, sid, reconnects + 1, _SLOW_MAX_RECONNECTS)
                                         slow = True
                                         break
                             if len(buf) >= _WRITE_CHUNK:
