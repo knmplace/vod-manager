@@ -35,6 +35,27 @@ included.
 | Episode list preloading | [#74](https://github.com/jstevenscl/vod-manager/pull/74) | Open / under review |
 | Metadata identity matching | [#77](https://github.com/jstevenscl/vod-manager/pull/77) | ✅🔄 Open / under review |
 
+## 2026-11-05 (Language review safety and auto-clean)
+
+- Hiding an unwanted-language feed now hides only that feed. A title with
+  another wanted-language feed stays playable (for example, a Spanish feed of
+  MASH is hidden while the English feed keeps serving).
+- Language decisions you approve are now kept through provider re-syncs,
+  enrichment and the language recompute tool instead of being reset.
+- The audio check now also reads the end of a file when the start has no
+  usable audio tags, and marks files it cannot read as unreadable instead of
+  unknown.
+- Label and audio language codes that mean the same language (KR/KO, JP/JA,
+  FRE/FR and others) now match, so they no longer show as mismatches.
+- New **Auto-clean unwanted-language feeds** panel on the Language Mismatch
+  Report. It is **off by default**. When turned on, it hides a feed only when
+  the audio check, TMDB's original language and TMDB's spoken languages all
+  say it is not a wanted language, and another wanted feed keeps the title
+  playable. It never touches a feed someone already decided. It runs small
+  batches through the day, pauses while imports, syncs or enrichment run,
+  waits a cooldown before resuming, and logs every change with a Revert
+  button. Preview shows what it would hide before you turn it on.
+
 ## 2026-11-02 (TMDB review title matching)
 
 - Default TMDB review searches now remove recognized leading resolution labels
