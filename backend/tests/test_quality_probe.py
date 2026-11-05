@@ -420,7 +420,10 @@ def test_language_audit_stats_group_recent_error_codes_by_provider(db):
     assert codes[("error-code-provider", "CAPACITY")] == 1
 
 
-def test_language_mismatch_report_approval_updates_tag_and_archives_excluded_source(db, tmp_path):
+@pytest.mark.parametrize("observed", [["HI"], ["ES", "HI"], ["FR", "HI", "RU"]])
+def test_language_mismatch_report_approval_archives_without_changing_unwanted_tag(db, tmp_path, monkeypatch, observed):
+    monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "wanted-languages.json")
+    config.save_enabled_languages(["EN"])
     pid = db.upsert_provider("report-language", "", "", "", provider_type="library")
     mid = db.upsert_movie("Report Hindi Movie", 2026)
     path = tmp_path / "report.mkv"
@@ -430,18 +433,41 @@ def test_language_mismatch_report_approval_updates_tag_and_archives_excluded_sou
     sid = conn.execute("SELECT id FROM movie_sources WHERE movie_id=?", (mid,)).fetchone()["id"]
     conn.execute("UPDATE movie_sources SET language='EN' WHERE id=?", (sid,))
     conn.commit(); conn.close()
-    db.set_source_language_probe("movie", sid, ["HI"], "observed", "local_embedded_audio_tags", "high")
+    db.set_source_language_probe("movie", sid, observed, "observed", "local_embedded_audio_tags", "high")
 
     report = db.list_language_mismatches()
     row = next(r for r in report["results"] if r["source_id"] == sid)
-    assert row["proposed_language"] == "HI" and row["proposed_archive"] is True
+    assert row["safe_to_apply"] is True
+    assert row["proposed_language"] is None and row["proposed_archive"] is True
 
     result = db.decide_language_mismatch("movie", sid, "approved")
-    assert result["action"] == "language_updated_and_archived"
+    assert result["action"] == "parent_archived"
     source = db.get_language_probe_source("movie", sid)
-    assert source["language"] == "HI" and source["language_probe_decision"] == "approved"
+    assert source["language"] == "EN" and source["language_probe_decision"] == "approved"
     assert db.get_movie(mid)["review_excluded"] == 1
     assert not db.list_language_mismatches()["results"]
+
+
+def test_language_mismatch_with_any_wanted_observation_stays_manual_review(db, tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "wanted-language-mixed.json")
+    config.save_enabled_languages(["EN"])
+    pid = db.upsert_provider("mixed-report-language", "", "", "", provider_type="library")
+    mid = db.upsert_movie("Mixed Language Movie", 2026)
+    db.add_movie_source(mid, pid, "mixed-report", "mkv")
+    conn = db._connect()
+    try:
+        sid = conn.execute("SELECT id FROM movie_sources WHERE movie_id=?", (mid,)).fetchone()["id"]
+        conn.execute("UPDATE movie_sources SET language='ES' WHERE id=?", (sid,))
+        conn.commit()
+    finally:
+        conn.close()
+    db.set_source_language_probe("movie", sid, ["DE", "EN"], "observed", "local_embedded_audio_tags", "high")
+
+    row = next(result for result in db.list_language_mismatches()["results"] if result["source_id"] == sid)
+    assert row["safe_to_apply"] is False
+    assert row["proposed_archive"] is False
+    with pytest.raises(ValueError, match="choose one of the observed languages"):
+        db.decide_language_mismatch("movie", sid, "approved")
 
 
 def test_unknown_language_is_separate_and_never_archive_approvable(db, tmp_path):
