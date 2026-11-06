@@ -69,6 +69,8 @@ included.
 - The Re-validate and Auto-clean panels now use brighter, larger text.
 - Fixed: the **Re-validate** and auto-clean **Turn on** buttons did nothing when
   clicked, because the Language Mismatch page never showed their confirmation box.
+- Language monitoring controls now show suggested pacing settings (Light, Balanced,
+  Steady, Fast catch-up, Overnight backlog) with a Use button that fills in the fields.
 - Fixed: hiding one feed no longer hides the whole title when the title's
   other feed has no language label (an unlabelled feed counts as English).
 
