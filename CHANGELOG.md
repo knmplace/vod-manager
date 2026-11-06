@@ -81,7 +81,10 @@ included.
 - Fixed: **Approve all proposed**, **Approve selected**, **Keep selected** and
   **Keep all** on the Language Mismatch Report now ask once, then show a
   progress bar ("Applying 37 of 394…") and one summary when finished, instead
-  of a pop-up for every row.
+  of a pop-up for every row. The bulk confirmation and summary now use the same
+  wording as the single-row Archive parent button (for example "Archive 4
+  titles?" and "4 parents archived; source language set to the observed
+  language."), and counts of zero are left out.
 - Fixed: the Language Mismatch Report's archive wording now matches what it
   does. Approving an archive sets the feed to the language the audio check
   found (for example PL — Polish), which hides it. The title is then archived
