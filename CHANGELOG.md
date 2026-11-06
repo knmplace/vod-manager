@@ -73,6 +73,9 @@ included.
   Steady, Fast catch-up, Overnight backlog) with a Use button that fills in the fields.
 - The Auto-clean panel now explains, in plain language, how it works and the
   allowed and recommended range for each setting.
+- The auto-clean log now shows the movie or episode name, the provider, a readable
+  date and time, and the language change, instead of an internal ID and a raw timestamp.
+- Audio tagged "enm" (a common mistag) is now treated as English.
 - Fixed: hiding one feed no longer hides the whole title when the title's
   other feed has no language label (an unlabelled feed counts as English).
 

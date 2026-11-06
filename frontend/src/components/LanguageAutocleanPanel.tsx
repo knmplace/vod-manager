@@ -14,7 +14,7 @@ type Settings = {
 }
 type Candidate = { kind: string; source_id: number; title: string; current_language: string | null; observed_languages: string[]; tmdb_original_language: string | null; tmdb_spoken_languages: string[] }
 type Preview = { candidates: Candidate[]; skipped: Record<string, number> }
-type LogRow = { id: number; kind: string; source_id: number; previous_language: string | null; new_language: string | null; applied_at: string; reverted_at: string | null }
+type LogRow = { id: number; kind: string; source_id: number; previous_language: string | null; new_language: string | null; applied_at: string; applied_at_iso?: string; title?: string | null; provider_name?: string | null; reverted_at: string | null }
 
 const SKIP_LABELS: Record<string, string> = {
   probe_has_wanted: 'audio includes a wanted language',
@@ -91,7 +91,8 @@ export default function LanguageAutocleanPanel() {
       {!!log.data?.results.length && (
         <div className="mt-3 text-sm">
           <p className="font-medium">Recent auto-clean changes</p>
-          <div className="mt-1 max-h-64 overflow-auto border border-border rounded"><table className="w-full text-sm"><thead><tr className="text-left text-foreground"><th className="px-2 py-1">When</th><th className="px-2 py-1">Feed</th><th className="px-2 py-1">Label</th><th className="px-2 py-1"></th></tr></thead><tbody>{log.data.results.map((row) => <tr key={row.id} className="border-t border-border"><td className="px-2 py-1">{row.applied_at}</td><td className="px-2 py-1">{row.kind} #{row.source_id}</td><td className="px-2 py-1">{row.previous_language ?? 'EN'} → {row.new_language}</td><td className="px-2 py-1">{row.reverted_at ? <span className="text-foreground">reverted</span> : <button className="inline-flex items-center gap-1 border border-border rounded px-1.5 py-0.5 hover:bg-accent disabled:opacity-50" disabled={revert.isPending} onClick={() => revert.mutate(row.id)}><Undo2 size={11} /> Revert</button>}</td></tr>)}</tbody></table></div>
+          <p className="text-sm text-foreground">Each row is one feed that was hidden because its audio is in an unwanted language. "Language change" shows the old label and the language the audio check found. Revert puts the feed back the way it was.</p>
+          <div className="mt-1 max-h-64 overflow-auto border border-border rounded"><table className="w-full text-sm"><thead><tr className="text-left text-foreground"><th className="px-2 py-1">When</th><th className="px-2 py-1">Title</th><th className="px-2 py-1">Provider</th><th className="px-2 py-1">Language change</th><th className="px-2 py-1"></th></tr></thead><tbody>{log.data.results.map((row) => <tr key={row.id} className="border-t border-border"><td className="px-2 py-1 whitespace-nowrap">{new Date(row.applied_at_iso ?? Number(row.applied_at) * 1000).toLocaleString()}</td><td className="px-2 py-1">{row.title ?? `${row.kind} #${row.source_id}`}<span className="ml-1">({row.kind === 'movie' ? 'Movie' : 'Episode'})</span></td><td className="px-2 py-1">{row.provider_name ?? '—'}</td><td className="px-2 py-1 whitespace-nowrap">{row.previous_language ?? 'EN'} → {row.new_language} (hidden)</td><td className="px-2 py-1">{row.reverted_at ? <span className="text-foreground">reverted</span> : <button className="inline-flex items-center gap-1 border border-border rounded px-1.5 py-0.5 hover:bg-accent disabled:opacity-50" disabled={revert.isPending} onClick={() => revert.mutate(row.id)}><Undo2 size={11} /> Revert</button>}</td></tr>)}</tbody></table></div>
         </div>
       )}
     </details>
