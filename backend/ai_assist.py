@@ -456,7 +456,12 @@ async def suggest_year_review_match(
         f"- year={imported.get('year') if imported.get('year') is not None else 'missing'}\n"
         f"- tmdb_id={imported.get('tmdb_id') or 'missing'}\n"
         + (f"- provider_category={provider_category_name}\n" if provider_category_name else "")
-        + f"Provider/source details:\n{source_listing}\n\n"
+        + f"Provider/source details:\n{source_listing}\n"
+        # KNM: 2026-11-06 - the provider's own title/year/cast, so a pick from another year is caught.
+        + (f"- provider says: name={pd.get('name')}, year={pd.get('year') or '?'}, "
+           f"director={pd.get('director') or '?'}, cast={', '.join(pd.get('cast') or []) or '?'}\n"
+           if (pd := imported.get('provider_details')) else "")
+        + "\n"
         f"Existing catalog candidates (these may be the same item already represented in the DB):\n"
         f"{existing_listing}\n\n"
         f"TMDB search candidates:\n{listing}\n\n"

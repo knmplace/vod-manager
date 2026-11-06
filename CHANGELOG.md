@@ -35,6 +35,18 @@ included.
 | Episode list preloading | [#74](https://github.com/jstevenscl/vod-manager/pull/74) | Open / under review |
 | Metadata identity matching | [#77](https://github.com/jstevenscl/vod-manager/pull/77) | ✅🔄 Open / under review |
 
+## 2026-11-06 (More poster choices)
+
+- **Missing Artwork and Needs Review now offer several posters to pick from.** When the
+  title search finds fewer than 4 posters, the search widens: the provider's own title and
+  year, then titles the provider's cast appear in around that year, then a looser title
+  search. Up to 8 choices, posters first.
+- **The provider's own poster is offered last** on Missing Artwork, marked "From your provider".
+- **Picking a poster from a different year now asks first.** "Keep <our year>" saves only the
+  poster; "Change year to <picked year>" also links the title to the pick. Before, the
+  picked year silently replaced ours.
+- **Ask AI now sees the provider's year and cast**, so it can spot a match from the wrong year.
+
 ## 2026-11-06 (Fix posters button)
 
 - ✅ **Fix posters now** button on Artwork Review and the Missing Artwork window.

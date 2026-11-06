@@ -439,7 +439,8 @@ def as_search_item(media_type: str, row: dict) -> dict:
     }
 
 
-async def search_title(query: str, content_type: str, year: int | None = None) -> list[dict]:
+async def search_title(query: str, content_type: str, year: int | None = None, *,
+                       exact_only: bool = True, limit: int = 5) -> list[dict]:
     """Real TMDB search results for a query -- used by the year-review flow so
     a user picks from actual candidates (title/year/poster/tmdb_id/cast)
     instead of researching each one themselves. content_type is 'movie' or
@@ -471,7 +472,9 @@ async def search_title(query: str, content_type: str, year: int | None = None) -
     is preserved within each group, only the exact/non-exact split is
     forced to the front."""
     endpoint = "movie" if content_type == "movie" else "tv"
-    local = await search_local(endpoint, query, year)
+    # KNM: 2026-11-06 - a loose search asks TMDB itself when it can: the local store
+    # often holds only the exact-title hit.
+    local = await search_local(endpoint, query, year) if exact_only or not get_tmdb_api_key() else None
     if local:
         await note_lookup(True)
         data = {"results": [as_search_item(endpoint, row) for row in local]}
@@ -483,28 +486,7 @@ async def search_title(query: str, content_type: str, year: int | None = None) -
         data, _ = await tmdb_search(endpoint, query, year)
 
     async def _build(item: dict) -> dict:
-        date = item.get("release_date") if content_type == "movie" else item.get("first_air_date")
-        year = int(date[:4]) if date and len(date) >= 4 and date[:4].isdigit() else None
-        out = {
-            "tmdb_id": str(item["id"]),
-            "name": item.get("title") if content_type == "movie" else item.get("name"),
-            "year": year,
-            "poster_url": f"https://image.tmdb.org/t/p/w185{item['poster_path']}" if item.get("poster_path") else None,
-            "overview": item.get("overview") or None,
-            "vote_average": item.get("vote_average"),
-            "season_count": None,
-            "episode_count": None,
-            "cast": [],
-        }
-        try:
-            dd = await fetch_title_payload(endpoint, item["id"]) or {}
-            if content_type == "series":
-                out["season_count"] = dd.get("number_of_seasons")
-                out["episode_count"] = dd.get("number_of_episodes")
-            out["cast"] = [c["name"] for c in dd.get("credits", {}).get("cast", [])[:4]]
-        except Exception as exc:
-            logger.warning("[tmdb_sync] failed to fetch detail for tmdb_id=%s: %s", item["id"], _redact(exc))
-        return out
+        return await _build_candidate(content_type, item)
 
     results = data.get("results", [])
 
@@ -525,7 +507,9 @@ async def search_title(query: str, content_type: str, year: int | None = None) -
         return any(_review_search_title_key(value) == query_key for value in (title, original) if value)
 
     exact_results = [item for item in results if exact_title(item)]
-    if exact_results:
+    # KNM: 2026-11-06 - exact_only=False keeps near-title hits so the poster picker
+    # can show more than one choice (artwork_candidates.gather).
+    if exact_results and exact_only:
         if year:
             year_key = "release_date" if content_type == "movie" else "first_air_date"
             exact_same_year = [
@@ -543,8 +527,68 @@ async def search_title(query: str, content_type: str, year: int | None = None) -
         return not exact_title(item)
 
     results.sort(key=_not_exact)  # stable sort: exact matches (False) float ahead of fuzzy ones (True)
-    candidates = results[:5]
+    candidates = results[:limit]
     return list(await asyncio.gather(*[_build(item) for item in candidates]))
+
+
+async def _build_candidate(content_type: str, item: dict) -> dict:
+    endpoint = "movie" if content_type == "movie" else "tv"
+    date = item.get("release_date") if content_type == "movie" else item.get("first_air_date")
+    year = int(date[:4]) if date and len(date) >= 4 and date[:4].isdigit() else None
+    out = {
+        "tmdb_id": str(item["id"]),
+        "name": item.get("title") if content_type == "movie" else item.get("name"),
+        "year": year,
+        "poster_url": f"https://image.tmdb.org/t/p/w185{item['poster_path']}" if item.get("poster_path") else None,
+        "overview": item.get("overview") or None,
+        "vote_average": item.get("vote_average"),
+        "season_count": None,
+        "episode_count": None,
+        "cast": [],
+    }
+    try:
+        dd = await fetch_title_payload(endpoint, item["id"]) or {}
+        if content_type == "series":
+            out["season_count"] = dd.get("number_of_seasons")
+            out["episode_count"] = dd.get("number_of_episodes")
+        out["cast"] = [c["name"] for c in dd.get("credits", {}).get("cast", [])[:4]]
+    except Exception as exc:
+        logger.warning("[tmdb_sync] failed to fetch detail for tmdb_id=%s: %s", item["id"], _redact(exc))
+    return out
+
+
+async def cast_titles(content_type: str, names: list[str], year: int | None) -> list[dict]:
+    """KNM: 2026-11-06 - titles the given cast members share near a year (+/-1),
+    most shared first. Finds a film TMDB's title search misses (provider title or
+    year differs). Answers are kept like any other TMDB search."""
+    key = get_tmdb_api_key()
+    names = [n for n in names if n]
+    if not key or not names:
+        return []
+    endpoint = "movie" if content_type == "movie" else "tv"
+    date_key = "release_date" if endpoint == "movie" else "first_air_date"
+    hits: dict[int, dict] = {}
+    counts: dict[int, int] = {}
+    for name in names:
+        found, _ = await _kept_or_fetch("search/person", name, None, f"{_API_BASE}/search/person",
+                                        {"api_key": key, "query": name}, lambda d: {})
+        people = found.get("results") or []
+        if not people:
+            continue
+        pid = people[0]["id"]
+        credits, _ = await _kept_or_fetch(f"person/{endpoint}_credits", str(pid), None,
+                                          f"{_API_BASE}/person/{pid}/{endpoint}_credits", {"api_key": key},
+                                          lambda d: {})
+        for item in {c["id"]: c for c in credits.get("cast") or [] if c.get("id")}.values():
+            y = (item.get(date_key) or "")[:4]
+            if year and not (y.isdigit() and abs(int(y) - int(year)) <= 1):
+                continue
+            hits[item["id"]] = item
+            counts[item["id"]] = counts.get(item["id"], 0) + 1
+    ranked = sorted(hits, key=lambda i: (-counts[i], -(hits[i].get("popularity") or 0)))
+    if not year:
+        ranked = [i for i in ranked if counts[i] >= 2]
+    return list(await asyncio.gather(*[_build_candidate(content_type, hits[i]) for i in ranked[:5]]))
 
 
 _LATEST_SEASON_MAX_AGE = 86400

@@ -65,6 +65,7 @@ from config import (
 from routes import require_auth
 from secrets_util import hash_password, looks_like_fernet_token
 import ai_assist
+import artwork_candidates
 import apply_exclusions_job
 import arr_client
 import arr_handoff
@@ -3381,10 +3382,8 @@ async def year_review_suggestions(content_type: str, item_id: int, q: Optional[s
         # different region (e.g. international vs. North American title),
         # and the default search (item's own stored name) won't find a match
         # TMDB's index doesn't already associate with that exact string.
-        return await tmdb_sync.search_title(
-            vod_db.tmdb_review_search_query(item["name"], q), content_type,
-            year=item.get("year"),
-        )
+        # KNM: 2026-11-06 - widened so the reviewer always has several posters to pick from.
+        return await artwork_candidates.gather(content_type, item, q, year=item.get("year"), include_provider=False)
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc))
     except Exception as exc:
@@ -3485,10 +3484,7 @@ async def year_review_ai_suggest(content_type: str, item_id: int, q: Optional[st
     if not item:
         raise HTTPException(404, detail=f"{content_type} not found")
     try:
-        candidates = await tmdb_sync.search_title(
-            vod_db.tmdb_review_search_query(item["name"], q), content_type,
-            year=item.get("year"),
-        )
+        candidates = await artwork_candidates.gather(content_type, item, q, year=item.get("year"), include_provider=False)
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc))
     except Exception as exc:
@@ -3772,7 +3768,8 @@ async def missing_artwork_tmdb_id_candidate(content_type: str, item_id: int):
 async def missing_artwork_suggestions(content_type: str, item_id: int, q: Optional[str] = None):
     item = _missing_artwork_search_item(content_type, item_id)
     try:
-        return await tmdb_sync.search_title(vod_db.tmdb_review_search_query(item["name"], q), content_type)
+        # KNM: 2026-11-06 - widened to several posters; the provider's own poster is last.
+        return await artwork_candidates.gather(content_type, item, q, include_provider=True)
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc))
     except Exception as exc:
@@ -3787,7 +3784,8 @@ async def missing_artwork_ai_suggest(content_type: str, item_id: int, q: Optiona
     apply (see resolve/ below)."""
     item = _missing_artwork_search_item(content_type, item_id)
     try:
-        candidates = await tmdb_sync.search_title(vod_db.tmdb_review_search_query(item["name"], q), content_type)
+        # Same TMDB list (same order) as suggestions/, minus the provider poster at its end.
+        candidates = await artwork_candidates.gather(content_type, item, q, include_provider=False)
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc))
     except Exception as exc:
@@ -3795,7 +3793,11 @@ async def missing_artwork_ai_suggest(content_type: str, item_id: int, q: Optiona
     if not candidates:
         return {"best_match_index": None, "reasoning": "No TMDB candidates to choose from.", "confidence": "low"}
     try:
-        return await ai_assist.suggest_year_review_match(item["name"], None, content_type, candidates)
+        hints = await artwork_candidates.provider_hints(content_type, item_id)
+        return await ai_assist.suggest_year_review_match(
+            item["name"], None, content_type, candidates,
+            imported_details={**item, "provider_details": hints} if hints else None,
+        )
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc))
     except Exception as exc:

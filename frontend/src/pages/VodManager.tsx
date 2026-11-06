@@ -447,6 +447,8 @@ interface TmdbSuggestion {
   season_count: number | null
   episode_count: number | null
   cast: string[]
+  // KNM: 2026-11-06 - 'provider' marks the provider's own poster (no TMDB ID), offered last.
+  source?: 'provider'
 }
 
 interface MdblistArtworkSettings {
@@ -461,7 +463,7 @@ interface MdblistArtworkSettings {
 }
 
 interface ArtworkCandidate {
-  source: 'tmdb' | 'mdblist' | 'manual'
+  source: 'tmdb' | 'mdblist' | 'manual' | 'provider'
   tmdb_id?: string | null
   name: string
   year: number | null
@@ -2481,11 +2483,11 @@ function MissingArtworkRow({ contentType, item, qc, selected, onToggleSelect }: 
             <div className="space-y-1.5">
               {suggestionsQuery.data.map((s) => (
                 <button
-                  key={s.tmdb_id}
+                  key={s.tmdb_id ?? 'provider'}
                   disabled={resolve.isPending || !s.poster_url}
                   title={s.poster_url ? undefined : "TMDB has no poster for this candidate either — try another match or enter one manually below"}
-                  className={`flex items-start gap-2 w-full border rounded px-2 py-1.5 hover:bg-accent text-left disabled:opacity-50 disabled:hover:bg-transparent ${candidate?.source === 'tmdb' && candidate.tmdb_id === s.tmdb_id ? 'border-primary bg-accent' : 'border-border'}`}
-                  onClick={() => setCandidate({ ...s, source: 'tmdb' })}
+                  className={`flex items-start gap-2 w-full border rounded px-2 py-1.5 hover:bg-accent text-left disabled:opacity-50 disabled:hover:bg-transparent ${candidate?.source === (s.source ?? 'tmdb') && candidate.tmdb_id === s.tmdb_id ? 'border-primary bg-accent' : 'border-border'}`}
+                  onClick={() => setCandidate({ ...s, source: s.source ?? 'tmdb' })}
                 >
                   <PosterThumb
                     url={s.poster_url}
@@ -2495,6 +2497,7 @@ function MissingArtworkRow({ contentType, item, qc, selected, onToggleSelect }: 
                   <div className="min-w-0 space-y-0.5">
                     <div className="flex items-center gap-2">
                       <span className="font-medium">{s.name} {s.year ? `(${s.year})` : ''}</span>
+                      {s.source === 'provider' && <span className="text-sm text-foreground border border-border rounded px-1">From your provider</span>}
                       {s.vote_average != null && <span className="text-muted-foreground">★ {s.vote_average.toFixed(1)}</span>}
                     </div>
                     {!!s.cast.length && <p className="text-muted-foreground">Cast: {s.cast.join(', ')}</p>}
@@ -2519,7 +2522,16 @@ function MissingArtworkRow({ contentType, item, qc, selected, onToggleSelect }: 
           </div>}
           {candidate && <div className="flex items-center gap-2 border border-primary/40 rounded p-2">
             <span className="text-xs flex-1">Selected: {candidate.name} {candidate.year ? `(${candidate.year})` : ''} · {candidate.source.toUpperCase()}{candidate.match_reason ? ` · ${candidate.match_reason}` : ''}</span>
-            <Button size="sm" disabled={resolve.isPending || !candidate.poster_url} onClick={() => resolve.mutate({ poster_url: candidate.poster_url!, tmdb_id: candidate.tmdb_id ?? undefined, name: candidate.name !== item.name ? candidate.name : undefined, year: candidate.year ?? undefined })}>{resolve.isPending ? 'Applying...' : 'Apply selected poster'}</Button>
+            {(candidate.year == null || item.year == null || candidate.year === item.year)
+              ? <Button size="sm" disabled={resolve.isPending || !candidate.poster_url} onClick={() => resolve.mutate({ poster_url: candidate.poster_url!, tmdb_id: candidate.tmdb_id ?? undefined, name: candidate.name !== item.name ? candidate.name : undefined, year: candidate.year ?? undefined })}>{resolve.isPending ? 'Applying...' : 'Apply selected poster'}</Button>
+              : <Button size="sm" disabled={resolve.isPending || !candidate.poster_url} onClick={() => resolve.mutate({ poster_url: candidate.poster_url!, tmdb_id: candidate.tmdb_id ?? undefined, name: candidate.name !== item.name ? candidate.name : undefined, year: candidate.year ?? undefined })}>{resolve.isPending ? 'Applying...' : `Change year to ${candidate.year}`}</Button>}
+          </div>}
+          {/* KNM: 2026-11-06 - a pick from another year would silently rewrite our year and TMDB link; make the user choose. */}
+          {candidate && candidate.year != null && item.year != null && candidate.year !== item.year && <div className="border border-amber-500/60 rounded p-2 space-y-1.5">
+            <p className="text-sm text-foreground">This pick is from {candidate.year}, but this title is saved as {item.year}. Choose one:</p>
+            <p className="text-sm text-foreground">• <strong>Keep {item.year}</strong> — saves only the poster. Year, name and TMDB link stay as they are. Use this when the poster looks right but the year listed with it is wrong.</p>
+            <p className="text-sm text-foreground">• <strong>Change year to {candidate.year}</strong> — saves the poster and links this title to the pick (year, name, details). Use this when our saved year is the wrong one.</p>
+            <Button size="sm" variant="outline" disabled={resolve.isPending || !candidate.poster_url} onClick={() => resolve.mutate({ poster_url: candidate.poster_url! })}>{resolve.isPending ? 'Applying...' : `Keep ${item.year}`}</Button>
           </div>}
 
           <div className="flex items-center gap-1.5">
