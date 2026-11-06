@@ -35,6 +35,10 @@ included.
 | Episode list preloading | [#74](https://github.com/jstevenscl/vod-manager/pull/74) | Open / under review |
 | Metadata identity matching | [#77](https://github.com/jstevenscl/vod-manager/pull/77) | ✅🔄 Open / under review |
 
+## 2026-11-06 (Bulk AI checks the year)
+
+- **Bulk AI fixes no longer apply a title from the wrong year.** Before, "Resolve with AI" on Needs Review, TMDB Lookup Failures and Missing Artwork trusted any pick the AI marked as high confidence. That is how "A Hard Place" (2025) got matched to a 2013 short film. Now a pick is applied only when its year is within one year of the year we already have (from the title or the provider's name). If the years don't agree, or more than 3 titles fit that year, the title stays in the list with a short reason, so you can pick from the poster choices. Titles with no known year work as before.
+
 ## 2026-11-06 (More poster choices)
 
 - **Missing Artwork and Needs Review now offer several posters to pick from.** When the
