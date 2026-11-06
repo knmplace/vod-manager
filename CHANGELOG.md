@@ -66,6 +66,7 @@ included.
   audio tags are left alone. Every feed it hides goes into the auto-clean log
   with a Revert button. Running it again skips anything already checked by the
   current version.
+- The Re-validate and Auto-clean panels now use brighter, larger text.
 - Fixed: hiding one feed no longer hides the whole title when the title's
   other feed has no language label (an unlabelled feed counts as English).
 

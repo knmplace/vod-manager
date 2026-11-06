@@ -30,14 +30,14 @@ export default function LanguageRevalidatePanel() {
 
   return (
     <details className="rounded-md border border-border bg-card px-3 py-3">
-      <summary className="cursor-pointer text-xs font-medium">Re-validate language results (one-time)</summary>
-      <p className="text-[11px] text-muted-foreground mt-2">For libraries checked before the improved audio check. Puts older results back through the background language check. Safe to run again: anything already checked with the current version is skipped.{preview?.applied_at ? ` First run: ${new Date(preview.applied_at).toLocaleString()}.` : ''}</p>
+      <summary className="cursor-pointer text-sm font-medium">Re-validate language results (one-time)</summary>
+      <p className="text-sm text-foreground mt-2">For libraries checked before the improved audio check. Puts older results back through the background language check. Safe to run again: anything already checked with the current version is skipped.{preview?.applied_at ? ` First run: ${new Date(preview.applied_at).toLocaleString()}.` : ''}</p>
       <div className="flex flex-wrap items-end gap-3 mt-2">
-        <button className="flex items-center gap-1.5 border border-border rounded px-2 py-1.5 text-xs hover:bg-accent disabled:opacity-50" disabled={runPreview.isPending} onClick={() => runPreview.mutate()}>{runPreview.isPending ? <Loader2 size={12} className="animate-spin" /> : <Eye size={12} />} Preview</button>
-        {preview && <button className="flex items-center gap-1.5 border border-amber-500/40 text-amber-400 rounded px-2 py-1.5 text-xs hover:bg-accent disabled:opacity-50" disabled={apply.isPending || total === 0} onClick={confirmApply}>{apply.isPending ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} Re-validate</button>}
+        <button className="flex items-center gap-1.5 border border-border rounded px-2 py-1.5 text-sm hover:bg-accent disabled:opacity-50" disabled={runPreview.isPending} onClick={() => runPreview.mutate()}>{runPreview.isPending ? <Loader2 size={12} className="animate-spin" /> : <Eye size={12} />} Preview</button>
+        {preview && <button className="flex items-center gap-1.5 border border-amber-500/40 text-amber-400 rounded px-2 py-1.5 text-sm hover:bg-accent disabled:opacity-50" disabled={apply.isPending || total === 0} onClick={confirmApply}>{apply.isPending ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} Re-validate</button>}
       </div>
       {preview && (
-        <ul className="text-[11px] text-muted-foreground mt-2">
+        <ul className="text-sm text-foreground mt-2">
           <li>Unknown or unreviewed results to check again: {preview.requeue.toLocaleString()}</li>
           <li>Your earlier confirmations to re-check once: {preview.verify.toLocaleString()}</li>
           <li>Feeds marked to hide that are still being served: {preview.repair_feeds.toLocaleString()}</li>
