@@ -2365,6 +2365,10 @@ function MissingArtworkRow({ contentType, item, qc, selected, onToggleSelect }: 
   const [searchOverride, setSearchOverride] = useState('')
   const [manualPosterUrl, setManualPosterUrl] = useState('')
   const [candidate, setCandidate] = useState<ArtworkCandidate | null>(null)
+  // KNM: 2026-11-06 - picking a poster no longer saves on click; hide the other choices once one is
+  // picked so the Apply/Keep buttons below are easy to see. "Show other choices" clears the pick.
+  const isPicked = (source: string, tmdbId: string | null | undefined) => candidate?.source === source && candidate.tmdb_id === tmdbId
+  const showOthers = () => <Button size="sm" variant="outline" disabled={resolve.isPending} onClick={() => setCandidate(null)}>Show other choices</Button>
 
   // Same reasoning as NeedsReviewRow's search override -- a mangled/
   // punctuation-stripped stored title (the actual cause of most missing
@@ -2481,7 +2485,7 @@ function MissingArtworkRow({ contentType, item, qc, selected, onToggleSelect }: 
           {tab === 'multiple' && suggestionsQuery.isError && <p className="text-destructive">TMDB search failed — check the TMDB API key in API Keys settings.</p>}
           {tab === 'multiple' && !!suggestionsQuery.data?.length && (
             <div className="space-y-1.5">
-              {suggestionsQuery.data.map((s) => (
+              {suggestionsQuery.data.filter((s, _, all) => !all.some((x) => isPicked(x.source ?? 'tmdb', x.tmdb_id)) || isPicked(s.source ?? 'tmdb', s.tmdb_id)).map((s) => (
                 <button
                   key={s.tmdb_id ?? 'provider'}
                   disabled={resolve.isPending || !s.poster_url}
@@ -2505,6 +2509,7 @@ function MissingArtworkRow({ contentType, item, qc, selected, onToggleSelect }: 
                   </div>
                 </button>
               ))}
+              {suggestionsQuery.data.some((x) => isPicked(x.source ?? 'tmdb', x.tmdb_id)) && showOthers()}
             </div>
           )}
           {tab === 'multiple' && suggestionsQuery.data && suggestionsQuery.data.length === 0 && (
@@ -2517,7 +2522,8 @@ function MissingArtworkRow({ contentType, item, qc, selected, onToggleSelect }: 
               ? <p className="text-xs text-muted-foreground">Configure the MDBList API key, account tier, and poster-search toggle on the Configuration page.</p>
               : <Button size="sm" variant="outline" disabled={mdblistQuery.isFetching} onClick={() => mdblistQuery.refetch()}>{mdblistQuery.isFetching ? <Loader2 size={12} className="animate-spin" /> : 'Search MDBList'}</Button>}
             {mdblistQuery.isError && <p className="text-destructive text-xs">MDBList search failed: {(mdblistQuery.error as any)?.response?.data?.detail ?? 'Check MDBList configuration and daily limit.'}</p>}
-            {mdblistQuery.data?.map((result, index) => <ArtworkCandidateCard key={`${result.tmdb_id}-${index}`} candidate={result} selected={candidate?.source === 'mdblist' && candidate.tmdb_id === result.tmdb_id} onSelect={() => setCandidate(result)} />)}
+            {mdblistQuery.data?.filter((r, _, all) => !all.some((x) => isPicked('mdblist', x.tmdb_id)) || isPicked('mdblist', r.tmdb_id)).map((result, index) => <ArtworkCandidateCard key={`${result.tmdb_id}-${index}`} candidate={result} selected={isPicked('mdblist', result.tmdb_id)} onSelect={() => setCandidate(result)} />)}
+            {mdblistQuery.data?.some((x) => isPicked('mdblist', x.tmdb_id)) && showOthers()}
             {mdblistQuery.data && mdblistQuery.data.length === 0 && <p className="text-muted-foreground">No MDBList poster matches found.</p>}
           </div>}
           {candidate && <div className="flex items-center gap-2 border border-primary/40 rounded p-2">
