@@ -1117,6 +1117,16 @@ def save_language_autoclean_settings(enabled: bool | None = None, batch_size: in
     _update_raw(update)
 
 
+# KNM: 2026-11-05 - when "Re-validate language results" first ran; rows probed after this
+# already used the current probe, so a second run never queues them again.
+def get_language_revalidate_applied_at() -> str | None:
+    return _read_raw().get("language_revalidate_applied_at")
+
+
+def save_language_revalidate_applied_at(value: str) -> None:
+    _update_raw(lambda data: data.setdefault("language_revalidate_applied_at", value))
+
+
 def get_refresh_settings() -> dict:
     data = _read_raw()
     return {k: data.get(k, v) for k, v in _REFRESH_DEFAULTS.items()}

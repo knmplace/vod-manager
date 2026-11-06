@@ -87,6 +87,7 @@ import strm_export
 import vod_downloader
 import vod_probe
 import language_autoclean
+import language_revalidate
 import tmdb_sync
 import vod_bulk_ai_service
 import vod_db
@@ -4659,6 +4660,17 @@ async def revert_language_autoclean(log_id: int):
     if not await asyncio.to_thread(language_autoclean.revert, log_id):
         raise HTTPException(409, "Already reverted, or the source was changed since auto-clean touched it.")
     return {"reverted": True}
+
+
+# KNM: 2026-11-05 - one-time re-validation of results from the older language probe.
+@router.get("/language-revalidate/preview/", dependencies=_GUARDS)
+async def language_revalidate_preview():
+    return await asyncio.to_thread(language_revalidate.preview)
+
+
+@router.post("/language-revalidate/apply/", dependencies=_GUARDS)
+async def language_revalidate_apply():
+    return await asyncio.to_thread(language_revalidate.apply)
 
 
 @router.post("/language-trickle/providers/{provider_id}/unblock/", dependencies=_GUARDS)

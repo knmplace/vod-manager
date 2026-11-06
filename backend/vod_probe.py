@@ -513,6 +513,14 @@ async def probe_language_source(kind: str, source_id: int, force: bool = False,
         languages = await _probe_remote_language(kind, src, provider, spacing)
         if languages is None:
             languages, method = [], "embedded_audio_unreadable"
+    if src.get("language_probe_verify"):
+        # KNM: 2026-11-05 - one-time re-check of a person's earlier confirmation; settles
+        # itself (keep / confirm / relabel / hide) instead of raising a new mismatch.
+        outcome = await asyncio.to_thread(vod_db.apply_language_verify_result, kind, source_id, languages, method)
+        out = language_result_of(await asyncio.to_thread(vod_db.get_language_probe_source, kind, source_id))
+        out["mismatch"] = False
+        out["verify"] = outcome
+        return out
     status = "observed" if languages else "unknown"
     confidence = "high" if languages else "none"
     await asyncio.to_thread(vod_db.set_source_language_probe, kind, source_id, languages, status, method, confidence)
@@ -551,14 +559,15 @@ async def language_trickle_once(target: dict | None = None) -> dict:
         auto_approved = bool(observed and _configured_present(configured, observed))
         # The report treats any multi-track result or a changed single-track
         # result as needing review unless the configured language is present.
-        mismatch = bool(observed and not auto_approved and observed != [configured])
+        verify = result.get("verify")  # KNM: 2026-11-05 - re-check already settled the row
+        mismatch = bool(observed and not auto_approved and observed != [configured] and not verify)
         wanted_match = bool(observed and all(any(_configured_present(w, [o]) for w in wanted) for o in observed))
-        if auto_approved:
+        if auto_approved and not verify:
             await asyncio.to_thread(vod_db.auto_approve_language_probe_source,
                                     target["kind"], target["source_id"], observed)
         await asyncio.to_thread(vod_db.record_language_probe_run,
                                 target["kind"], target["source_id"], target.get("provider_id"),
-                                "auto_approved" if auto_approved else result.get("status") or "observed",
+                                f"verify_{verify}" if verify else ("auto_approved" if auto_approved else result.get("status") or "observed"),
                                 configured, observed,
                                 wanted, mismatch, wanted_match, result.get("error"))
         if result.get("mismatch"):

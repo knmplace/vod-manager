@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, Languages, Loader2, Power, RefreshCw, X } from 'lucide-react'
 import api from '@/lib/api'
 import LanguageAutocleanPanel from '@/components/LanguageAutocleanPanel'
+import LanguageRevalidatePanel from '@/components/LanguageRevalidatePanel'
 import { notify } from '@/lib/confirm'
 import { buildHlsPreviewSourceUrl, buildPreviewSourceUrl, buildTranscodedPreviewSourceUrl, PlayButton, type XcCredentials } from './VodManager'
 
@@ -242,6 +243,7 @@ export default function LanguageMismatchReport() {
       </details>
 
       <LanguageAutocleanPanel />
+      <LanguageRevalidatePanel />
 
       {capacityReportOpen && <div className="rounded-md border border-border bg-card px-3 py-3">
         <h2 className="text-xs font-medium">Provider capacity holds</h2>

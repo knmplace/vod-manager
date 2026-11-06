@@ -1384,6 +1384,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("movie_sources", "language_probe_failures", "INTEGER NOT NULL DEFAULT 0"),
         ("movie_sources", "language_probe_last_failed_at", "TEXT"),
         ("movie_sources", "language_probe_quarantined_at", "TEXT"),
+        # KNM: 2026-11-05 - 1 = a person's earlier confirmation is queued for one re-check (language_revalidate.py)
+        ("movie_sources", "language_probe_verify", "INTEGER NOT NULL DEFAULT 0"),
         ("episode_sources", "probe_width", "INTEGER"),
         ("episode_sources", "probe_height", "INTEGER"),
         ("episode_sources", "probe_codec", "TEXT"),
@@ -1399,6 +1401,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("episode_sources", "language_probe_failures", "INTEGER NOT NULL DEFAULT 0"),
         ("episode_sources", "language_probe_last_failed_at", "TEXT"),
         ("episode_sources", "language_probe_quarantined_at", "TEXT"),
+        ("episode_sources", "language_probe_verify", "INTEGER NOT NULL DEFAULT 0"),
         ("dvr_user_limits", "retention_max_age_days", "INTEGER"),
         ("dvr_user_limits", "retention_max_episodes_per_show", "INTEGER"),
         ("dvr_recording_profiles", "backfill_mode", "TEXT"),
@@ -8363,6 +8366,7 @@ def get_language_probe_source(kind: str, source_id: int) -> dict | None:
                    src.language_probed_at, src.language_probe_decision,
                    src.language_probe_decided_at, src.language_probe_failures,
                    src.language_probe_last_failed_at, src.language_probe_quarantined_at,
+                   src.language_probe_verify,
                    p.name AS provider_name, p.provider_type,
                    parent.id AS parent_id, parent.name AS parent_name
             FROM {table} src
@@ -9455,7 +9459,7 @@ def next_language_probe_targets(
                 SELECT 'movie' AS kind, ms.id AS source_id, ms.provider_id,
                        ms.language_probe_failures, ms.language_probe_last_failed_at
                 FROM movie_sources ms JOIN movies m ON m.id=ms.movie_id JOIN providers p ON p.id=ms.provider_id
-                WHERE p.is_active=1 AND m.review_excluded=0 AND ms.language_probe_decision IS NULL{provider_filter}
+                WHERE p.is_active=1 AND m.review_excluded=0 AND (ms.language_probe_decision IS NULL OR ms.language_probe_verify=1){provider_filter}
                   AND ms.language_probed_at IS NULL AND ms.language_probe_quarantined_at IS NULL
                   AND EXISTS (SELECT 1 FROM movie_category_placements cp WHERE cp.movie_id=m.id)
                   AND NOT EXISTS (SELECT 1 FROM language_probe_capacity_provider_state h
@@ -9465,7 +9469,7 @@ def next_language_probe_targets(
                        es.language_probe_failures, es.language_probe_last_failed_at
                 FROM episode_sources es JOIN episodes e ON e.id=es.episode_id
                 JOIN series s ON s.id=e.series_id JOIN providers p ON p.id=es.provider_id
-                WHERE p.is_active=1 AND s.review_excluded=0 AND es.language_probe_decision IS NULL{provider_filter}
+                WHERE p.is_active=1 AND s.review_excluded=0 AND (es.language_probe_decision IS NULL OR es.language_probe_verify=1){provider_filter}
                   AND es.language_probed_at IS NULL AND es.language_probe_quarantined_at IS NULL
                   AND EXISTS (SELECT 1 FROM series_category_placements cp WHERE cp.series_id=s.id)
                   AND NOT EXISTS (SELECT 1 FROM language_probe_capacity_provider_state h
@@ -9584,8 +9588,9 @@ def decide_language_mismatch(kind: str, source_id: int, decision: str, language:
                 # observed episode when that provider has a series source row.
                 source_langs = _source_languages(conn, "series_sources", "series_id", parent_id)
                 if archive_only:
+                    # KNM: 2026-11-05 - an untagged sibling is EN (as in _source_languages); skipping it hid live titles.
                     source_langs = {r[0] for r in conn.execute(
-                        "SELECT language FROM series_sources WHERE series_id=? AND provider_id!=? AND language IS NOT NULL",
+                        "SELECT COALESCE(language, 'EN') FROM series_sources WHERE series_id=? AND provider_id!=?",
                         (parent_id, row["provider_id"]),
                     ).fetchall()}
                 else:
@@ -9601,7 +9606,7 @@ def decide_language_mismatch(kind: str, source_id: int, decision: str, language:
                 source_langs = _source_languages(conn, "movie_sources", "movie_id", parent_id)
                 if archive_only:
                     source_langs = {r[0] for r in conn.execute(
-                        "SELECT language FROM movie_sources WHERE movie_id=? AND id!=? AND language IS NOT NULL",
+                        "SELECT COALESCE(language, 'EN') FROM movie_sources WHERE movie_id=? AND id!=?",
                         (parent_id, source_id),
                     ).fetchall()}
                 placements = "movie_category_placements"
@@ -9620,6 +9625,56 @@ def decide_language_mismatch(kind: str, source_id: int, decision: str, language:
             return {"decision": decision, "source_id": source_id, "applied": True, "language": language, "action": action}
         finally:
             conn.close()
+
+
+def apply_language_verify_result(kind: str, source_id: int, languages: list[str] | None, method: str) -> str:
+    """Settle a re-check of a person's earlier confirmation (language_revalidate.py).
+
+    KNM: 2026-11-05 - unreadable again keeps the person's decision; the configured
+    language found confirms it; another wanted language (or MULTI) relabels the
+    feed; only unwanted languages hide the feed, logged so it can be reverted.
+    """
+    table = "movie_sources" if kind == "movie" else "episode_sources"
+    usable = [tag for tag in (languages or []) if tag and tag != "UNKNOWN"]
+    try:
+        if not usable:
+            with _WRITE_LOCK:
+                conn = _connect()
+                try:
+                    conn.execute(f"""UPDATE {table} SET language_probed_at=?, language_probe_failures=0,
+                                        language_probe_last_failed_at=NULL WHERE id=?""",
+                                 (datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"), source_id))
+                    _commit_with_retry(conn)
+                finally:
+                    conn.close()
+            return "kept"
+        conn = _connect()
+        try:
+            row = conn.execute(f"SELECT language FROM {table} WHERE id=?", (source_id,)).fetchone()
+        finally:
+            conn.close()
+        previous = row["language"] if row else None
+        set_source_language_probe(kind, source_id, usable, "observed", method, "high")
+        if languages_match(previous, usable):
+            auto_approve_language_probe_source(kind, source_id, usable)
+            return "confirmed"
+        enabled = list(get_enabled_languages())
+        wanted = next((o for o in usable if any(languages_match(e, [o]) for e in enabled)), None)
+        wanted = wanted or next((o for o in usable if canonical_language(o) == "MULTI"), None)
+        if wanted:
+            decide_language_mismatch(kind, source_id, "approved", language=wanted)
+            return "relabelled"
+        result = decide_language_mismatch(kind, source_id, "approved")
+        log_language_autoclean(kind, source_id, previous, result.get("language"), sorted(set(usable)), None)
+        return "hidden"
+    finally:
+        with _WRITE_LOCK:
+            conn = _connect()
+            try:
+                conn.execute(f"UPDATE {table} SET language_probe_verify=0 WHERE id=?", (source_id,))
+                _commit_with_retry(conn)
+            finally:
+                conn.close()
 
 
 def log_language_autoclean(kind: str, source_id: int, previous_language: str | None, new_language: str | None,

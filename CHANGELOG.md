@@ -55,6 +55,19 @@ included.
   batches through the day, pauses while imports, syncs or enrichment run,
   waits a cooldown before resuming, and logs every change with a Revert
   button. Preview shows what it would hide before you turn it on.
+- New **Re-validate language results (one-time)** panel on the Language
+  Mismatch Report, for libraries checked before the improved audio check.
+  Preview shows the counts first. Running it puts unknown and unreviewed
+  results back through the background check, and re-checks your earlier
+  confirmations once. If the audio is still unreadable, your choice is kept.
+  If it only finds an unwanted language, that feed is hidden. It also hides
+  feeds that earlier archive clicks left playing, and brings back hidden
+  titles that do have a wanted-language feed. Results confirmed by matching
+  audio tags are left alone. Every feed it hides goes into the auto-clean log
+  with a Revert button. Running it again skips anything already checked by the
+  current version.
+- Fixed: hiding one feed no longer hides the whole title when the title's
+  other feed has no language label (an unlabelled feed counts as English).
 
 ## 2026-11-02 (TMDB review title matching)
 
