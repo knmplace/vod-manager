@@ -55,6 +55,23 @@ def _usable_provider_poster_url(value: str | None) -> str | None:
             return None
     return url
 
+def _is_full_tmdb_poster(url: str | None) -> bool:
+    return bool(url) and str(url).startswith("https://image.tmdb.org/t/p/") and _usable_provider_poster_url(url) == url
+
+
+# KNM: 2026-11-05 - a saved TMDB poster (often a swap from a dead provider host) is kept
+# when a later import/enrichment offers a provider poster, and a lookup without a
+# poster no longer blanks the existing one.
+def _guard_poster(current: str | None, fields: dict) -> None:
+    if "poster_url" not in fields:
+        return
+    new = _usable_provider_poster_url(fields["poster_url"])
+    if current and (new is None or (_is_full_tmdb_poster(current) and not _is_full_tmdb_poster(new))):
+        fields.pop("poster_url")
+    else:
+        fields["poster_url"] = new
+
+
 # Offset export stream_ids well clear of any real provider's own ID range.
 _EXPORT_STREAM_ID_BASE = 900_000_000
 _SERIES_EXPORT_BASE = 910_000_000
@@ -7700,6 +7717,7 @@ def set_movie_enrichment(movie_id: int, **fields) -> None:
             # so the schema/writers match upstream even though the fork never
             # re-polls an enriched movie on a timer (see movie_needs_enrichment).
             row = conn.execute("SELECT * FROM movies WHERE id=?", (movie_id,)).fetchone()
+            _guard_poster(row["poster_url"] if row else None, fields)
             fields["last_enriched_at"] = _now()
             _release_year_fields(row, fields)
             if row is not None:
@@ -7846,6 +7864,7 @@ def apply_movie_enrichment_batch(items: list[dict]) -> None:
                     with _item_savepoint(conn):
                         fields = dict(item.get("fields") or {})
                         row = conn.execute("SELECT * FROM movies WHERE id=?", (movie_id,)).fetchone()
+                        _guard_poster(row["poster_url"] if row else None, fields)
                         fields["last_enriched_at"] = _now()
                         _release_year_fields(row, fields)
                         if row is not None:
@@ -10144,6 +10163,8 @@ def set_series_enrichment(series_id: int, **fields) -> None:
     with _WRITE_LOCK:
         conn = _connect()
         try:
+            row = conn.execute("SELECT poster_url FROM series WHERE id=?", (series_id,)).fetchone()
+            _guard_poster(row["poster_url"] if row else None, fields)
             fields["last_enriched_at"] = _now()
             sets = ", ".join(f"{k}=?" for k in fields)
             conn.execute(f"UPDATE series SET {sets} WHERE id=?", (*fields.values(), series_id))
@@ -12070,7 +12091,9 @@ def bulk_import_series(provider_id: int, items: list[dict], _retry_depth: int = 
                                 )
                             if entry["source_changed"] and item.get("_has_detail"):
                                 conn.execute(
-                                    "UPDATE series SET genre=?, description=?, cast_list=?, director=?, poster_url=COALESCE(?,poster_url), "
+                                    "UPDATE series SET genre=?, description=?, cast_list=?, director=?, "
+                                    # KNM: 2026-11-05 - keep a saved full TMDB poster on re-import.
+                                    "poster_url=CASE WHEN poster_url LIKE 'https://image.tmdb.org/t/p/%/_%' THEN poster_url ELSE COALESCE(?,poster_url) END, "
                                     "rating=?, release_date=?, provider_last_modified=?, tmdb_id=COALESCE(tmdb_id, ?) WHERE id=?",
                                     (
                                         item.get("genre"), item.get("description"), item.get("cast_list"),

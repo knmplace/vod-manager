@@ -919,6 +919,22 @@ async def poster_fallback(kind: str, item_id: int):
     return {"poster_url": await vod_importer.replace_broken_poster(kind, item_id)}
 
 
+# KNM: 2026-11-05 - run the poster repair now (it also runs daily); GET shows the last result.
+@router.post("/posters/repair/", dependencies=_GUARDS)
+async def posters_repair():
+    import poster_repair
+    if poster_repair.status()["running"]:
+        return {"started": False, **poster_repair.status()}
+    asyncio.create_task(poster_repair.repair_posters())
+    return {"started": True}
+
+
+@router.get("/posters/repair/", dependencies=_GUARDS)
+async def posters_repair_status():
+    import poster_repair
+    return poster_repair.status()
+
+
 @router.get("/tmdb-settings/", dependencies=_GUARDS)
 async def get_tmdb_settings():
     return {"has_api_key": bool(get_tmdb_api_key())}

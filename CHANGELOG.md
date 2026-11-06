@@ -35,6 +35,22 @@ included.
 | Episode list preloading | [#74](https://github.com/jstevenscl/vod-manager/pull/74) | Open / under review |
 | Metadata identity matching | [#77](https://github.com/jstevenscl/vod-manager/pull/77) | ✅🔄 Open / under review |
 
+## 2026-11-05 (Poster repair)
+
+- ✅ Posters on a dead image host are swapped automatically, and missing posters
+  are filled. The repair runs once a day (first run 15 minutes after start-up) and
+  can be started from `POST /api/vod/posters/repair/`. A host counts as dead only
+  when none of three sample posters load. TMDB-hosted posters are never changed.
+- ✅ The swap uses the poster path already saved in the local TMDB store, so most
+  swaps make no API call. If the store has no poster it asks TMDB, then MDBList
+  (only when MDBList poster search is on, up to 100 lookups per run, within the
+  daily limit).
+- ✅ A card whose poster fails to load uses the same order: local store, TMDB,
+  then MDBList.
+- ✅ A saved TMDB poster now stays when a later provider import or enrichment
+  offers a provider poster, and a lookup that finds no poster no longer blanks
+  the existing one.
+
 ## 2026-11-05 (Language review safety and auto-clean)
 
 - Hiding an unwanted-language feed now hides only that feed. A title with

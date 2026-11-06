@@ -305,6 +305,16 @@ def get_title(media_type: str, tmdb_id: int) -> dict | None:
     return out
 
 
+# KNM: 2026-11-05 - poster repair reads the stored poster path whatever its age;
+# an old record's poster is still a valid TMDB image, so no API call is needed.
+def get_poster_path(media_type: str, tmdb_id: int) -> str | None:
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT poster_path FROM titles WHERE media_type=? AND tmdb_id=?", (media_type, int(tmdb_id))
+        ).fetchone()
+    return row["poster_path"] if row and row["poster_path"] else None
+
+
 def get_payload(media_type: str, tmdb_id: int) -> dict | None:
     """The stored raw payload, or None when missing or flagged as changed on
     TMDB since it was fetched (the caller should refetch)."""

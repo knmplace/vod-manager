@@ -2187,15 +2187,11 @@ async def bulk_enrich_tmdb_series_metadata(
 # image host, bare TMDB base URL) swaps to its TMDB poster and keeps it.
 async def replace_broken_poster(kind: str, item_id: int) -> str | None:
     item = await _to_thread(vod_db.get_movie if kind == "movie" else vod_db.get_series, item_id)
-    tmdb_id = (item or {}).get("tmdb_id")
-    if not tmdb_id:
+    if not item:
         return None
-    fetch = tmdb_sync.get_movie_full_details if kind == "movie" else tmdb_sync.get_series_full_details
-    try:
-        detail = await fetch(str(tmdb_id))
-    except tmdb_sync.TmdbNotFoundError:
-        return None
-    poster = (detail or {}).get("poster_url")
+    # KNM: 2026-11-05 - shared resolver: local TMDB store, then TMDB, then MDBList.
+    import poster_repair
+    poster = await poster_repair.resolve_poster(kind, item)
     if not poster or poster == item.get("poster_url"):
         return None
     await _to_thread(vod_db.bulk_set_poster_url, kind, [item_id], poster)
