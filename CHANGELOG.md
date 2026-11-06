@@ -15,7 +15,7 @@ internal commit, just additions and fixes worth knowing about if you're
 running this build.
 
 ✅ = shipped and running in this fork only. Once work is proposed upstream,
-add its second status marker and link to the pull request: 🔀 = open/under
+add its second status marker and link to the pull request: 🔄 = open/under
 review, 🔼 = included in an upstream release, ⛔ = closed without being
 included.
 
@@ -34,17 +34,24 @@ included.
 | Configuration and reporting page navigation | [#72](https://github.com/jstevenscl/vod-manager/pull/72) | Included in upstream v0.3.16 |
 | Episode list preloading | [#74](https://github.com/jstevenscl/vod-manager/pull/74) | Open / under review |
 | Metadata identity matching | [#77](https://github.com/jstevenscl/vod-manager/pull/77) | ✅🔄 Open / under review |
+| TMDB review candidates narrowed to exact title and year | [#78](https://github.com/jstevenscl/vod-manager/pull/78) | ✅🔄 Open / under review |
+| Bulk AI only auto-applies picks whose year fits ours | [#79](https://github.com/jstevenscl/vod-manager/pull/79) | ✅🔄 Open / under review (does not need any other open PR) |
+| Poster repair and Fix posters now button | — | ✅ Fork only; to be proposed after the open PRs merge (it shares files with #74, #75, #77 and #78) |
+| More poster choices and the tidier poster picker | — | ✅ Fork only; built on this fork's Missing Artwork picker, which has to go upstream first |
 
 ## 2026-11-06 (Tidier poster picker)
 
+- ✅ Fork only (needs this fork's Missing Artwork picker upstream first).
 - **Missing Artwork: other choices hide once you pick a poster.** Clicking a poster no longer saves it; you then confirm with the buttons below it. Now the other choices collapse so only your pick and its buttons show. Click **Show other choices** to pick again. This works on both Multiple Matches and MDBList Search.
 
 ## 2026-11-06 (Bulk AI checks the year)
 
+- ✅🔄 Upstream [PR #79](https://github.com/jstevenscl/vod-manager/pull/79), open. It stands alone and does not need any other open PR.
 - **Bulk AI fixes no longer apply a title from the wrong year.** Before, "Resolve with AI" on Needs Review, TMDB Lookup Failures and Missing Artwork trusted any pick the AI marked as high confidence. That is how "A Hard Place" (2025) got matched to a 2013 short film. Now a pick is applied only when its year is within one year of the year we already have (from the title or the provider's name). If the years don't agree, or more than 3 titles fit that year, the title stays in the list with a short reason, so you can pick from the poster choices. Titles with no known year work as before.
 
 ## 2026-11-06 (More poster choices)
 
+- ✅ Fork only (built on this fork's exact-title search and Missing Artwork picker, which aren't upstream yet).
 - **Missing Artwork and Needs Review now offer several posters to pick from.** When the
   title search finds fewer than 4 posters, the search widens: the provider's own title and
   year, then titles the provider's cast appear in around that year, then a looser title
@@ -57,6 +64,7 @@ included.
 
 ## 2026-11-06 (Fix posters button)
 
+- ✅ Fork only; to be proposed with the poster repair after the open PRs merge.
 - ✅ **Fix posters now** button on Artwork Review and the Missing Artwork window.
   It runs the daily poster repair on demand and shows the last result: how many
   movies and shows were fixed, how many have no poster anywhere, and which image
@@ -64,6 +72,7 @@ included.
 
 ## 2026-11-05 (Poster repair)
 
+- ✅ Fork only; to be proposed upstream after the open PRs merge.
 - ✅ Posters on a dead image host are swapped automatically, and missing posters
   are filled. The repair runs once a day (first run 15 minutes after start-up) and
   can be started from `POST /api/vod/posters/repair/`. A host counts as dead only
