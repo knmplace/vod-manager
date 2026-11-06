@@ -72,6 +72,21 @@ def test_apply_requeues_undecided_and_leaves_auto_approved(db):
     assert unk in _targets(db) and auto not in _targets(db)
 
 
+def test_apply_clears_stale_unknown_result_so_unknown_review_shows_only_fresh_checks(db):
+    # KNM: 2026-11-05 - requeued rows kept status 'unknown' and showed in Unknown review
+    # until re-probed; clear the old-probe result so they read as not-yet-checked.
+    unk, _ = _src(db, "unk", status="unknown", observed=[])
+    tagless, _ = _src(db, "tagless", status="observed", observed=["UNKNOWN"])
+    obs, _ = _src(db, "obs", status="observed", observed=["FR"])
+    rv.apply()
+    for sid in (unk, tagless):
+        row = _row(db, sid)
+        assert (row["language_probe_status"], row["language_probe_languages"], row["language"]) == (None, None, "EN")
+    assert _row(db, obs)["language_probe_status"] == "observed"
+    assert {unk, tagless, obs} <= _targets(db)
+    assert db.list_language_unknowns()["count"] == 0
+
+
 def test_apply_queues_manual_confirmations_for_verify_keeping_decision(db):
     sid, _ = _src(db, "manual", status="manual_approved", decision="approved", observed=["EN"])
     rv.apply()

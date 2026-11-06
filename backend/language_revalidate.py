@@ -29,6 +29,8 @@ def _cutoff() -> str:
 
 _REQUEUE = """language_probe_status IN ('unknown','observed','error') AND language_probe_decision IS NULL
               AND language_probed_at IS NOT NULL AND language_probed_at < ?"""
+_TAGLESS = """language_probe_status IN ('unknown','observed')
+              AND COALESCE(language_probe_languages,'[]') IN ('[]','["UNKNOWN"]')"""
 _VERIFY = """language_probe_status='manual_approved' AND language_probe_verify=0
              AND language_probed_at IS NOT NULL AND language_probed_at < ?"""
 
@@ -101,7 +103,15 @@ def apply() -> dict:
             for _, t in _TABLES:
                 verified += conn.execute(
                     f"UPDATE {t} SET language_probe_verify=1, language_probed_at=NULL WHERE {_VERIFY}", (cutoff,)).rowcount
-                requeued += conn.execute(f"UPDATE {t} SET language_probed_at=NULL WHERE {_REQUEUE}", (cutoff,)).rowcount
+                # KNM: 2026-11-05 - also drop a tag-less old-probe result, so a queued row reads as
+                # not-yet-checked and Unknown review lists only results from the current probe.
+                tagless = f"CASE WHEN {_TAGLESS} THEN NULL ELSE {{col}} END"
+                requeued += conn.execute(f"""UPDATE {t} SET language_probed_at=NULL,
+                    language_probe_status={tagless.format(col='language_probe_status')},
+                    language_probe_languages={tagless.format(col='language_probe_languages')},
+                    language_probe_confidence={tagless.format(col='language_probe_confidence')},
+                    language_probe_method={tagless.format(col='language_probe_method')}
+                    WHERE {_REQUEUE}""", (cutoff,)).rowcount
             vod_db._commit_with_retry(conn)
         finally:
             conn.close()

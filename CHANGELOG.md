@@ -85,6 +85,12 @@ included.
   wording as the single-row Archive parent button (for example "Archive 4
   titles?" and "4 parents archived; source language set to the observed
   language."), and counts of zero are left out.
+- Fixed: **Re-validate language results** now also clears the old "no language
+  tag" result on each feed it queues for a re-check. Before, those feeds kept
+  showing in Unknown Language Review until the audio check reached them, so the
+  list mixed stale results with new ones. Unknown Language Review now lists
+  only feeds the current audio check has read and still found no language tag.
+  The queued feeds are checked again in the background like any unchecked feed.
 - Fixed: the Language Mismatch Report's archive wording now matches what it
   does. Approving an archive sets the feed to the language the audio check
   found (for example PL — Polish), which hides it. The title is then archived
