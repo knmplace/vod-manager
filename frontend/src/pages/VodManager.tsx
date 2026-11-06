@@ -1737,6 +1737,47 @@ interface BulkAiJobStatus {
   error: string | null
 }
 
+// KNM: 2026-11-06 - on-demand trigger for the daily poster repair (dead image hosts and
+// empty posters are refilled from our TMDB store, then TMDB, then MDBList).
+interface PosterRepairResult { dead_hosts?: string[]; movies_fixed?: number; series_fixed?: number; unresolved?: number; skipped?: string }
+function PosterRepairPanel({ onDone }: { onDone: () => void }) {
+  const status = useQuery<{ running: boolean; last: PosterRepairResult | null }>({
+    queryKey: ['vod-poster-repair'],
+    queryFn: () => api.get('/vod/posters/repair/').then((r) => r.data),
+    refetchInterval: (q) => (q.state.data?.running ? 3000 : false),
+  })
+  const running = !!status.data?.running
+  const wasRunning = useRef(false)
+  useEffect(() => {
+    if (wasRunning.current && !running) onDone()
+    wasRunning.current = running
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [running])
+  const start = useMutation({
+    mutationFn: () => api.post('/vod/posters/repair/').then((r) => r.data),
+    onSuccess: () => status.refetch(),
+    onError: () => toast.error('Could not start the poster repair.'),
+  })
+  const last = status.data?.last
+  return (
+    <div className="rounded border border-border px-3 py-2 space-y-1.5">
+      <div className="flex items-center gap-2 flex-wrap">
+        <Button size="sm" variant="outline" disabled={running || start.isPending} onClick={() => start.mutate()}>
+          {running || start.isPending ? <Loader2 size={14} className="animate-spin mr-1" /> : <Wrench size={14} className="mr-1" />}
+          {running ? 'Fixing posters…' : 'Fix posters now'}
+        </Button>
+        <span className="text-sm text-foreground">Fills empty posters and replaces posters whose image server is offline. Runs by itself once a day; use this to run it now. Takes a few minutes.</span>
+      </div>
+      {last && !last.skipped && (
+        <p className="text-sm text-foreground">
+          Last run: {last.movies_fixed ?? 0} movies and {last.series_fixed ?? 0} shows fixed; {last.unresolved ?? 0} still have no poster anywhere (TMDB and MDBList have none — check the match or set one by hand).
+          {!!last.dead_hosts?.length && <> Offline image servers: {last.dead_hosts.join(', ')}.</>}
+        </p>
+      )}
+    </div>
+  )
+}
+
 function useBulkAiJob(startEndpoint: string, progressEndpointPrefix: string, cancelEndpointPrefix?: string) {
   const [jobId, setJobId] = useState<string | null>(null)
   const startMutation = useMutation({
@@ -5999,6 +6040,7 @@ function MissingArtworkModal({ contentType, qc, onClose, onOpenDedicated }: {
         />
       </div>
       <div className="px-4 pt-3 text-xs space-y-1.5 border-b border-border pb-3">
+        <PosterRepairPanel onDone={invalidateAfterBulk} />
         <div className="flex items-center gap-2 rounded border border-primary/30 bg-primary/5 px-2 py-1.5">
           <span className="text-muted-foreground">For a larger table view with per-title TMDB suggestions, use the dedicated Artwork Review page.</span>
           <Button size="sm" variant="outline" onClick={onOpenDedicated}>Open Artwork Review</Button>
@@ -6186,6 +6228,7 @@ function MissingArtworkPage({ contentType, qc, onBack, onContentType }: {
         </Button>
         <span className="text-xs text-muted-foreground">{query.data?.total ?? '…'} needing review</span>
       </div>
+      <PosterRepairPanel onDone={invalidate} />
       {bulkAi.startError && <p className="text-xs text-destructive">{bulkAi.startError}</p>}
       {bulkAi.job && <BulkAiJobSummary job={bulkAi.job} labelFor={(r) => r.name ?? `#${r.id}`} />}
       <div className="rounded border border-border overflow-hidden">

@@ -35,6 +35,13 @@ included.
 | Episode list preloading | [#74](https://github.com/jstevenscl/vod-manager/pull/74) | Open / under review |
 | Metadata identity matching | [#77](https://github.com/jstevenscl/vod-manager/pull/77) | ✅🔄 Open / under review |
 
+## 2026-11-06 (Fix posters button)
+
+- ✅ **Fix posters now** button on Artwork Review and the Missing Artwork window.
+  It runs the daily poster repair on demand and shows the last result: how many
+  movies and shows were fixed, how many have no poster anywhere, and which image
+  servers are offline.
+
 ## 2026-11-05 (Poster repair)
 
 - ✅ Posters on a dead image host are swapped automatically, and missing posters
