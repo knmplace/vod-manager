@@ -71,6 +71,8 @@ included.
   clicked, because the Language Mismatch page never showed their confirmation box.
 - Language monitoring controls now show suggested pacing settings (Light, Balanced,
   Steady, Fast catch-up, Overnight backlog) with a Use button that fills in the fields.
+- The Auto-clean panel now explains, in plain language, how it works and the
+  allowed and recommended range for each setting.
 - Fixed: hiding one feed no longer hides the whole title when the title's
   other feed has no language label (an unlabelled feed counts as English).
 
