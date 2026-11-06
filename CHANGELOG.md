@@ -67,6 +67,8 @@ included.
   with a Revert button. Running it again skips anything already checked by the
   current version.
 - The Re-validate and Auto-clean panels now use brighter, larger text.
+- Fixed: the **Re-validate** and auto-clean **Turn on** buttons did nothing when
+  clicked, because the Language Mismatch page never showed their confirmation box.
 - Fixed: hiding one feed no longer hides the whole title when the title's
   other feed has no language label (an unlabelled feed counts as English).
 

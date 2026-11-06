@@ -4,7 +4,7 @@ import { Check, Languages, Loader2, Power, RefreshCw, X } from 'lucide-react'
 import api from '@/lib/api'
 import LanguageAutocleanPanel from '@/components/LanguageAutocleanPanel'
 import LanguageRevalidatePanel from '@/components/LanguageRevalidatePanel'
-import { notify } from '@/lib/confirm'
+import { ConfirmDialogHost, NotifyDialogHost, notify } from '@/lib/confirm'
 import { buildHlsPreviewSourceUrl, buildPreviewSourceUrl, buildTranscodedPreviewSourceUrl, PlayButton, type XcCredentials } from './VodManager'
 
 type Mismatch = {
@@ -198,6 +198,9 @@ export default function LanguageMismatchReport() {
 
   return (
     <div className="space-y-4">
+      {/* KNM: 2026-11-05 - mount dialog hosts; askConfirm/notify are no-ops without them (Re-validate + auto-clean Turn on did nothing). */}
+      <ConfirmDialogHost />
+      <NotifyDialogHost />
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-lg font-semibold flex items-center gap-2"><Languages size={18} /> Language Mismatch Report</h1>
