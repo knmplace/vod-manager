@@ -78,6 +78,15 @@ included.
 - Audio tagged "enm" (a common mistag) is now treated as English.
 - Fixed: hiding one feed no longer hides the whole title when the title's
   other feed has no language label (an unlabelled feed counts as English).
+- Fixed: **Approve all proposed**, **Approve selected**, **Keep selected** and
+  **Keep all** on the Language Mismatch Report now ask once, then show a
+  progress bar ("Applying 37 of 394…") and one summary when finished, instead
+  of a pop-up for every row.
+- Fixed: the Language Mismatch Report's archive wording now matches what it
+  does. Approving an archive sets the feed to the language the audio check
+  found (for example PL — Polish), which hides it. The title is then archived
+  unless another feed has a wanted language. The old text wrongly said the
+  language was left unchanged.
 
 ## 2026-11-02 (TMDB review title matching)
 
