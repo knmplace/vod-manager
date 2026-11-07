@@ -64,7 +64,7 @@ _last_end: dict[int, float] = {}
 _recent: dict[int, collections.deque] = {}
 _language_trickle_day = ""
 _language_trickle_count = 0
-_language_claimed_sources: set[int] = set()
+_language_claimed_sources: set[tuple[str, int]] = set()  # KNM: 2026-11-07 - (kind, id): movie and episode ids overlap
 
 
 class ProbeRefused(Exception):
@@ -475,9 +475,10 @@ async def _probe_remote_language(kind: str, src: dict, provider: dict, spacing: 
     except ProbeRefused as exc:
         raise
     except asyncio.TimeoutError:
-        raise ProbeRefused(f"{provider['name']} took too long to answer. Try again later.", 60)
+        # KNM: 2026-11-07 - "transient" so the trickle counts it (was retried forever as "other")
+        raise ProbeRefused(f"{provider['name']} took too long to answer. Try again later.", 60, "transient")
     except (httpx.HTTPError, OSError) as exc:
-        raise ProbeRefused(f"Couldn't reach {provider['name']}: {vod_downloader._safe(exc) or type(exc).__name__}.", 30)
+        raise ProbeRefused(f"Couldn't reach {provider['name']}: {vod_downloader._safe(exc) or type(exc).__name__}.", 30, "transient")
     finally:
         _in_flight.discard(pid)
         _running_total -= 1
@@ -600,6 +601,12 @@ async def language_trickle_once(target: dict | None = None) -> dict:
                 vod_db.record_language_probe_failure,
                 target["kind"], target["source_id"], str(exc),
             )
+        elif exc.kind == "transient":
+            failure = await asyncio.to_thread(
+                vod_db.record_language_probe_transient_failure,
+                target["kind"], target["source_id"], str(exc), target.get("provider_id"),
+            )
+            failure["failures"] = failure["transient_failures"]
         await asyncio.to_thread(vod_db.record_language_probe_run,
                                 target["kind"], target["source_id"], target.get("provider_id"),
                                 "deferred", None, [], config.get_enabled_languages(), False, False, str(exc))
@@ -672,10 +679,11 @@ async def run_language_trickle_cycle() -> dict:
         provider_queues.setdefault(target["provider_id"], []).append(target)
     claimed = []
     for target in targets:
-        if target["source_id"] in _language_claimed_sources:
+        claim = (target["kind"], target["source_id"])
+        if claim in _language_claimed_sources:
             continue
-        _language_claimed_sources.add(target["source_id"])
-        claimed.append(target["source_id"])
+        _language_claimed_sources.add(claim)
+        claimed.append(claim)
 
     async def run_provider_queue(queue: list[dict]) -> list[dict]:
         results = []
@@ -690,7 +698,7 @@ async def run_language_trickle_cycle() -> dict:
 
     try:
         queues = [
-            [target for target in queue if target["source_id"] in claimed]
+            [target for target in queue if (target["kind"], target["source_id"]) in claimed]
             for queue in provider_queues.values()
         ]
         batches = await asyncio.gather(
@@ -703,17 +711,42 @@ async def run_language_trickle_cycle() -> dict:
             if isinstance(r, dict) else {"status": "error", "message": str(r)} for r in results
         ], "trickle": language_trickle_status()}
     finally:
-        for source_id in claimed:
-            _language_claimed_sources.discard(source_id)
+        for claim in claimed:
+            _language_claimed_sources.discard(claim)
+
+
+def _language_housekeeping(tally: dict, last: float, now: float) -> float:
+    """Hourly: one INFO summary of what the trickle did, then fold old history into daily totals."""
+    # KNM: 2026-11-07 - per-probe lines are DEBUG; this gives the live log a readable pulse.
+    if now - last < 3600:
+        return last
+    if tally:
+        logger.info("[language-probe] last hour: %s",
+                    ", ".join(f"{k}={v}" for k, v in sorted(tally.items())))
+    tally.clear()
+    try:
+        moved = vod_db.rollup_language_probe_history()
+        if moved:
+            logger.info("[language-probe] folded %d old history rows into daily totals", moved)
+    except Exception:
+        logger.exception("[language-probe] history rollup failed")
+    return now
 
 
 async def language_trickle_loop() -> None:
     """Quietly audit export-relevant sources, one bounded probe per interval."""
     await asyncio.sleep(90)
+    tally: dict[str, int] = {}
+    last_housekeeping = time.monotonic()
     while True:
         try:
             if config.get_language_trickle_settings().get("language_trickle_enabled", False):
-                await run_language_trickle_cycle()
+                cycle = await run_language_trickle_cycle()
+                for r in cycle.get("results", []):
+                    key = r.get("status") or "unknown"
+                    tally[key] = tally.get(key, 0) + 1
+            last_housekeeping = await asyncio.to_thread(
+                _language_housekeeping, tally, last_housekeeping, time.monotonic())
         except Exception:
             logger.exception("[language-probe] trickle loop failed")
         await asyncio.sleep(config.get_language_trickle_settings()["language_trickle_interval_seconds"])

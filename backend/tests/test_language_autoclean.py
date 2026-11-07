@@ -168,3 +168,26 @@ def test_middle_english_tag_counts_as_english():
     # KNM: 2026-11-05 - "enm" (Middle English) on a modern file is a mistagged "eng".
     import vod_probe
     assert vod_probe._LANGUAGE_CODES["enm"] == "EN"
+
+
+def test_log_fills_missing_tmdb_language_from_store(db):
+    # KNM: 2026-11-07 - revalidate/verify paths log without TMDB; the log looks it up on read.
+    sid = _movie(db, "Foreign", 4242, ["ES"])
+    _store("movie", 4242, "es", ["es"])
+    db.log_language_autoclean("movie", sid, "EN", "ES", ["ES"], None)
+    row = ac.list_log()[0]
+    assert row["tmdb_original_language"] == "ES"
+
+
+def test_unknowns_carry_tmdb_hint(db):
+    # KNM: 2026-11-07 - untagged audio can't be read from the file; TMDB is the next-best signal.
+    report = {"enabled_languages": ["EN"], "results": [
+        {"kind": "movie", "tmdb_id": 77, "source_id": 1},
+        {"kind": "movie", "tmdb_id": 78, "source_id": 2},
+        {"kind": "episode", "tmdb_id": None, "source_id": 3}]}
+    _store("movie", 77, "en", ["en"])
+    _store("movie", 78, "ja", ["ja"])
+    rows = ac.annotate_unknowns(report)["results"]
+    assert (rows[0]["tmdb_language"], rows[0]["tmdb_suggested_language"]) == ("EN", "EN")
+    assert (rows[1]["tmdb_language"], rows[1]["tmdb_suggested_language"]) == ("JA", None)
+    assert (rows[2]["tmdb_language"], rows[2]["tmdb_suggested_language"]) == (None, None)

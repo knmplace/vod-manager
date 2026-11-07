@@ -1201,6 +1201,21 @@ def _migrate(conn: sqlite3.Connection) -> None:
         error               TEXT
     )""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_language_probe_runs_checked ON language_probe_runs(checked_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_language_probe_runs_provider ON language_probe_runs(provider_id, checked_at)")
+    # KNM: 2026-11-07 - detail rows older than 14 days fold into per-day totals (live hit
+    # 120k rows in 4 days); the report reads both so history and totals are unchanged.
+    conn.execute("""CREATE TABLE IF NOT EXISTS language_probe_daily (
+        day            TEXT NOT NULL,
+        provider_id    INTEGER NOT NULL DEFAULT 0,
+        kind           TEXT NOT NULL,
+        probes         INTEGER NOT NULL DEFAULT 0,
+        mismatches     INTEGER NOT NULL DEFAULT 0,
+        not_needed     INTEGER NOT NULL DEFAULT 0,
+        outside_wanted INTEGER NOT NULL DEFAULT 0,
+        wanted_only    INTEGER NOT NULL DEFAULT 0,
+        errors         INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (day, provider_id, kind)
+    )""")
     # KNM: 2026-11-05 - every language auto-clean change, so it can be reviewed and reverted.
     conn.execute("""CREATE TABLE IF NOT EXISTS language_autoclean_log (
         id                     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1403,6 +1418,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("movie_sources", "language_probe_quarantined_at", "TEXT"),
         # KNM: 2026-11-05 - 1 = a person's earlier confirmation is queued for one re-check (language_revalidate.py)
         ("movie_sources", "language_probe_verify", "INTEGER NOT NULL DEFAULT 0"),
+        # KNM: 2026-11-07 - timeouts/dropped reads counted apart from language_probe_failures;
+        # recheck_at = when a quarantined source is automatically probed again (epoch seconds).
+        ("movie_sources", "language_probe_transient_failures", "INTEGER NOT NULL DEFAULT 0"),
+        ("movie_sources", "language_probe_transient_at", "REAL"),
+        ("movie_sources", "language_probe_recheck_at", "REAL"),
         ("episode_sources", "probe_width", "INTEGER"),
         ("episode_sources", "probe_height", "INTEGER"),
         ("episode_sources", "probe_codec", "TEXT"),
@@ -1419,6 +1439,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("episode_sources", "language_probe_last_failed_at", "TEXT"),
         ("episode_sources", "language_probe_quarantined_at", "TEXT"),
         ("episode_sources", "language_probe_verify", "INTEGER NOT NULL DEFAULT 0"),
+        ("episode_sources", "language_probe_transient_failures", "INTEGER NOT NULL DEFAULT 0"),
+        ("episode_sources", "language_probe_transient_at", "REAL"),
+        ("episode_sources", "language_probe_recheck_at", "REAL"),
         ("dvr_user_limits", "retention_max_age_days", "INTEGER"),
         ("dvr_user_limits", "retention_max_episodes_per_show", "INTEGER"),
         ("dvr_recording_profiles", "backfill_mode", "TEXT"),
@@ -8472,7 +8495,8 @@ def set_source_language_probe(kind: str, source_id: int, languages: list[str] | 
                     language_probe_error=?, language_probe_method=?,
                     language_probe_confidence=?, language_probed_at=?,
                     language_probe_failures=0, language_probe_last_failed_at=NULL,
-                    language_probe_quarantined_at=NULL
+                    language_probe_quarantined_at=NULL,
+                    language_probe_transient_failures=0, language_probe_transient_at=NULL, language_probe_recheck_at=NULL
                 WHERE id=?""",
             (json.dumps(sorted(set(languages or []))), status, error, method,
              confidence, datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"), source_id),
@@ -8530,7 +8554,8 @@ def auto_approve_language_probe_source(kind: str, source_id: int, languages: lis
                     SET language_probe_status='auto_approved', language_probe_decision='approved',
                         language_probe_decided_at=?, language_probe_method='auto_approved_configured_present',
                         language_probe_error=NULL, language_probe_failures=0,
-                        language_probe_last_failed_at=NULL, language_probe_quarantined_at=NULL
+                        language_probe_last_failed_at=NULL, language_probe_quarantined_at=NULL,
+                            language_probe_transient_failures=0, language_probe_recheck_at=NULL
                     WHERE id=?""",
                 (now, source_id),
             )
@@ -8591,17 +8616,91 @@ def record_language_probe_failure(kind: str, source_id: int, error: str,
                 f"SELECT language_probe_failures FROM {table} WHERE id=?", (source_id,)
             ).fetchone()
             failures = int(row[0] or 0) + 1 if row else 0
-            quarantined = now if failures >= max(1, int(quarantine_after)) else None
+            threshold = max(1, int(quarantine_after))
+            quarantined = now if failures >= threshold else None
+            recheck_at = _language_recheck_at(failures - threshold) if quarantined else None
             conn.execute(
                 f"""UPDATE {table}
                     SET language_probe_error=?, language_probe_status='error',
                         language_probe_failures=?, language_probe_last_failed_at=?,
-                        language_probe_quarantined_at=COALESCE(language_probe_quarantined_at, ?)
+                        language_probe_quarantined_at=COALESCE(language_probe_quarantined_at, ?),
+                        language_probe_recheck_at=COALESCE(?, language_probe_recheck_at)
                     WHERE id=?""",
-                (error, failures, now, quarantined, source_id),
+                (error, failures, now, quarantined, recheck_at, source_id),
             )
             _commit_with_retry(conn)
             return {"failures": failures, "quarantined": bool(quarantined)}
+        finally:
+            conn.close()
+
+
+# KNM: 2026-11-07 - a failed check pulls the source from playback (quarantine) until a
+# person confirms it or an automatic recheck (1, 2, 4, then 7 days) reads it. Timeouts
+# count too, but only quarantine while the provider is otherwise answering, so a
+# provider-wide outage doesn't pull its whole catalog; during an outage a source backs
+# off for a week after 5 timeouts (live AM1 retried one title 692 times in 4 days).
+LANGUAGE_TRANSIENT_LIMIT = 5
+LANGUAGE_TRANSIENT_BACKOFF_SECONDS = 7 * 86400
+LANGUAGE_TRANSIENT_QUARANTINE_AFTER = 2
+LANGUAGE_RECHECK_BASE_SECONDS = 86400
+LANGUAGE_RECHECK_MAX_SECONDS = 7 * 86400
+LANGUAGE_PROVIDER_HEALTHY_SECONDS = 3600
+
+
+def _language_recheck_at(extra_failures: int) -> float:
+    delay = LANGUAGE_RECHECK_BASE_SECONDS * (2 ** max(0, min(int(extra_failures), 8)))
+    return time.time() + min(delay, LANGUAGE_RECHECK_MAX_SECONDS)
+
+
+def _language_provider_recently_ok(conn, provider_id: int | None) -> bool:
+    if provider_id is None:
+        return True
+    return conn.execute(
+        """SELECT 1 FROM language_probe_runs WHERE provider_id=? AND checked_at>?
+             AND status NOT IN ('deferred','manual_approved') LIMIT 1""",
+        (provider_id, str(time.time() - LANGUAGE_PROVIDER_HEALTHY_SECONDS)),
+    ).fetchone() is not None
+
+
+def record_language_probe_transient_failure(kind: str, source_id: int, error: str,
+                                            provider_id: int | None = None) -> dict:
+    """Count a timeout/dropped read; quarantine (with auto recheck) once it repeats."""
+    table = "movie_sources" if kind == "movie" else "episode_sources"
+    now = time.time()
+    iso_now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                f"""SELECT language_probe_transient_failures, language_probe_quarantined_at
+                    FROM {table} WHERE id=?""", (source_id,)).fetchone()
+            if not row:
+                return {"transient_failures": 0, "quarantined": False}
+            count = int(row[0] or 0) + 1
+            quarantine = row[1] is not None or (
+                count >= LANGUAGE_TRANSIENT_QUARANTINE_AFTER and _language_provider_recently_ok(conn, provider_id))
+            if quarantine:
+                conn.execute(
+                    f"""UPDATE {table}
+                        SET language_probe_transient_failures=?, language_probe_transient_at=?,
+                            language_probe_error=?, language_probe_status='error',
+                            language_probe_last_failed_at=?,
+                            language_probe_quarantined_at=COALESCE(language_probe_quarantined_at, ?),
+                            language_probe_recheck_at=?
+                        WHERE id=?""",
+                    (count, now, error, iso_now, iso_now,
+                     _language_recheck_at(count - LANGUAGE_TRANSIENT_QUARANTINE_AFTER), source_id),
+                )
+            else:
+                conn.execute(
+                    f"""UPDATE {table}
+                        SET language_probe_transient_failures=?, language_probe_transient_at=?,
+                            language_probe_error=?
+                        WHERE id=?""",
+                    (count, now, error, source_id),
+                )
+            _commit_with_retry(conn)
+            return {"transient_failures": count, "quarantined": bool(quarantine)}
         finally:
             conn.close()
 
@@ -8616,6 +8715,7 @@ def reset_language_probe_failure(kind: str, source_id: int) -> None:
                 f"""UPDATE {table}
                     SET language_probe_status=NULL, language_probe_error=NULL,
                         language_probe_failures=0, language_probe_last_failed_at=NULL,
+                        language_probe_transient_failures=0, language_probe_transient_at=NULL, language_probe_recheck_at=NULL,
                         language_probe_quarantined_at=NULL,
                         language_probe_languages=NULL, language_probe_confidence=NULL,
                         language_probe_method=NULL, language_probed_at=NULL
@@ -8651,7 +8751,8 @@ def approve_language_probe_source(kind: str, source_id: int, language: str | Non
                     language_probe_error=NULL,
                     language_probe_method=?, language_probe_confidence='manual',
                     language_probe_languages=?, language_probed_at=?, language_probe_failures=0,
-                    language_probe_last_failed_at=NULL, language_probe_quarantined_at=NULL
+                    language_probe_last_failed_at=NULL, language_probe_quarantined_at=NULL,
+                            language_probe_transient_failures=0, language_probe_recheck_at=NULL
                 WHERE id=?""",
                 (confirmed_language, now,
                  "manual_language_confirmed" if confirmed_language else "manual_playback_review",
@@ -8736,7 +8837,8 @@ def approve_language_probe_sources(sources: list[dict], language: str) -> dict:
                             language_probe_error=NULL, language_probe_method='manual_language_confirmed',
                             language_probe_confidence='manual', language_probe_languages=?,
                             language_probed_at=?, language_probe_failures=0,
-                            language_probe_last_failed_at=NULL, language_probe_quarantined_at=NULL
+                            language_probe_last_failed_at=NULL, language_probe_quarantined_at=NULL,
+                            language_probe_transient_failures=0, language_probe_recheck_at=NULL
                         WHERE id IN ({placeholders})""",
                     [confirmed_language, now, json.dumps([confirmed_language]), now, *source_ids],
                 )
@@ -8782,7 +8884,8 @@ def list_language_probe_errors(limit: int = 500) -> list[dict]:
                    ms.language AS configured_language,
                    ms.provider_category_name AS category, ms.provider_stream_id,
                    ms.container_extension, ms.language_probe_error AS reason,
-                   ms.language_probe_failures AS attempts,
+                   COALESCE(ms.language_probe_failures, 0) + COALESCE(ms.language_probe_transient_failures, 0) AS attempts,
+                   ms.language_probe_recheck_at AS next_recheck_at,
                    ms.language_probe_quarantined_at IS NOT NULL AS quarantined,
                    ms.language_probe_last_failed_at AS last_failed_at,
                    ms.language_probe_quarantined_at AS quarantined_at
@@ -8795,7 +8898,8 @@ def list_language_probe_errors(limit: int = 500) -> list[dict]:
                    es.language AS configured_language,
                    es.provider_category_name AS category, es.provider_stream_id,
                    es.container_extension, es.language_probe_error AS reason,
-                   es.language_probe_failures AS attempts,
+                   COALESCE(es.language_probe_failures, 0) + COALESCE(es.language_probe_transient_failures, 0) AS attempts,
+                   es.language_probe_recheck_at AS next_recheck_at,
                    es.language_probe_quarantined_at IS NOT NULL AS quarantined,
                    es.language_probe_last_failed_at AS last_failed_at,
                    es.language_probe_quarantined_at AS quarantined_at
@@ -8874,6 +8978,44 @@ def language_probe_activity_today() -> dict:
         return {key: int(row[key] or 0) for key in ('attempts', 'completed', 'deferred', 'errors')}
     finally:
         conn.close()
+
+
+LANGUAGE_PROBE_HISTORY_KEEP_DAYS = 14
+
+
+def rollup_language_probe_history(keep_days: int = LANGUAGE_PROBE_HISTORY_KEEP_DAYS) -> int:
+    """Fold probe-run rows older than keep_days into language_probe_daily; returns rows moved."""
+    cutoff = str(time.time() - max(1, int(keep_days)) * 86400)
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            moved = conn.execute("SELECT COUNT(*) FROM language_probe_runs WHERE checked_at < ?",
+                                 (cutoff,)).fetchone()[0]
+            if not moved:
+                return 0
+            conn.execute("""
+                INSERT INTO language_probe_daily (day, provider_id, kind, probes, mismatches, not_needed, outside_wanted, wanted_only, errors)
+                SELECT date(CAST(checked_at AS REAL), 'unixepoch', 'localtime') AS day,
+                       COALESCE(provider_id, 0), kind,
+                       COUNT(*) AS probes,
+                   SUM(CASE WHEN mismatch=1 THEN 1 ELSE 0 END) AS mismatches,
+                   SUM(CASE WHEN status NOT IN ('error', 'deferred') AND mismatch=0 THEN 1 ELSE 0 END) AS not_needed,
+                   SUM(CASE WHEN mismatch=1 AND wanted_match=0 THEN 1 ELSE 0 END) AS outside_wanted,
+                   SUM(CASE WHEN wanted_match=1 THEN 1 ELSE 0 END) AS wanted_only,
+                   SUM(CASE WHEN status IN ('error', 'deferred') THEN 1 ELSE 0 END) AS errors
+                FROM language_probe_runs WHERE checked_at < ?
+                GROUP BY day, COALESCE(provider_id, 0), kind
+                ON CONFLICT(day, provider_id, kind) DO UPDATE SET
+                    probes=probes+excluded.probes, mismatches=mismatches+excluded.mismatches,
+                    not_needed=not_needed+excluded.not_needed,
+                    outside_wanted=outside_wanted+excluded.outside_wanted,
+                    wanted_only=wanted_only+excluded.wanted_only, errors=errors+excluded.errors
+            """, (cutoff,))
+            conn.execute("DELETE FROM language_probe_runs WHERE checked_at < ?", (cutoff,))
+            _commit_with_retry(conn)
+            return int(moved)
+        finally:
+            conn.close()
 
 
 def _language_probe_error_code(status: str | None, error: str | None) -> str:
@@ -9231,26 +9373,37 @@ def language_audit_stats(history_limit: int = 31) -> dict:
             )
         """).fetchone()[0]
         rows = conn.execute("""
-            SELECT date(CAST(checked_at AS REAL), 'unixepoch', 'localtime') AS day,
-                   COUNT(*) AS probes,
+            SELECT day, SUM(probes) AS probes, SUM(mismatches) AS mismatches, SUM(not_needed) AS not_needed,
+                   SUM(outside_wanted) AS outside_wanted, SUM(wanted_only) AS wanted_only, SUM(errors) AS errors
+            FROM (
+                SELECT date(CAST(checked_at AS REAL), 'unixepoch', 'localtime') AS day,
+                       COUNT(*) AS probes,
                    SUM(CASE WHEN mismatch=1 THEN 1 ELSE 0 END) AS mismatches,
                    SUM(CASE WHEN status NOT IN ('error', 'deferred') AND mismatch=0 THEN 1 ELSE 0 END) AS not_needed,
                    SUM(CASE WHEN mismatch=1 AND wanted_match=0 THEN 1 ELSE 0 END) AS outside_wanted,
                    SUM(CASE WHEN wanted_match=1 THEN 1 ELSE 0 END) AS wanted_only,
                    SUM(CASE WHEN status IN ('error', 'deferred') THEN 1 ELSE 0 END) AS errors
-            FROM language_probe_runs
-            GROUP BY day ORDER BY day DESC LIMIT ?
+                FROM language_probe_runs GROUP BY day
+                UNION ALL
+                SELECT day, probes, mismatches, not_needed, outside_wanted, wanted_only, errors FROM language_probe_daily
+            ) GROUP BY day ORDER BY day DESC LIMIT ?
         """, (max(1, int(history_limit)),)).fetchall()
         provider_rows = conn.execute("""
             SELECT COALESCE(p.name, 'Unknown provider') AS provider,
                    CASE WHEN r.kind='movie' THEN 'M' ELSE 'S' END AS type,
-                   COUNT(*) AS probes,
-                   SUM(CASE WHEN r.mismatch=1 THEN 1 ELSE 0 END) AS mismatches,
-                   SUM(CASE WHEN r.status NOT IN ('error', 'deferred') AND r.mismatch=0 THEN 1 ELSE 0 END) AS not_needed,
-                   SUM(CASE WHEN r.mismatch=1 AND r.wanted_match=0 THEN 1 ELSE 0 END) AS outside_wanted,
-                   SUM(CASE WHEN r.wanted_match=1 THEN 1 ELSE 0 END) AS wanted_only,
-                   SUM(CASE WHEN r.status IN ('error', 'deferred') THEN 1 ELSE 0 END) AS errors
-            FROM language_probe_runs r JOIN providers p ON p.id=r.provider_id AND p.is_active=1
+                   SUM(r.probes) AS probes, SUM(r.mismatches) AS mismatches, SUM(r.not_needed) AS not_needed,
+                   SUM(r.outside_wanted) AS outside_wanted, SUM(r.wanted_only) AS wanted_only, SUM(r.errors) AS errors
+            FROM (
+                SELECT provider_id, kind, COUNT(*) AS probes,
+                   SUM(CASE WHEN mismatch=1 THEN 1 ELSE 0 END) AS mismatches,
+                   SUM(CASE WHEN status NOT IN ('error', 'deferred') AND mismatch=0 THEN 1 ELSE 0 END) AS not_needed,
+                   SUM(CASE WHEN mismatch=1 AND wanted_match=0 THEN 1 ELSE 0 END) AS outside_wanted,
+                   SUM(CASE WHEN wanted_match=1 THEN 1 ELSE 0 END) AS wanted_only,
+                   SUM(CASE WHEN status IN ('error', 'deferred') THEN 1 ELSE 0 END) AS errors
+                FROM language_probe_runs GROUP BY provider_id, kind
+                UNION ALL
+                SELECT provider_id, kind, probes, mismatches, not_needed, outside_wanted, wanted_only, errors FROM language_probe_daily
+            ) r JOIN providers p ON p.id=r.provider_id AND p.is_active=1
             GROUP BY provider, type ORDER BY provider, type
         """).fetchall()
         error_rows = conn.execute("""
@@ -9476,20 +9629,32 @@ def next_language_probe_targets(
         rows = conn.execute(f"""
             WITH candidates AS (
                 SELECT 'movie' AS kind, ms.id AS source_id, ms.provider_id,
-                       ms.language_probe_failures, ms.language_probe_last_failed_at
+                       ms.language_probe_failures, ms.language_probe_last_failed_at,
+                       ms.language_probe_transient_failures,
+                       ms.language_probe_quarantined_at IS NOT NULL AS recheck_due
                 FROM movie_sources ms JOIN movies m ON m.id=ms.movie_id JOIN providers p ON p.id=ms.provider_id
                 WHERE p.is_active=1 AND m.review_excluded=0 AND (ms.language_probe_decision IS NULL OR ms.language_probe_verify=1){provider_filter}
-                  AND ms.language_probed_at IS NULL AND ms.language_probe_quarantined_at IS NULL
+                  AND ms.language_probed_at IS NULL
+                  AND (ms.language_probe_quarantined_at IS NULL OR COALESCE(ms.language_probe_recheck_at, 0) <= ?)
+                  AND (ms.language_probe_quarantined_at IS NOT NULL
+                       OR NOT (COALESCE(ms.language_probe_transient_failures, 0) >= ?
+                               AND COALESCE(ms.language_probe_transient_at, 0) > ?))
                   AND EXISTS (SELECT 1 FROM movie_category_placements cp WHERE cp.movie_id=m.id)
                   AND NOT EXISTS (SELECT 1 FROM language_probe_capacity_provider_state h
                                   WHERE h.provider_id=p.id AND h.next_retry_at>?)
                 UNION ALL
                 SELECT 'episode' AS kind, es.id AS source_id, es.provider_id,
-                       es.language_probe_failures, es.language_probe_last_failed_at
+                       es.language_probe_failures, es.language_probe_last_failed_at,
+                       es.language_probe_transient_failures,
+                       es.language_probe_quarantined_at IS NOT NULL AS recheck_due
                 FROM episode_sources es JOIN episodes e ON e.id=es.episode_id
                 JOIN series s ON s.id=e.series_id JOIN providers p ON p.id=es.provider_id
                 WHERE p.is_active=1 AND s.review_excluded=0 AND (es.language_probe_decision IS NULL OR es.language_probe_verify=1){provider_filter}
-                  AND es.language_probed_at IS NULL AND es.language_probe_quarantined_at IS NULL
+                  AND es.language_probed_at IS NULL
+                  AND (es.language_probe_quarantined_at IS NULL OR COALESCE(es.language_probe_recheck_at, 0) <= ?)
+                  AND (es.language_probe_quarantined_at IS NOT NULL
+                       OR NOT (COALESCE(es.language_probe_transient_failures, 0) >= ?
+                               AND COALESCE(es.language_probe_transient_at, 0) > ?))
                   AND EXISTS (SELECT 1 FROM series_category_placements cp WHERE cp.series_id=s.id)
                   AND NOT EXISTS (SELECT 1 FROM language_probe_capacity_provider_state h
                                   WHERE h.provider_id=p.id AND h.next_retry_at>?)
@@ -9502,7 +9667,9 @@ def next_language_probe_targets(
                                       WHERE h.provider_id=candidates.provider_id
                                         AND h.source_id=candidates.source_id
                                     ) THEN 0 ELSE 1 END,
+                                  recheck_due DESC,
                                   CASE WHEN COALESCE(language_probe_failures, 0) > 0 THEN 1 ELSE 0 END,
+                                  COALESCE(language_probe_transient_failures, 0),
                                   language_probe_last_failed_at, source_id
                        ) AS provider_rank
                 FROM candidates
@@ -9510,7 +9677,8 @@ def next_language_probe_targets(
             SELECT kind, source_id, provider_id FROM ranked
             WHERE provider_rank <= ?
             ORDER BY provider_rank, provider_id, source_id
-        """, params + [now] + params + [now, per_provider_limit]).fetchall()
+        """, params + [now, LANGUAGE_TRANSIENT_LIMIT, now - LANGUAGE_TRANSIENT_BACKOFF_SECONDS, now]
+             + params + [now, LANGUAGE_TRANSIENT_LIMIT, now - LANGUAGE_TRANSIENT_BACKOFF_SECONDS, now, per_provider_limit]).fetchall()
         if distinct_providers:
             chosen = []
             providers = set()
@@ -9661,7 +9829,9 @@ def apply_language_verify_result(kind: str, source_id: int, languages: list[str]
                 conn = _connect()
                 try:
                     conn.execute(f"""UPDATE {table} SET language_probed_at=?, language_probe_failures=0,
-                                        language_probe_last_failed_at=NULL WHERE id=?""",
+                                        language_probe_last_failed_at=NULL, language_probe_quarantined_at=NULL,
+                                        language_probe_transient_failures=0, language_probe_recheck_at=NULL
+                                    WHERE id=?""",
                                  (datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"), source_id))
                     _commit_with_retry(conn)
                 finally:
@@ -9718,7 +9888,8 @@ def list_language_autoclean_log(limit: int = 200) -> list[dict]:
                    CASE WHEN l.kind='movie' THEN m.name
                         ELSE s.name || ' S' || printf('%02d', e.season_number) || 'E' || printf('%02d', e.episode_number)
                              || CASE WHEN COALESCE(e.name,'')!='' THEN ' · ' || e.name ELSE '' END END AS title,
-                   COALESCE(pm.name, pe.name) AS provider_name
+                   COALESCE(pm.name, pe.name) AS provider_name,
+                   CASE WHEN l.kind='movie' THEN m.tmdb_id ELSE s.tmdb_id END AS parent_tmdb_id
             FROM language_autoclean_log l
             LEFT JOIN movie_sources ms ON l.kind='movie' AND ms.id=l.source_id
             LEFT JOIN movies m ON m.id=ms.movie_id

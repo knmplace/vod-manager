@@ -171,8 +171,31 @@ def apply_batch(limit: int) -> dict:
     return {"applied": applied, "considered": len(found)}
 
 
+def annotate_unknowns(report: dict) -> dict:
+    """Add the TMDB original language (and whether it is a wanted language) to unknown rows."""
+    wanted = {vod_db.canonical_language(c) for c in report.get("enabled_languages") or []}
+    memo: dict = {}  # episodes of one series share a tmdb_id
+    for row in report.get("results") or []:
+        lookup = ("movie" if row["kind"] == "movie" else "tv", row.get("tmdb_id"))
+        if lookup not in memo:
+            memo[lookup] = _tmdb_languages(*lookup)
+        tmdb = memo[lookup]
+        original = tmdb[0] if tmdb else None
+        row["tmdb_language"] = original
+        row["tmdb_suggested_language"] = original if original in wanted else None
+    return report
+
+
 def list_log(limit: int = 200) -> list[dict]:
-    return vod_db.list_language_autoclean_log(limit)
+    rows = vod_db.list_language_autoclean_log(limit)
+    # KNM: 2026-11-07 - revalidate/verify changes are logged without TMDB; look it up here.
+    for row in rows:
+        tmdb_id = row.pop("parent_tmdb_id", None)
+        if not row.get("tmdb_original_language") and tmdb_id:
+            tmdb = _tmdb_languages("movie" if row["kind"] == "movie" else "tv", tmdb_id)
+            if tmdb and tmdb[0]:
+                row["tmdb_original_language"] = tmdb[0]
+    return rows
 
 
 def revert(log_id: int) -> bool:
@@ -192,6 +215,9 @@ async def run_cycle() -> dict:
     else:
         result = await asyncio.to_thread(apply_batch, settings["language_autoclean_batch_size"])
         status = {"status": "applied" if result["applied"] else "idle", **result}
+        if result["applied"]:  # KNM: 2026-11-07 - visible pulse in the live log
+            logger.info("[language-autoclean] hid %d unwanted-language feeds (%d considered)",
+                        result["applied"], result["considered"])
     _state.update(last_run_at=_now(), last_status=status["status"], busy_reason=status.get("reason"),
                   last_applied=status.get("applied", 0))
     return status

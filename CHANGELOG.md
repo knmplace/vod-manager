@@ -39,6 +39,18 @@ included.
 | Poster repair and Fix posters now button | — | ✅ Fork only; to be proposed after the open PRs merge (it shares files with #74, #75, #77 and #78) |
 | More poster choices and the tidier poster picker | — | ✅ Fork only; built on this fork's Missing Artwork picker, which has to go upstream first |
 
+## 2026-11-07 (Language checks: failed files leave playback, smaller history)
+
+- ✅ Fork only.
+- **A file that can't be read is hidden from playback until it is confirmed working.** Before, a source that timed out was retried forever and never counted; one title was retried 692 times in 4 days. Now a timeout or dropped connection counts as a failure. The first failure leaves the source playable. A second failure hides it from playback (quarantine). It shows on **Language Probe Issues** with the date of its next automatic recheck.
+- **Automatic rechecks.** Hidden sources are tried again after 1 day, then 2, then 4, then every 7 days. A recheck that reads the file puts it back in playback. You can still approve or delete it yourself at any time. This also applies to provider errors such as HTTP 404.
+- **A provider outage doesn't hide a whole catalog.** A source is hidden only while its provider is answering other checks. If the whole provider is down, its sources stay playable and pause their checks for a week after 5 timeouts.
+- **Probe history stays small.** Detail rows older than 14 days are folded into daily totals once an hour. The report's daily and per-provider numbers are unchanged.
+- **Unknown Language Review shows TMDB's language.** Many unknown files have audio tracks with no language tag, so the file itself can't tell us. Each row now shows the TMDB original language. If that is one of your languages, it is pre-selected in that row's confirm box. A new **Select where TMDB says …** button selects those rows, so you can spot-check a few with Play and then confirm them in one batch.
+- **Auto-clean log fills in TMDB language** for changes made by rechecks, which were logged without it.
+- **Clearer live logs.** One INFO line per hour summarizes language checks, and auto-clean logs a line whenever it hides feeds.
+- Fixed: a movie and an episode with the same internal number could block each other's language check in the same cycle.
+
 ## 2026-11-06 (Tidier poster picker)
 
 - ✅ Fork only (needs this fork's Missing Artwork picker upstream first).
