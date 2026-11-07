@@ -39,6 +39,13 @@ included.
 | Poster repair and Fix posters now button | — | ✅ Fork only; to be proposed after the open PRs merge (it shares files with #74, #75, #77 and #78) |
 | More poster choices and the tidier poster picker | — | ✅ Fork only; built on this fork's Missing Artwork picker, which has to go upstream first |
 
+## 2026-11-07 (Auto-clean log keeps the movie name)
+
+- ✅ Fork only.
+- **"Recent auto-clean changes" now shows which movie or episode was hidden.** Before, if the feed had since been deleted, the row only said "movie #797803" with no provider. The title and provider are now saved when auto-clean hides a feed, so the name stays visible after the feed is gone.
+- **Revert only appears while the feed still exists.** If the feed was deleted, the row says "Feed removed" instead of a Revert button, and a revert attempt explains that there is nothing to restore. Feeds that still exist can be reverted exactly as before.
+- Older rows are filled in by a one-time backfill from the live data and a database backup; rows it cannot name show "(title unavailable, source removed)".
+
 ## 2026-11-07 (Language checks: failed files leave playback, smaller history)
 
 - ✅ Fork only.

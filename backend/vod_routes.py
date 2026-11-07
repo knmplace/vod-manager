@@ -4676,7 +4676,11 @@ async def language_autoclean_log(limit: int = 200):
 
 @router.post("/language-autoclean/log/{log_id}/revert/", dependencies=_GUARDS)
 async def revert_language_autoclean(log_id: int):
-    if not await asyncio.to_thread(language_autoclean.revert, log_id):
+    result = await asyncio.to_thread(language_autoclean.revert_result, log_id)
+    # KNM: 2026-11-07 - a deleted feed gets its own message (410) so the user is not told it was "changed".
+    if result == "missing":
+        raise HTTPException(410, "This feed no longer exists, so there is nothing to restore.")
+    if result != "reverted":
         raise HTTPException(409, "Already reverted, or the source was changed since auto-clean touched it.")
     return {"reverted": True}
 

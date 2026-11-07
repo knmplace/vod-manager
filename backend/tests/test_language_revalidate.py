@@ -204,3 +204,18 @@ def test_routes_preview_then_apply(db):
     assert asyncio.run(vod_routes.language_revalidate_preview())["requeue"] == 1
     assert asyncio.run(vod_routes.language_revalidate_apply())["requeued"] == 1
     assert asyncio.run(vod_routes.language_revalidate_preview())["requeue"] == 0
+
+
+def test_verify_and_repair_writers_snapshot_title_and_provider(db):
+    # KNM: 2026-11-07 - every writer of the auto-clean log must save the name, not just apply_batch.
+    sid, _ = _src(db, "snap-verify", status="manual_approved", decision="approved", observed=["EN"], sibling=True)
+    rv.apply()
+    db.apply_language_verify_result("movie", sid, ["FR"], "embedded_audio_tags")
+    fixed, _ = _src(db, "snap-repair", status="observed", decision="approved", observed=["RU"], sibling=True)
+    rv.apply()
+    conn = db._connect()
+    conn.execute("DELETE FROM movie_sources WHERE id IN (?,?)", (sid, fixed))
+    conn.commit(); conn.close()
+    rows = {r["source_id"]: r for r in db.list_language_autoclean_log()}
+    assert rows[sid]["title"] == "snap-verify" and rows[sid]["provider_name"] == "prov-snap-verify"
+    assert rows[fixed]["title"] == "snap-repair" and rows[fixed]["provider_name"] == "prov-snap-repair"

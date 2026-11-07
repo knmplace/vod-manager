@@ -1645,6 +1645,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("download_jobs", "import_seen_size", "INTEGER"),  # size-stable check before importing
         ("download_jobs", "import_seen_at", "REAL"),
         ("download_jobs", "import_since", "REAL"),         # start of the stall clock
+        # KNM: 2026-11-07 - snapshot what was hidden so the log still names it after the feed is deleted.
+        ("language_autoclean_log", "title", "TEXT"),
+        ("language_autoclean_log", "provider_name", "TEXT"),
+        ("language_autoclean_log", "parent_id", "INTEGER"),
     ]
     for table, column, coltype in migrations:
         existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -9866,14 +9870,36 @@ def apply_language_verify_result(kind: str, source_id: int, languages: list[str]
                 conn.close()
 
 
+_AUTOCLEAN_LABEL_SQL = {
+    "movie": """SELECT m.name AS title, p.name AS provider_name, ms.movie_id AS parent_id
+                FROM movie_sources ms LEFT JOIN movies m ON m.id=ms.movie_id
+                LEFT JOIN providers p ON p.id=ms.provider_id WHERE ms.id=?""",
+    "episode": """SELECT s.name || ' S' || printf('%02d', e.season_number) || 'E' || printf('%02d', e.episode_number)
+                         || CASE WHEN COALESCE(e.name,'')!='' THEN ' · ' || e.name ELSE '' END AS title,
+                         p.name AS provider_name, es.episode_id AS parent_id
+                  FROM episode_sources es LEFT JOIN episodes e ON e.id=es.episode_id
+                  LEFT JOIN series s ON s.id=e.series_id
+                  LEFT JOIN providers p ON p.id=es.provider_id WHERE es.id=?""",
+}
+
+
+def _autoclean_source_label(conn, kind: str, source_id: int) -> dict:
+    """Title / provider / parent id of a source as it is right now (all None if gone)."""
+    row = conn.execute(_AUTOCLEAN_LABEL_SQL["movie" if kind == "movie" else "episode"], (source_id,)).fetchone()
+    return dict(row) if row else {"title": None, "provider_name": None, "parent_id": None}
+
+
 def log_language_autoclean(kind: str, source_id: int, previous_language: str | None, new_language: str | None,
                            observed: list[str], tmdb_original_language: str | None) -> None:
     with _WRITE_LOCK:
         conn = _connect()
         try:
+            label = _autoclean_source_label(conn, kind, source_id)
             conn.execute("""INSERT INTO language_autoclean_log (kind, source_id, previous_language, new_language,
-                                observed_languages, tmdb_original_language, applied_at) VALUES (?,?,?,?,?,?,?)""",
-                         (kind, source_id, previous_language, new_language, json.dumps(observed), tmdb_original_language, _now()))
+                                observed_languages, tmdb_original_language, applied_at, title, provider_name, parent_id)
+                            VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                         (kind, source_id, previous_language, new_language, json.dumps(observed), tmdb_original_language,
+                          _now(), label["title"], label["provider_name"], label["parent_id"]))
             _commit_with_retry(conn)
         finally:
             conn.close()
@@ -9883,16 +9909,21 @@ def list_language_autoclean_log(limit: int = 200) -> list[dict]:
     conn = _connect()
     try:
         # KNM: 2026-11-05 - include title/provider and an ISO time so the log is readable.
+        # KNM: 2026-11-07 - fall back to the snapshot saved at hide time when the feed has been deleted.
         rows = [dict(r) for r in conn.execute("""
-            SELECT l.*,
-                   CASE WHEN l.kind='movie' THEN m.name
+            SELECT l.id, l.kind, l.source_id, l.previous_language, l.new_language, l.observed_languages,
+                   l.tmdb_original_language, l.applied_at, l.reverted_at, l.parent_id,
+                   COALESCE(CASE WHEN l.kind='movie' THEN COALESCE(m.name, m2.name)
                         ELSE s.name || ' S' || printf('%02d', e.season_number) || 'E' || printf('%02d', e.episode_number)
-                             || CASE WHEN COALESCE(e.name,'')!='' THEN ' · ' || e.name ELSE '' END END AS title,
-                   COALESCE(pm.name, pe.name) AS provider_name,
-                   CASE WHEN l.kind='movie' THEN m.tmdb_id ELSE s.tmdb_id END AS parent_tmdb_id
+                             || CASE WHEN COALESCE(e.name,'')!='' THEN ' · ' || e.name ELSE '' END END,
+                        l.title) AS title,
+                   COALESCE(pm.name, pe.name, l.provider_name) AS provider_name,
+                   CASE WHEN l.kind='movie' THEN COALESCE(m.tmdb_id, m2.tmdb_id) ELSE s.tmdb_id END AS parent_tmdb_id,
+                   (ms.id IS NOT NULL OR es.id IS NOT NULL) AS source_exists
             FROM language_autoclean_log l
             LEFT JOIN movie_sources ms ON l.kind='movie' AND ms.id=l.source_id
             LEFT JOIN movies m ON m.id=ms.movie_id
+            LEFT JOIN movies m2 ON l.kind='movie' AND m2.id=l.parent_id
             LEFT JOIN providers pm ON pm.id=ms.provider_id
             LEFT JOIN episode_sources es ON l.kind='episode' AND es.id=l.source_id
             LEFT JOIN episodes e ON e.id=es.episode_id
@@ -9900,6 +9931,7 @@ def list_language_autoclean_log(limit: int = 200) -> list[dict]:
             LEFT JOIN providers pe ON pe.id=es.provider_id
             ORDER BY l.id DESC LIMIT ?""", (int(limit),)).fetchall()]
         for r in rows:
+            r["source_exists"] = bool(r["source_exists"])
             try:
                 r["applied_at_iso"] = datetime.datetime.fromtimestamp(float(r["applied_at"]), datetime.timezone.utc).isoformat(timespec="seconds")
             except (TypeError, ValueError):
@@ -9909,26 +9941,86 @@ def list_language_autoclean_log(limit: int = 200) -> list[dict]:
         conn.close()
 
 
-def revert_language_autoclean(log_id: int) -> bool:
-    """Undo one auto-clean change; refuses if someone has changed the source since."""
+def backfill_language_autoclean_snapshots(backup_path: str | None = None) -> dict:
+    """One-time fill of title/provider/parent_id on old log rows; only fills NULLs, safe to rerun."""
+    counts = {"live": 0, "backup": 0, "provider_only": 0}
+
+    def _fill(conn, kind, source_id, label):
+        return conn.execute(
+            """UPDATE language_autoclean_log SET title=COALESCE(title, ?), provider_name=COALESCE(provider_name, ?),
+                      parent_id=COALESCE(parent_id, ?)
+               WHERE kind=? AND source_id=? AND (title IS NULL OR provider_name IS NULL OR parent_id IS NULL)""",
+            (label["title"], label["provider_name"], label["parent_id"], kind, source_id)).rowcount
+
+    def _pending(conn):
+        return conn.execute("""SELECT DISTINCT kind, source_id FROM language_autoclean_log
+                               WHERE title IS NULL OR provider_name IS NULL OR parent_id IS NULL""").fetchall()
+
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            for r in _pending(conn):
+                label = _autoclean_source_label(conn, r["kind"], r["source_id"])
+                if label["title"] or label["provider_name"]:
+                    counts["live"] += _fill(conn, r["kind"], r["source_id"], label)
+            conn.commit()
+            if backup_path:
+                # KNM: 2026-11-07 - read the backup through its own read-only connection (ATTACH URIs fail on Windows paths).
+                bk = sqlite3.connect(Path(backup_path).resolve().as_uri() + "?mode=ro", uri=True)
+                bk.row_factory = sqlite3.Row
+                try:
+                    for r in _pending(conn):
+                        try:
+                            row = _autoclean_source_label(bk, r["kind"], r["source_id"])
+                        except sqlite3.Error:
+                            continue
+                        if row["title"] or row["provider_name"]:
+                            counts["backup"] += _fill(conn, r["kind"], r["source_id"], row)
+                    conn.commit()
+                finally:
+                    bk.close()
+            counts["provider_only"] = conn.execute("""UPDATE language_autoclean_log SET provider_name=(
+                    SELECT p.name FROM language_probe_runs pr JOIN providers p ON p.id=pr.provider_id
+                    WHERE pr.kind=language_autoclean_log.kind AND pr.source_id=language_autoclean_log.source_id
+                    ORDER BY pr.id DESC LIMIT 1)
+                WHERE provider_name IS NULL AND EXISTS (
+                    SELECT 1 FROM language_probe_runs pr JOIN providers p ON p.id=pr.provider_id
+                    WHERE pr.kind=language_autoclean_log.kind AND pr.source_id=language_autoclean_log.source_id)""").rowcount
+            _commit_with_retry(conn)
+        finally:
+            conn.close()
+    return counts
+
+
+def revert_language_autoclean_result(log_id: int) -> str:
+    """Undo one auto-clean change. Returns reverted, missing (feed deleted), already_reverted or changed."""
     with _WRITE_LOCK:
         conn = _connect()
         try:
             log = conn.execute("SELECT * FROM language_autoclean_log WHERE id=?", (log_id,)).fetchone()
-            if not log or log["reverted_at"]:
-                return False
+            if not log:
+                return "missing"
+            if log["reverted_at"]:
+                return "already_reverted"
             table = "movie_sources" if log["kind"] == "movie" else "episode_sources"
+            # KNM: 2026-11-07 - a deleted feed cannot be restored; say so instead of the generic "changed" error.
+            if not conn.execute(f"SELECT 1 FROM {table} WHERE id=?", (log["source_id"],)).fetchone():
+                return "missing"
             changed = conn.execute(
                 f"""UPDATE {table} SET language=?, language_probe_decision=NULL, language_probe_decided_at=NULL
                     WHERE id=? AND language_probe_decision='approved' AND language IS ?""",
                 (log["previous_language"], log["source_id"], log["new_language"])).rowcount
             if not changed:
-                return False
+                return "changed"
             conn.execute("UPDATE language_autoclean_log SET reverted_at=? WHERE id=?", (_now(), log_id))
             _commit_with_retry(conn)
-            return True
+            return "reverted"
         finally:
             conn.close()
+
+
+def revert_language_autoclean(log_id: int) -> bool:
+    return revert_language_autoclean_result(log_id) == "reverted"
 
 
 def get_movie_source_for_streaming(source_id: int) -> dict | None:

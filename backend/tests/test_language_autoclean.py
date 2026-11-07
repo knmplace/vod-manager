@@ -191,3 +191,93 @@ def test_unknowns_carry_tmdb_hint(db):
     assert (rows[0]["tmdb_language"], rows[0]["tmdb_suggested_language"]) == ("EN", "EN")
     assert (rows[1]["tmdb_language"], rows[1]["tmdb_suggested_language"]) == ("JA", None)
     assert (rows[2]["tmdb_language"], rows[2]["tmdb_suggested_language"]) == (None, None)
+
+
+# KNM: 2026-11-07 - the log must keep naming a hidden movie after its feed row is deleted.
+def _delete_source(db, table, sid):
+    conn = db._connect()
+    try:
+        conn.execute(f"DELETE FROM {table} WHERE id=?", (sid,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_log_keeps_title_after_source_deleted(db):
+    sid = _movie(db, "Cure", 1201, ["JA"])
+    _store("movie", 1201, "ja", ["ja"])
+    ac.apply_batch(limit=10)
+    conn = db._connect()
+    mid = conn.execute("SELECT movie_id FROM movie_sources WHERE id=?", (sid,)).fetchone()["movie_id"]
+    conn.close()
+    assert db.list_language_autoclean_log()[0]["source_exists"] is True
+    _delete_source(db, "movie_sources", sid)
+
+    row = db.list_language_autoclean_log()[0]
+    assert row["title"] == "Cure" and row["provider_name"] == "prov-Cure"
+    assert row["parent_id"] == mid and row["source_exists"] is False
+    assert ac.list_log()[0]["tmdb_original_language"].lower() == "ja"
+
+
+def test_log_keeps_snapshot_when_movie_also_gone(db):
+    sid = _movie(db, "Gone", 1202, ["JA"])
+    db.log_language_autoclean("movie", sid, "EN", "JA", ["JA"], "ja")
+    conn = db._connect()
+    conn.execute("DELETE FROM movie_sources"); conn.execute("DELETE FROM movies"); conn.commit(); conn.close()
+    row = db.list_language_autoclean_log()[0]
+    assert row["title"] == "Gone" and row["provider_name"] == "prov-Gone"
+
+
+def test_episode_snapshot_label_survives_deletion(db):
+    pid = db.upsert_provider("prov-show", "", "", "", provider_type="library")
+    series = db.upsert_series("Dark", 2017)
+    esrc = db.add_episode_source(db.add_episode(series, 1, 2, "Lies"), pid, "e-dark", "mkv")
+    db.log_language_autoclean("episode", esrc, "EN", "DE", ["DE"], "de")
+    _delete_source(db, "episode_sources", esrc)
+    row = db.list_language_autoclean_log()[0]
+    assert row["title"] == "Dark S01E02 · Lies" and row["provider_name"] == "prov-show"
+    assert row["source_exists"] is False
+
+
+def test_revert_missing_source_gives_410_but_existing_feed_still_reverts(db):
+    import pytest
+    from fastapi import HTTPException
+    import vod_routes
+    gone = _movie(db, "RevGone", 1203, ["JA"])
+    kept = _movie(db, "RevKept", 1204, ["JA"])
+    _store("movie", 1203, "ja", ["ja"]); _store("movie", 1204, "ja", ["ja"])
+    ac.apply_batch(limit=10)
+    logs = {r["source_id"]: r["id"] for r in db.list_language_autoclean_log()}
+    _delete_source(db, "movie_sources", gone)
+
+    assert db.revert_language_autoclean_result(logs[gone]) == "missing"
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(vod_routes.revert_language_autoclean(logs[gone]))
+    assert exc.value.status_code == 410 and "no longer exists" in exc.value.detail
+
+    assert asyncio.run(vod_routes.revert_language_autoclean(logs[kept])) == {"reverted": True}
+    assert _row(db, kept) == {"language": "EN", "language_probe_decision": None}
+    assert db.revert_language_autoclean_result(logs[kept]) == "already_reverted"
+
+
+def test_backfill_from_backup_fills_titles_and_is_idempotent(db, tmp_path):
+    import shutil
+    sid = _movie(db, "Old", 1205, ["JA"])
+    db.log_language_autoclean("movie", sid, "EN", "JA", ["JA"], "ja")
+    conn = db._connect()
+    conn.execute("UPDATE language_autoclean_log SET title=NULL, provider_name=NULL, parent_id=NULL")
+    conn.commit(); conn.close()
+    backup = tmp_path / "backup.sqlite"
+    conn = db._connect(); conn.execute("PRAGMA wal_checkpoint(FULL)"); conn.close()
+    shutil.copy(db.DB_PATH, backup)
+    _delete_source(db, "movie_sources", sid)
+
+    first = db.backfill_language_autoclean_snapshots(str(backup))
+    assert first["backup"] == 1
+    row = db.list_language_autoclean_log()[0]
+    assert row["title"] == "Old" and row["provider_name"] == "prov-Old" and row["parent_id"]
+    conn = db._connect()
+    stored = dict(conn.execute("SELECT title, provider_name, parent_id FROM language_autoclean_log").fetchone())
+    conn.close()
+    assert stored["title"] == "Old"
+    assert db.backfill_language_autoclean_snapshots(str(backup)) == {"live": 0, "backup": 0, "provider_only": 0}

@@ -202,6 +202,10 @@ def revert(log_id: int) -> bool:
     return vod_db.revert_language_autoclean(log_id)
 
 
+def revert_result(log_id: int) -> str:
+    return vod_db.revert_language_autoclean_result(log_id)
+
+
 async def run_cycle() -> dict:
     global _last_busy_at
     settings = config.get_language_autoclean_settings()
