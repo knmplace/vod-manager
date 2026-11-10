@@ -30,7 +30,8 @@ const STATUS_LABELS: Record<string, string> = {
 export default function LanguageAutocleanPanel() {
   const qc = useQueryClient()
   const settings = useQuery<Settings>({ queryKey: ['language-autoclean-settings'], queryFn: () => api.get('/vod/language-autoclean/settings/').then((r) => r.data), refetchInterval: 60_000 })
-  const log = useQuery<{ results: LogRow[] }>({ queryKey: ['language-autoclean-log'], queryFn: () => api.get('/vod/language-autoclean/log/').then((r) => r.data) })
+  const [showOlder, setShowOlder] = useState(false) // KNM: 2026-11-09 - log shows the last 14 days unless asked
+  const log = useQuery<{ results: LogRow[] }>({ queryKey: ['language-autoclean-log', showOlder], queryFn: () => api.get('/vod/language-autoclean/log/', { params: showOlder ? {} : { days: 14 } }).then((r) => r.data) })
   const [preview, setPreview] = useState<Preview | null>(null)
   const [form, setForm] = useState({ batch_size: '25', interval_seconds: '300', cooldown_seconds: '900' })
   useEffect(() => {
@@ -45,6 +46,11 @@ export default function LanguageAutocleanPanel() {
   const runPreview = useMutation({
     mutationFn: () => api.get('/vod/language-autoclean/preview/').then((r) => r.data as Preview),
     onSuccess: (data) => setPreview(data),
+  })
+  const rehide = useMutation({
+    mutationFn: (id: number) => api.post(`/vod/language-autoclean/log/${id}/rehide/`).then((r) => r.data),
+    onSuccess: () => { refresh(); notify('Feed hidden again.') },
+    onError: (e: any) => notify(e?.response?.data?.detail ?? 'Could not hide it again.'),
   })
   const revert = useMutation({
     mutationFn: (id: number) => api.post(`/vod/language-autoclean/log/${id}/revert/`).then((r) => r.data),
@@ -88,11 +94,11 @@ export default function LanguageAutocleanPanel() {
         </div>
       )}
 
-      {!!log.data?.results.length && (
+      {(!!log.data?.results.length || showOlder) && (
         <div className="mt-3 text-sm">
-          <p className="font-medium">Recent auto-clean changes</p>
+          <p className="font-medium">Recent auto-clean changes <label className="ml-3 font-normal inline-flex items-center gap-1"><input type="checkbox" checked={showOlder} onChange={(e) => setShowOlder(e.target.checked)} /> Show changes older than 14 days</label></p>
           <p className="text-sm text-foreground">Each row is one feed that was hidden because its audio is in an unwanted language. "Language change" shows the old label and the language the audio check found. Revert puts the feed back the way it was.</p>
-          <div className="mt-1 max-h-64 overflow-auto border border-border rounded"><table className="w-full text-sm"><thead><tr className="text-left text-foreground"><th className="px-2 py-1">When</th><th className="px-2 py-1">Title</th><th className="px-2 py-1">Provider</th><th className="px-2 py-1">Language change</th><th className="px-2 py-1"></th></tr></thead><tbody>{log.data.results.map((row) => <tr key={row.id} className="border-t border-border"><td className="px-2 py-1 whitespace-nowrap">{new Date(row.applied_at_iso ?? Number(row.applied_at) * 1000).toLocaleString()}</td><td className="px-2 py-1">{row.title ?? '(title unavailable, source removed)'}<span className="ml-1">({row.kind === 'movie' ? 'Movie' : 'Episode'})</span>{row.source_exists === false && <span className="ml-1">(feed removed)</span>}</td><td className="px-2 py-1">{row.provider_name ?? '—'}</td><td className="px-2 py-1 whitespace-nowrap">{row.previous_language ?? 'EN'} → {row.new_language} (hidden)</td><td className="px-2 py-1">{row.reverted_at ? <span className="text-foreground">reverted</span> : row.source_exists === false ? <span className="text-foreground">Feed removed</span> : <button className="inline-flex items-center gap-1 border border-border rounded px-1.5 py-0.5 hover:bg-accent disabled:opacity-50" disabled={revert.isPending} onClick={() => revert.mutate(row.id)}><Undo2 size={11} /> Revert</button>}</td></tr>)}</tbody></table></div>
+          <div className="mt-1 max-h-64 overflow-auto border border-border rounded"><table className="w-full text-sm"><thead><tr className="text-left text-foreground"><th className="px-2 py-1">When</th><th className="px-2 py-1">Title</th><th className="px-2 py-1">Provider</th><th className="px-2 py-1">Language change</th><th className="px-2 py-1"></th></tr></thead><tbody>{(log.data?.results ?? []).map((row) => <tr key={row.id} className="border-t border-border"><td className="px-2 py-1 whitespace-nowrap">{new Date(row.applied_at_iso ?? Number(row.applied_at) * 1000).toLocaleString()}</td><td className="px-2 py-1">{row.title ?? '(title unavailable, source removed)'}<span className="ml-1">({row.kind === 'movie' ? 'Movie' : 'Episode'})</span>{row.source_exists === false && <span className="ml-1">(feed removed)</span>}</td><td className="px-2 py-1">{row.provider_name ?? '—'}</td><td className="px-2 py-1 whitespace-nowrap">{row.previous_language ?? 'EN'} → {row.new_language} (hidden)</td><td className="px-2 py-1">{row.reverted_at ? <span className="text-foreground">reverted <button className="ml-1 inline-flex items-center gap-1 border border-border rounded px-1.5 py-0.5 hover:bg-accent disabled:opacity-50" disabled={rehide.isPending} onClick={() => rehide.mutate(row.id)}>Hide again</button></span> : row.source_exists === false ? <span className="text-foreground">Feed removed</span> : <button className="inline-flex items-center gap-1 border border-border rounded px-1.5 py-0.5 hover:bg-accent disabled:opacity-50" disabled={revert.isPending} onClick={() => revert.mutate(row.id)}><Undo2 size={11} /> Revert</button>}</td></tr>)}</tbody></table></div>
         </div>
       )}
     </details>

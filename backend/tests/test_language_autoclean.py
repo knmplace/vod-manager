@@ -1,6 +1,7 @@
 # KNM: 2026-11-05 - auto-clean hides an unwanted-language feed only when the probe,
 # TMDB original_language and TMDB spoken_languages all agree; default off, never
 # touches a decided source, reversible, and pauses while import/enrichment runs.
+import time
 import asyncio
 
 import config
@@ -281,3 +282,47 @@ def test_backfill_from_backup_fills_titles_and_is_idempotent(db, tmp_path):
     conn.close()
     assert stored["title"] == "Old"
     assert db.backfill_language_autoclean_snapshots(str(backup)) == {"live": 0, "backup": 0, "provider_only": 0}
+
+
+# KNM: 2026-11-09 - re-hide a reverted feed (user reverted to play-test, then wants it hidden again).
+def test_rehide_reverses_a_revert(db):
+    sid = _movie(db, "rehide", 611, ["ZH"])
+    _store("movie", 611, "zh", ["zh"])
+    ac.apply_batch(limit=10)
+    log_id = ac.list_log()[0]["id"]
+    assert ac.revert(log_id) is True
+    assert db.rehide_language_autoclean_result(log_id) == "rehidden"
+    assert _row(db, sid) == {"language": "ZH", "language_probe_decision": "approved"}
+    assert ac.list_log()[0]["reverted_at"] is None
+    assert db.rehide_language_autoclean_result(log_id) == "not_reverted"
+    # and it can be reverted again
+    assert ac.revert(log_id) is True
+
+
+def test_rehide_refuses_when_source_changed_since(db):
+    sid = _movie(db, "rehide2", 612, ["ZH"])
+    _store("movie", 612, "zh", ["zh"])
+    ac.apply_batch(limit=10)
+    log_id = ac.list_log()[0]["id"]
+    ac.revert(log_id)
+    conn = db._connect()
+    try:
+        conn.execute("UPDATE movie_sources SET language='FR' WHERE id=?", (sid,))
+        conn.commit()
+    finally:
+        conn.close()
+    assert db.rehide_language_autoclean_result(log_id) == "changed"
+
+
+def test_log_days_filter_hides_old_rows(db):
+    _movie(db, "old1", 613, ["ZH"]); _store("movie", 613, "zh", ["zh"])
+    ac.apply_batch(limit=10)
+    conn = db._connect()
+    try:
+        conn.execute("UPDATE language_autoclean_log SET applied_at=?", (str(time.time() - 20 * 86400),))
+        conn.commit()
+    finally:
+        conn.close()
+    assert len(ac.list_log()) == 1
+    assert ac.list_log(days=14) == []
+    assert len(ac.list_log(days=30)) == 1

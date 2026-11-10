@@ -39,6 +39,13 @@ included.
 | Poster repair and Fix posters now button | — | ✅ Fork only; to be proposed after the open PRs merge (it shares files with #74, #75, #77 and #78) |
 | More poster choices and the tidier poster picker | — | ✅ Fork only; built on this fork's Missing Artwork picker, which has to go upstream first |
 
+## 2026-11-09 (Auto-clean: "Hide again", 14-day list, PH prefix)
+
+- ✅ Fork only.
+- **Reverted auto-clean rows now have a "Hide again" button.** If you revert a feed to test it and it turns out to be the unwanted language, one click hides it again. It refuses if the feed was changed after the revert.
+- **The auto-clean change list shows the last 14 days by default.** Tick "Show changes older than 14 days" to see the rest.
+- **"PH - Title" (Filipino) feeds are now recognised as a language prefix** instead of slipping through as English.
+
 ## 2026-11-07 (Auto-clean log keeps the movie name)
 
 - ✅ Fork only.

@@ -9905,7 +9905,9 @@ def log_language_autoclean(kind: str, source_id: int, previous_language: str | N
             conn.close()
 
 
-def list_language_autoclean_log(limit: int = 200) -> list[dict]:
+def list_language_autoclean_log(limit: int = 200, days: int | None = None) -> list[dict]:
+    # KNM: 2026-11-09 - optional age cap so the log panel can show only recent changes.
+    cutoff = time.time() - int(days) * 86400 if days else 0
     conn = _connect()
     try:
         # KNM: 2026-11-05 - include title/provider and an ISO time so the log is readable.
@@ -9929,7 +9931,8 @@ def list_language_autoclean_log(limit: int = 200) -> list[dict]:
             LEFT JOIN episodes e ON e.id=es.episode_id
             LEFT JOIN series s ON s.id=e.series_id
             LEFT JOIN providers pe ON pe.id=es.provider_id
-            ORDER BY l.id DESC LIMIT ?""", (int(limit),)).fetchall()]
+            WHERE CAST(l.applied_at AS REAL) >= ?
+            ORDER BY l.id DESC LIMIT ?""", (cutoff, int(limit))).fetchall()]
         for r in rows:
             r["source_exists"] = bool(r["source_exists"])
             try:
@@ -10015,6 +10018,33 @@ def revert_language_autoclean_result(log_id: int) -> str:
             conn.execute("UPDATE language_autoclean_log SET reverted_at=? WHERE id=?", (_now(), log_id))
             _commit_with_retry(conn)
             return "reverted"
+        finally:
+            conn.close()
+
+
+# KNM: 2026-11-09 - undo a revert: hide the feed again exactly as auto-clean did.
+def rehide_language_autoclean_result(log_id: int) -> str:
+    """Returns rehidden, missing, not_reverted or changed (feed edited since the revert)."""
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            log = conn.execute("SELECT * FROM language_autoclean_log WHERE id=?", (log_id,)).fetchone()
+            if not log:
+                return "missing"
+            if not log["reverted_at"]:
+                return "not_reverted"
+            table = "movie_sources" if log["kind"] == "movie" else "episode_sources"
+            if not conn.execute(f"SELECT 1 FROM {table} WHERE id=?", (log["source_id"],)).fetchone():
+                return "missing"
+            changed = conn.execute(
+                f"""UPDATE {table} SET language=?, language_probe_decision='approved', language_probe_decided_at=?
+                    WHERE id=? AND language IS ?""",
+                (log["new_language"], _now(), log["source_id"], log["previous_language"])).rowcount
+            if not changed:
+                return "changed"
+            conn.execute("UPDATE language_autoclean_log SET reverted_at=NULL WHERE id=?", (log_id,))
+            _commit_with_retry(conn)
+            return "rehidden"
         finally:
             conn.close()
 
@@ -14750,6 +14780,9 @@ _KNOWN_LANGUAGE_CODES = {
     "SL", "UA", "IN", "HI", "ZH", "CN", "JA", "JP", "KO", "KR", "TH", "VI",
     "ID", "MY", "HE", "FA", "UR", "BN", "TA", "TE", "PK", "AF", "SW", "ALB",
     "EXYU", "LT", "LV", "EE", "GE", "AM", "AZ", "KZ", "SC", "IR",
+    # KNM: 2026-11-09 -- "PH - Title" (Filipino) prefix leaked through as EN;
+    # see beads-g36x.
+    "PH",
 }
 # Real titles that happen to start with "<known code>: " or "<known code> - "
 # -- checked against the colon/dash matches specifically (never the pipe

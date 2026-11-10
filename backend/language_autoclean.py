@@ -186,8 +186,8 @@ def annotate_unknowns(report: dict) -> dict:
     return report
 
 
-def list_log(limit: int = 200) -> list[dict]:
-    rows = vod_db.list_language_autoclean_log(limit)
+def list_log(limit: int = 200, days: int | None = None) -> list[dict]:
+    rows = vod_db.list_language_autoclean_log(limit, days)
     # KNM: 2026-11-07 - revalidate/verify changes are logged without TMDB; look it up here.
     for row in rows:
         tmdb_id = row.pop("parent_tmdb_id", None)
@@ -200,6 +200,10 @@ def list_log(limit: int = 200) -> list[dict]:
 
 def revert(log_id: int) -> bool:
     return vod_db.revert_language_autoclean(log_id)
+
+
+def rehide_result(log_id: int) -> str:
+    return vod_db.rehide_language_autoclean_result(log_id)
 
 
 def revert_result(log_id: int) -> str:

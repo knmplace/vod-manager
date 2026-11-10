@@ -4670,8 +4670,19 @@ async def language_autoclean_preview(limit: int = 200):
 
 
 @router.get("/language-autoclean/log/", dependencies=_GUARDS)
-async def language_autoclean_log(limit: int = 200):
-    return {"results": await asyncio.to_thread(language_autoclean.list_log, max(1, min(int(limit), 2000)))}
+async def language_autoclean_log(limit: int = 200, days: int | None = None):
+    return {"results": await asyncio.to_thread(language_autoclean.list_log, max(1, min(int(limit), 2000)), days)}
+
+
+# KNM: 2026-11-09 - hide a reverted feed again.
+@router.post("/language-autoclean/log/{log_id}/rehide/", dependencies=_GUARDS)
+async def rehide_language_autoclean(log_id: int):
+    result = await asyncio.to_thread(language_autoclean.rehide_result, log_id)
+    if result == "missing":
+        raise HTTPException(410, "This feed no longer exists.")
+    if result != "rehidden":
+        raise HTTPException(409, "Not reverted, or the feed was changed since.")
+    return {"rehidden": True}
 
 
 @router.post("/language-autoclean/log/{log_id}/revert/", dependencies=_GUARDS)
