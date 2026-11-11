@@ -4,36 +4,13 @@
 import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
 
-from knm import service, store
+from knm import admin_routes, service, store
+from knm.routes_models import AckRequest, AllowlistUpdate, DownloadRequest
 from knm.auth import Identity, require_admin, require_user
 
 router = APIRouter(prefix="/api/knm", tags=["knm"])
-
-
-class DownloadRequest(BaseModel):
-    kind: str
-    title: str = Field(min_length=1, max_length=300)
-    year: int | None = None
-    tmdb_id: int | str | None = None
-
-
-class AllowEntry(BaseModel):
-    server_id: int
-    user_id: int
-    username: str | None = None
-    allowed: bool = True
-    daily_cap: int | None = Field(default=None, ge=0, le=1000)
-
-
-class AllowlistUpdate(BaseModel):
-    default_cap: int | None = Field(default=None, ge=0, le=1000)
-    entries: list[AllowEntry] = []
-
-
-class AckRequest(BaseModel):
-    ids: list[int]
+router.include_router(admin_routes.router)
 
 
 @router.get("/me")

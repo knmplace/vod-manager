@@ -129,6 +129,18 @@ def upsert_entry(server_id: int, user_id: int, username: str | None, allowed: bo
           (server_id, user_id, username, 1 if allowed else 0, daily_cap, time.time()))
 
 
+def delete_entry(server_id: int, user_id: int) -> bool:
+    ensure_schema()
+    with vod_db._WRITE_LOCK:
+        conn = vod_db._connect()
+        try:
+            n = conn.execute("DELETE FROM knm_allowlist WHERE server_id=? AND user_id=?", (server_id, user_id)).rowcount
+            vod_db._commit_with_retry(conn)
+            return n > 0
+        finally:
+            conn.close()
+
+
 def list_entries() -> list[dict]:
     out = rows("SELECT * FROM knm_allowlist ORDER BY server_id, user_id")
     for e in out:

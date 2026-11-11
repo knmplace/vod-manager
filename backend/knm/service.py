@@ -253,3 +253,70 @@ def _ack(user: dict, nid: int) -> int:
         store.write("UPDATE knm_notices SET admin_read_at=? WHERE id=?", (now, nid))
         return 1
     return 0
+
+
+# -- admin (vod_manager admin session) ----------------------------------------
+
+def admin_requests(status: str | None = None) -> dict:
+    sync_active()
+    allr = store.rows("SELECT * FROM knm_requests ORDER BY id DESC LIMIT 1000")
+    counts: dict[str, int] = {}
+    for r in allr:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+    shown = [r for r in allr if not status or r["status"] == status]
+    return {"requests": [public_view(r, True) for r in shown], "counts": counts}
+
+
+def _get_request(rid: int) -> dict:
+    req = store.one("SELECT * FROM knm_requests WHERE id=?", (rid,))
+    if not req:
+        raise KnmError(404, "Request not found")
+    return req
+
+
+def retryable_import_jobs(req: dict) -> list[int]:
+    """Done downloads whose Radarr/Sonarr import failed or timed out (needs arr_handoff.retry_import)."""
+    return [j["id"] for j in _jobs(store.decode_jobs(req)) if j.get("import_status") in ("failed", "timed_out")]
+
+
+def admin_retry(rid: int) -> dict:
+    """Requeues the request's failed/cancelled download jobs. Import retries are done by the route (async)."""
+    req = _get_request(rid)
+    n = sum(1 for jid in store.decode_jobs(req) if vod_db.retry_download_job(jid))
+    if not n and not retryable_import_jobs(req):
+        raise KnmError(409, "Nothing to retry for this request")
+    _reset(req)
+    return sync_request(_get_request(rid))
+
+
+def _reset(req: dict) -> None:
+    """Lets a request that is being retried raise a fresh failed notice if it fails again."""
+    store.write("DELETE FROM knm_notices WHERE request_id=? AND kind='failed'", (req["id"],))
+    store.write("UPDATE knm_requests SET completed_at=NULL WHERE id=?", (req["id"],))
+
+
+def admin_cancel(rid: int) -> dict:
+    req = _get_request(rid)
+    vod_downloader.cancel(store.decode_jobs(req))
+    return sync_request(_get_request(rid))
+
+
+def admin_notices() -> list[dict]:
+    sync_active()
+    out = []
+    for n in store.rows("SELECT * FROM knm_notices WHERE kind='failed' AND admin_read_at IS NULL ORDER BY id DESC"):
+        req = store.one("SELECT detail FROM knm_requests WHERE id=?", (n["request_id"],)) or {}
+        out.append({"id": n["id"], "request_id": n["request_id"], "title": n["title"], "username": n["username"],
+                    "created_at": n["created_at"], "detail": req.get("detail")})
+    return out
+
+
+def admin_clear_notices() -> int:
+    """Acknowledges every open failed notice here and the matching vod_manager bell notices."""
+    now = time.time()
+    n = store.one("SELECT COUNT(*) c FROM knm_notices WHERE kind='failed' AND admin_read_at IS NULL")["c"]
+    store.write("UPDATE knm_notices SET admin_read_at=? WHERE kind='failed' AND admin_read_at IS NULL", (now,))
+    for b in notices.list_open():
+        if b.get("kind") == "knm_download":
+            notices.acknowledge(b["id"])
+    return n
