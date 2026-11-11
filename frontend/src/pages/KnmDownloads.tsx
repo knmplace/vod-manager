@@ -26,13 +26,16 @@ const TONE: Record<string, 'success' | 'warning' | 'destructive' | 'info'> = {
 const errMsg = (e: any, fallback: string) => e?.response?.data?.detail ?? fallback
 const when = (t: number) => new Date(t * 1000).toLocaleString()
 
+type DirUser = { server_id: number; server_name: string; user_id: number; username: string; user_level: number | null; on_allowlist: boolean }
+type DirServer = { server_id: number; server_name: string; users: DirUser[]; error: string | null }
+
 export default function KnmDownloads() {
   const qc = useQueryClient()
   const [filter, setFilter] = useState('')
   const [defaultCap, setDefaultCap] = useState<string>('')
   const [newServer, setNewServer] = useState('')
   const [newUserId, setNewUserId] = useState('')
-  const [newName, setNewName] = useState('')
+  const [userSearch, setUserSearch] = useState('')
   const [newCap, setNewCap] = useState('')
   const [caps, setCaps] = useState<Record<string, string>>({})
 
@@ -43,6 +46,10 @@ export default function KnmDownloads() {
   const connections = useQuery<Connection[]>({
     queryKey: ['knm-connections'],
     queryFn: () => api.get('/vod/dispatcharr-connections/').then((r) => r.data),
+  })
+  const dirUsers = useQuery<{ servers: DirServer[] }>({
+    queryKey: ['knm-dir-users'],
+    queryFn: () => api.get('/knm/admin/users').then((r) => r.data),
   })
   const requests = useQuery<Requests>({
     queryKey: ['knm-requests', filter],
@@ -56,6 +63,7 @@ export default function KnmDownloads() {
   })
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ['knm-allowlist'] })
+    qc.invalidateQueries({ queryKey: ['knm-dir-users'] })
     qc.invalidateQueries({ queryKey: ['knm-requests'] })
     qc.invalidateQueries({ queryKey: ['knm-failed-notices'] })
   }
@@ -82,12 +90,17 @@ export default function KnmDownloads() {
   })
 
   const capValue = (raw: string) => (raw.trim() === '' ? null : Math.max(0, parseInt(raw, 10) || 0))
+  const dirServers = dirUsers.data?.servers ?? []
+  const serverId = parseInt(newServer || String(dirServers[0]?.server_id ?? connections.data?.[0]?.id ?? ''), 10)
+  const curServer = dirServers.find((s) => s.server_id === serverId)
+  const pickable = (curServer?.users ?? []).filter((u) => !u.on_allowlist
+    && u.username.toLowerCase().includes(userSearch.trim().toLowerCase()))
+  const levelLabel = (l?: number | null) => (l === 10 ? 'admin' : l == null ? '' : `level ${l}`)
   const addUser = () => {
-    const server = parseInt(newServer || String(connections.data?.[0]?.id ?? ''), 10)
-    const user = parseInt(newUserId, 10)
-    if (!server || !user) { notify('Pick a server and enter the numeric Dispatcharr user id.'); return }
-    saveAllow.mutate({ entries: [{ server_id: server, user_id: user, username: newName.trim() || null, allowed: true, daily_cap: capValue(newCap) }] }, {
-      onSuccess: () => { setNewUserId(''); setNewName(''); setNewCap('') },
+    const user = pickable.find((u) => u.user_id === parseInt(newUserId, 10))
+    if (!serverId || !user) { notify('Pick a server and a user from the list.'); return }
+    saveAllow.mutate({ entries: [{ server_id: serverId, user_id: user.user_id, username: user.username, allowed: true, daily_cap: capValue(newCap) }] }, {
+      onSuccess: () => { setNewUserId(''); setUserSearch(''); setNewCap(''); qc.invalidateQueries({ queryKey: ['knm-dir-users'] }) },
     })
   }
   const connLabel = (id?: number) => connections.data?.find((c) => c.id === id)?.label ?? `#${id}`
@@ -150,12 +163,16 @@ export default function KnmDownloads() {
             </tbody>
           </table>
         </div>
+        {curServer?.error && <p className="text-xs text-red-500 mt-3">{curServer.server_name}: {curServer.error}</p>}
         <div className="flex flex-wrap items-center gap-2 mt-3">
-          <select className={inputCls()} value={newServer || String(connections.data?.[0]?.id ?? '')} onChange={(e) => setNewServer(e.target.value)}>
-            {(connections.data ?? []).map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+          <select className={inputCls()} value={String(serverId || '')} onChange={(e) => { setNewServer(e.target.value); setNewUserId('') }}>
+            {(dirServers.length ? dirServers.map((d) => ({ id: d.server_id, label: d.server_name })) : (connections.data ?? [])).map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
           </select>
-          <input className={inputCls('w-28')} placeholder="User id" value={newUserId} onChange={(e) => setNewUserId(e.target.value)} />
-          <input className={inputCls('w-40')} placeholder="Username (optional)" value={newName} onChange={(e) => setNewName(e.target.value)} />
+          <input className={inputCls('w-32')} placeholder="Search users" value={userSearch} onChange={(e) => setUserSearch(e.target.value)} />
+          <select className={inputCls('w-56')} value={newUserId} onChange={(e) => setNewUserId(e.target.value)}>
+            <option value="">{dirUsers.isLoading ? 'Loading users...' : 'Select a user'}</option>
+            {pickable.map((u) => <option key={u.user_id} value={u.user_id}>{u.username}{levelLabel(u.user_level) ? ` (${levelLabel(u.user_level)})` : ''}</option>)}
+          </select>
           <input className={inputCls('w-24')} type="number" min={0} placeholder="Cap" value={newCap} onChange={(e) => setNewCap(e.target.value)} />
           <Button size="sm" disabled={saveAllow.isPending} onClick={addUser}><Plus size={14} /> Add user</Button>
         </div>

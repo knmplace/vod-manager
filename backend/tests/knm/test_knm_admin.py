@@ -132,3 +132,50 @@ def test_mount_unchanged_single_line():
     import pathlib
     src = (pathlib.Path(__file__).resolve().parents[2] / "main.py").read_text(encoding="utf-8")
     assert src.count("KNM-ONLY:") == 1
+
+
+# ---- user picker: GET /api/knm/admin/users ----
+
+import dispatcharr_dvr_client  # noqa: E402
+
+
+def _users(monkeypatch, result):
+    async def fake(conn):
+        if isinstance(result, Exception):
+            raise result
+        return result
+    monkeypatch.setattr(dispatcharr_dvr_client, "list_users", fake)
+
+
+def test_users_need_session(secured):
+    assert secured.get("/api/knm/admin/users").status_code == 401
+    assert secured.get("/api/knm/admin/users", headers=H("k-admin", secured.server_id)).status_code == 401
+
+
+def test_users_grouped_by_connection_with_flags(secured, monkeypatch):
+    _users(monkeypatch, [{"id": 1, "username": "admin", "user_level": 10, "api_key": "secret"},
+                         {"id": 2, "username": "bob", "user_level": 1}])
+    secured.put("/api/knm/admin/allowlist", headers=A, json={"entries": [
+        {"server_id": secured.server_id, "user_id": 2, "username": "bob", "allowed": True, "daily_cap": None}]})
+    r = secured.get("/api/knm/admin/users", headers=A)
+    assert r.status_code == 200
+    (srv,) = r.json()["servers"]
+    assert srv["server_id"] == secured.server_id and srv["server_name"] == "Newton" and srv["error"] is None
+    by = {u["user_id"]: u for u in srv["users"]}
+    assert by[1] == {"server_id": secured.server_id, "server_name": "Newton", "user_id": 1,
+                     "username": "admin", "user_level": 10, "on_allowlist": False}
+    assert by[2]["on_allowlist"] is True
+    assert "secret" not in r.text and "STORED" not in r.text
+
+
+def test_users_unreachable_connection_reports_error(secured, monkeypatch):
+    vod_db.create_dispatcharr_connection("Other", "http://other.example:9191", "T2")
+    async def fake(conn):
+        if conn["label"] == "Other":
+            raise RuntimeError("boom")
+        return [{"id": 5, "username": "zed", "user_level": 1}]
+    monkeypatch.setattr(dispatcharr_dvr_client, "list_users", fake)
+    servers = {s["server_name"]: s for s in secured.get("/api/knm/admin/users", headers=A).json()["servers"]}
+    assert [u["username"] for u in servers["Newton"]["users"]] == ["zed"]
+    assert servers["Other"]["users"] == [] and servers["Other"]["error"]
+    assert "T2" not in servers["Other"]["error"]
