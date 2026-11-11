@@ -50,34 +50,55 @@ class Identity(dict):
         return bool(self["is_admin"])
 
 
-async def require_user(x_dispatcharr_key: str | None = Header(default=None),
-                       x_dispatcharr_server: str | None = Header(default=None)) -> Identity:
-    if not x_dispatcharr_key or not x_dispatcharr_server:
-        raise HTTPException(401, "Sign-in required")
-    try:
-        server_id = int(x_dispatcharr_server)
-    except ValueError:
-        raise HTTPException(401, "Unknown server")
-    connection = vod_db.get_dispatcharr_connection(server_id)
-    if not connection:
-        raise HTTPException(401, "Unknown server")
-    ck = (server_id, hashlib.sha256(x_dispatcharr_key.encode()).hexdigest())
+async def _validate(connection: dict, key: str) -> dict:
+    """Cached /users/me lookup against one stored connection."""
+    ck = (connection["id"], hashlib.sha256(key.encode()).hexdigest())
     now = time.time()
     hit = _cache.get(ck)
     if hit and hit[0] > now:
-        me = hit[1]
-    else:
-        try:
-            me = await fetch_me(connection, x_dispatcharr_key)
-        except InvalidKey:
-            raise HTTPException(401, "Invalid key")
-        except Exception as exc:
-            logger.warning("[knm] could not validate key against connection %s: %s", server_id, type(exc).__name__)
-            raise HTTPException(502, "Could not reach the server")
-        _cache[ck] = (now + CACHE_SECONDS, me)
+        return hit[1]
+    me = await fetch_me(connection, key)
+    _cache[ck] = (now + CACHE_SECONDS, me)
+    return me
+
+
+def _identity(server_id: int, me: dict) -> Identity:
+    level = int(me.get("user_level") or 0)
     return Identity(server_id=server_id, user_id=int(me["id"]), username=me.get("username") or "",
-                    user_level=int(me.get("user_level") or 0),
-                    is_admin=int(me.get("user_level") or 0) >= ADMIN_LEVEL)
+                    user_level=level, is_admin=level >= ADMIN_LEVEL)
+
+
+async def require_user(x_dispatcharr_key: str | None = Header(default=None),
+                       x_dispatcharr_server: str | None = Header(default=None)) -> Identity:
+    if not x_dispatcharr_key:
+        raise HTTPException(401, "Sign-in required")
+    if x_dispatcharr_server:
+        try:
+            server_id = int(x_dispatcharr_server)
+        except ValueError:
+            raise HTTPException(401, "Unknown server")
+        connection = vod_db.get_dispatcharr_connection(server_id)
+        if not connection:
+            raise HTTPException(401, "Unknown server")
+        candidates = [connection]
+    else:
+        # no server given: try each STORED connection (never a client URL) until one accepts the key
+        candidates = vod_db.list_dispatcharr_connections()
+    unreachable = False
+    for connection in candidates:
+        try:
+            me = await _validate(connection, x_dispatcharr_key)
+        except InvalidKey:
+            continue
+        except Exception as exc:
+            unreachable = True
+            logger.warning("[knm] could not validate key against connection %s: %s",
+                           connection.get("id"), type(exc).__name__)
+            continue
+        return _identity(int(connection["id"]), me)
+    if unreachable:
+        raise HTTPException(502, "Could not reach the server")
+    raise HTTPException(401, "Invalid key")
 
 
 async def require_admin(user: Identity = Depends(require_user)) -> Identity:

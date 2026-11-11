@@ -189,6 +189,26 @@ def test_title_fallback_requires_year_match(client, db):
     assert _jobs() == []
 
 
+def test_title_fallback_allows_year_off_by_one(client, db):
+    _movie(db, name="Some Movie", year=2001, tmdb=None)
+    allow(client)
+    assert post(client, title="Some Movie", year=2002).status_code == 200
+
+
+def test_title_fallback_rejects_year_off_by_two(client, db):
+    _movie(db, name="Some Movie", year=2001, tmdb=None)
+    allow(client)
+    assert post(client, title="Some Movie", year=2003).status_code == 404
+
+
+def test_title_fallback_prefers_exact_year(client, db):
+    near = _movie(db, name="Some Movie!", year=2002, tmdb=None)
+    exact = _movie(db, name="Some Movie", year=2001, tmdb=None)
+    allow(client)
+    assert post(client, title="Some Movie", year=2001).status_code == 200
+    assert _jobs()[0]["item_id"] == exact != near
+
+
 def test_no_match_404(client, db):
     allow(client)
     assert post(client, title="Nope", year=2020, tmdb_id=1).status_code == 404
@@ -380,3 +400,47 @@ def test_mount_line_present_and_marked():
     text = (Path(__file__).resolve().parents[2] / "main.py").read_text(encoding="utf-8")
     lines = [ln for ln in text.splitlines() if "KNM-ONLY:" in ln]
     assert len(lines) == 1 and "knm" in lines[0]
+
+
+# -- server header optional ---------------------------------------------------
+
+def test_server_header_optional_single_connection(client):
+    r = client.get("/api/knm/me", headers={"X-Dispatcharr-Key": "k-bob"})
+    assert r.status_code == 200 and r.json()["server_id"] == client.server_id
+    assert client.seen == [("http://disp.example:9191", "k-bob")]
+
+
+def test_server_header_optional_tries_each_stored_connection(client, monkeypatch):
+    second = vod_db.create_dispatcharr_connection("Other", "http://other.example:9191", "S2")
+
+    async def fake_me(connection, key):
+        client.seen.append((connection["url"], key))
+        if connection["id"] != second or key not in KEYS:
+            raise knm_auth.InvalidKey()
+        return dict(KEYS[key])
+
+    monkeypatch.setattr(knm_auth, "fetch_me", fake_me)
+    r = client.get("/api/knm/me", headers={"X-Dispatcharr-Key": "k-bob"})
+    assert r.status_code == 200 and r.json()["server_id"] == second
+    assert [u for u, _ in client.seen] == ["http://disp.example:9191", "http://other.example:9191"]
+
+
+def test_server_header_absent_invalid_key_401(client):
+    assert client.get("/api/knm/me", headers={"X-Dispatcharr-Key": "nope"}).status_code == 401
+
+
+def test_server_header_absent_unreachable_is_502(client, monkeypatch):
+    async def boom(connection, key):
+        raise RuntimeError("down")
+    monkeypatch.setattr(knm_auth, "fetch_me", boom)
+    assert client.get("/api/knm/me", headers={"X-Dispatcharr-Key": "k-bob"}).status_code == 502
+
+
+def test_server_header_absent_cached(client):
+    for _ in range(3):
+        client.get("/api/knm/me", headers={"X-Dispatcharr-Key": "k-bob"})
+    assert len(client.seen) == 1
+
+
+def test_no_key_still_401_without_server_header(client):
+    assert client.get("/api/knm/me").status_code == 401

@@ -49,9 +49,11 @@ def match_item(kind: str, title: str, year: int | None, tmdb_id) -> dict | None:
                 f"SELECT id, name, year, tmdb_id FROM {table} WHERE tmdb_id=? ORDER BY id", (str(tmdb_id),))]
         if not cands and year:
             want = _norm(title)
-            cands = [dict(r) for r in conn.execute(
-                f"SELECT id, name, year, tmdb_id FROM {table} WHERE year=? ORDER BY id", (int(year),))
-                if _norm(r["name"]) == want]
+            named = [dict(r) for r in conn.execute(
+                f"SELECT id, name, year, tmdb_id FROM {table} WHERE year BETWEEN ? AND ? ORDER BY id",
+                (int(year) - 1, int(year) + 1)) if _norm(r["name"]) == want]
+            # exact year first, then +/-1 (providers often disagree by a year)
+            cands = sorted(named, key=lambda c: (c["year"] != int(year), c["id"]))
     finally:
         conn.close()
     for c in cands:
