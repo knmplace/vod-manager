@@ -563,6 +563,7 @@ app.include_router(xc_router)
 app.include_router(backup_router)
 app.include_router(diagnostics_router)
 app.include_router(tmdb_store_router)
+app.include_router(__import__("knm.routes", fromlist=["router"]).router)  # KNM-ONLY: downloads feature, fork only
 
 if os.environ.get("VODMANAGER_TEST_UPSTREAM"):
     from test_upstream import router as test_upstream_router
