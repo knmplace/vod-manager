@@ -105,12 +105,15 @@ def create_request(user: dict, kind: str, title: str, year: int | None, tmdb_id)
     match = match_item(kind, title, year, tmdb_id)
     if not match:
         raise KnmError(404, "That title isn't available to download")
-    dup = store.one("SELECT * FROM knm_requests WHERE server_id=? AND user_id=? AND item_kind=? AND item_id=? "
+    key = store.name_key(user.get("username"))
+    who, args = (("lower(trim(username))=?", (key,)) if key
+                 else ("server_id=? AND user_id=?", (user["server_id"], user["user_id"])))
+    dup = store.one(f"SELECT * FROM knm_requests WHERE {who} AND item_kind=? AND item_id=? "
                     "AND status NOT IN ('failed','cancelled') ORDER BY id DESC",
-                    (user["server_id"], user["user_id"], match["item_kind"], match["item_id"]))
+                    (*args, match["item_kind"], match["item_id"]))
     if dup:
         return sync_request(dup)
-    if store.used_today(user["server_id"], user["user_id"]) >= cap:
+    if store.used_today(user["server_id"], user["user_id"], username=user.get("username")) >= cap:
         raise KnmError(429, f"Daily limit of {cap} titles reached")
 
     now = time.time()
@@ -141,8 +144,11 @@ def create_request(user: dict, kind: str, title: str, year: int | None, tmdb_id)
 
 
 def access(user: dict) -> tuple[bool, int]:
-    """(allowed, daily cap). Admins (Dispatcharr level 10) are always allowed; the cap still applies."""
-    entry = store.get_entry(user["server_id"], user["user_id"])
+    """(allowed, daily cap), keyed on the lowercased/trimmed username across all servers (see
+    store.find_by_username for how duplicate rows combine). Admins (Dispatcharr level 10) are always allowed; the cap still applies."""
+    entry = store.find_by_username(user.get("username"))
+    if entry is None and not store.name_key(user.get("username")):
+        entry = store.get_entry(user["server_id"], user["user_id"])   # no username: legacy id key
     cap = entry["daily_cap"] if entry and entry["daily_cap"] is not None else store.default_cap()
     return bool(user.get("is_admin") or (entry and entry["allowed"])), cap
 

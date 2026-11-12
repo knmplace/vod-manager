@@ -19,7 +19,7 @@ async def me(user: Identity = Depends(require_user)):
         allowed, cap = service.access(user)
         return {"user_id": user["user_id"], "username": user["username"], "server_id": user["server_id"],
                 "is_admin": user.is_admin, "allowed": allowed, "cap": cap,
-                "used_today": store.used_today(user["server_id"], user["user_id"])}
+                "used_today": store.used_today(user["server_id"], user["user_id"], username=user["username"])}
     return await asyncio.to_thread(work)
 
 
