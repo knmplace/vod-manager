@@ -39,6 +39,13 @@ included.
 | Poster repair and Fix posters now button | — | ✅ Fork only; to be proposed after the open PRs merge (it shares files with #74, #75, #77 and #78) |
 | More poster choices and the tidier poster picker | — | ✅ Fork only; built on this fork's Missing Artwork picker, which has to go upstream first |
 
+## 2026-11-12 (Episode air dates, missing release dates)
+
+- ✅ Fork only.
+- **Episodes now store an air date and the Xtream `get_series_info` output includes it.** Each episode's `info` gets `air_date` (YYYY-MM-DD) when known; it is left out when unknown. Nothing else in the output changes.
+- **Where the date comes from.** The provider's own date when its episode data already carries one, otherwise the local TMDB library, otherwise a single TMDB lookup per title. Never an extra provider call: it only happens during the existing series sync/trickle and when you open a card.
+- **Missing movie/series release dates are filled the same way** when you open a card. Dates already stored are never overwritten, and titles TMDB has no date for stay empty.
+
 ## 2026-11-09 (Auto-clean: "Hide again", 14-day list, PH prefix)
 
 - ✅ Fork only.
