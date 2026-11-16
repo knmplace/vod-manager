@@ -39,6 +39,11 @@ included.
 | Poster repair and Fix posters now button | — | ✅ Fork only; to be proposed after the open PRs merge (it shares files with #74, #75, #77 and #78) |
 | More poster choices and the tidier poster picker | — | ✅ Fork only; built on this fork's Missing Artwork picker, which has to go upstream first |
 
+## 2026-11-16 (Download daily cap resets at New York midnight)
+
+- ✅ Fork only.
+- **The daily download cap now rolls over at midnight New York time instead of UTC midnight.** The count of "used today" shown on the request page and the cap check use the same boundary, and it follows daylight saving changes. The zone can be overridden with the `KNM_DAY_TZ` environment variable; an invalid name falls back to UTC.
+
 ## 2026-11-12 (Episode air dates, missing release dates)
 
 - ✅ Fork only.

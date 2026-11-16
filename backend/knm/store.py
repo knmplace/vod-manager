@@ -2,11 +2,25 @@
 """KNM's own tables, created here (no change to vod_manager's schema code)."""
 
 import json
+import os
 import time
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import vod_db
 
 DEFAULT_CAP = 5
+
+
+def _load_tz(name: str):
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        return timezone.utc
+
+
+# KNM: day rolls over at New York midnight 2026-11-16
+KNM_TZ = _load_tz(os.environ.get("KNM_DAY_TZ", "America/New_York"))
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS knm_allowlist (
@@ -191,11 +205,13 @@ def list_entries() -> list[dict]:
 
 def day_start(now: float | None = None) -> float:
     now = time.time() if now is None else now
-    return now - (now % 86400)          # UTC midnight
+    # KNM: day rolls over at New York midnight 2026-11-16
+    local = datetime.fromtimestamp(now, KNM_TZ)
+    return local.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
 
 
 def used_today(server_id: int, user_id: int, now: float | None = None, username: str | None = None) -> int:
-    """Titles requested since UTC midnight. Counted by username (all servers) when known,
+    """Titles requested since midnight in KNM_TZ (New York by default). Counted by username (all servers) when known,
     else by (server_id, user_id)."""
     key = name_key(username)
     if key:
