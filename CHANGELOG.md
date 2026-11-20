@@ -39,6 +39,12 @@ included.
 | Poster repair and Fix posters now button | — | ✅ Fork only; to be proposed after the open PRs merge (it shares files with #74, #75, #77 and #78) |
 | More poster choices and the tidier poster picker | — | ✅ Fork only; built on this fork's Missing Artwork picker, which has to go upstream first |
 
+## 2026-11-19 (One-time fill of missing episode air dates)
+
+- ✅ Fork only.
+- **New one-time job: "Fill missing episode air dates" (Configuration page).** Apps like Dispatcharr only show when an episode aired if we have that date, and most existing episodes had none. Press Start once and the job fills them in the background: the local TMDB library first, TMDB only for what is still missing. It never contacts your providers, never changes a date that is already saved, goes at a gentle pace, and skips shows with no TMDB match. Progress is shown live and a summary stays after it finishes. If the app restarts partway, it carries on by itself.
+- The first time you open the app after updating, a banner points you to that card. Once you press Start the banner and the Start button never appear again (choosing "Not now" only hides the banner for that visit).
+
 ## 2026-11-16 (Download daily cap resets at New York midnight)
 
 - ✅ Fork only.

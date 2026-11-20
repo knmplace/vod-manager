@@ -66,6 +66,7 @@ from routes import require_auth
 from secrets_util import hash_password, looks_like_fernet_token
 import ai_assist
 import artwork_candidates
+import air_date_backfill
 import apply_exclusions_job
 import arr_client
 import arr_handoff
@@ -1046,6 +1047,18 @@ async def get_default_categories_prompt():
         return {"show": False}
     has_catchall = bool(await asyncio.to_thread(vod_db.list_catchall_category_ids))
     return {"show": has_catchall}
+
+
+# KNM: 2026-11-19 -- one-time, user-started fill of missing episode air dates (local TMDB
+# library first, then TMDB; never a provider). Start is ignored once running or done.
+@router.get("/air-date-backfill/", dependencies=_GUARDS)
+async def get_air_date_backfill_status():
+    return air_date_backfill.get_status()
+
+
+@router.post("/air-date-backfill/start/", dependencies=_GUARDS)
+async def start_air_date_backfill():
+    return air_date_backfill.start()
 
 
 @router.get("/hide-dvr-tab/", dependencies=_GUARDS)
