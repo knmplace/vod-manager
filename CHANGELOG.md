@@ -48,6 +48,7 @@ included.
 - **The one-time job fills pictures too.** The Configuration card is now "Fill missing episode air dates and images" and does both in one pass. If you already ran the earlier dates-only job, it is offered again so it can add the pictures. It still uses TMDB only (never your providers) and paces itself under TMDB's limits; you can keep using the app while it runs.
 - **Cached TMDB seasons refresh once.** A season saved before pictures were kept is fetched again one time when its pictures are needed.
 - **User guide and README** gain an "Episode air dates and images" section with a new screenshot.
+- **Checked on the live server.** The one-time job ran in about 21 minutes with no errors and added 255,646 episode pictures. About 18,000 episodes still have no air date because the provider's season or episode numbers do not exist on TMDB; the feed leaves those blank.
 
 ## 2026-11-19 (Caught up with upstream v0.3.19)
 
