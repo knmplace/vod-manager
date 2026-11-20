@@ -108,6 +108,22 @@ def test_cycle_disabled_does_nothing(db):
     assert _row(db, sid)["language"] == "EN"
 
 
+def test_busy_check_sees_the_import_lock_and_episode_preloading(monkeypatch):
+    import vod_importer
+
+    assert ac._busy_reason() is None
+    monkeypatch.setattr(vod_importer, "_EPISODE_TRICKLE_RUNNING", True)
+    assert ac._busy_reason() == "episode_preloading"
+    monkeypatch.setattr(vod_importer, "_EPISODE_TRICKLE_RUNNING", False)
+
+    class _Locked:
+        def locked(self):
+            return True
+
+    monkeypatch.setattr(vod_importer, "_XC_IMPORT_LOCK", _Locked())
+    assert ac._busy_reason() == "import"
+
+
 def test_cycle_pauses_while_import_running_and_cools_down(db, monkeypatch):
     import vod_importer
     sid = _movie(db, "busy", 901, ["JA"])

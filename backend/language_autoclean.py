@@ -33,6 +33,10 @@ def _busy_reason() -> str | None:
     import vod_importer
     if vod_importer._IMPORT_PROGRESS.get("running") or vod_importer._IMPORT_PROGRESS.get("queued"):
         return "import"
+    if vod_importer._XC_IMPORT_LOCK.locked():
+        return "import"
+    if vod_importer._EPISODE_TRICKLE_RUNNING:
+        return "episode_preloading"
     if vod_importer._CATALOG_WORKFLOW_PROGRESS.get("state") in ("queued", "running"):
         return "catalog_workflow"
     if vod_importer._ENRICH_PROGRESS.get("running") or vod_importer._TMDB_ENRICH_PROGRESS.get("running"):

@@ -662,6 +662,14 @@ class XCProviderClient:
         return await self._call("get_series_info", series_id=series_id)
 
 
+def _loggable_import_result(result):
+    """Import results carry per-item id lists for Sync History events; keep
+    them out of the log line (thousands of ids on a big catalog)."""
+    if not isinstance(result, dict):
+        return result
+    return {k: (len(v) if k.endswith("_ids") and isinstance(v, list) else v) for k, v in result.items()}
+
+
 async def _import_movies_for_provider(
     client: "XCProviderClient", provider: dict, provider_id: int,
     category_names: dict[str, str], exclude_categories: list[str], exclude_uncategorized: bool,
@@ -690,7 +698,7 @@ async def _import_movies_for_provider(
     db_elapsed = time.time() - db_started
     logger.info(
         "[vod_importer] provider=%s movies: %s (fetch=%.2fs db_write=%.2fs items=%d)",
-        provider["name"], movie_result, fetch_elapsed, db_elapsed, len(streams),
+        provider["name"], _loggable_import_result(movie_result), fetch_elapsed, db_elapsed, len(streams),
     )
     return movie_result, len(streams), seen_stream_ids
 
@@ -795,7 +803,7 @@ async def _import_series_for_provider(
     db_elapsed = time.time() - db_started
     logger.info(
         "[vod_importer] provider=%s series: %s (fetch=%.2fs db_write=%.2fs items=%d)",
-        provider["name"], series_result, fetch_elapsed, db_elapsed, len(series_list),
+        provider["name"], _loggable_import_result(series_result), fetch_elapsed, db_elapsed, len(series_list),
     )
     return series_result, len(series_list), seen_series_ids
 
@@ -2532,6 +2540,9 @@ async def _background_tmdb_enrichment() -> None:
 # KNM: 2026-10-03 -- indirection so tests can observe the trickle's pacing.
 _trickle_sleep = asyncio.sleep
 _TRICKLE_MAX_CONSECUTIVE_FAILURES = 3
+# KNM: 2026-11-19 -- true while a trickle tick is fetching episode lists, so
+# language auto-clean can pause for it (matches upstream's flag name).
+_EPISODE_TRICKLE_RUNNING = False
 
 
 async def run_episode_trickle_tick(
@@ -2550,11 +2561,16 @@ async def run_episode_trickle_tick(
     if _XC_IMPORT_LOCK.locked():
         logger.info("[episode_trickle] catalog import running; skipping this tick")
         return []
-    return await bulk_enrich_series_episodes(
-        concurrency=1, limit=batch, request_spacing=spacing,
-        max_consecutive_failures=_TRICKLE_MAX_CONSECUTIVE_FAILURES,
-        yield_to_import=True,
-    )
+    global _EPISODE_TRICKLE_RUNNING
+    _EPISODE_TRICKLE_RUNNING = True
+    try:
+        return await bulk_enrich_series_episodes(
+            concurrency=1, limit=batch, request_spacing=spacing,
+            max_consecutive_failures=_TRICKLE_MAX_CONSECUTIVE_FAILURES,
+            yield_to_import=True,
+        )
+    finally:
+        _EPISODE_TRICKLE_RUNNING = False
 
 
 def _schedule_background_tmdb_work() -> None:
