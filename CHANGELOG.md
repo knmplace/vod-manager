@@ -39,6 +39,16 @@ included.
 | Poster repair and Fix posters now button | — | ✅ Fork only; to be proposed after the open PRs merge (it shares files with #74, #75, #77 and #78) |
 | More poster choices and the tidier poster picker | — | ✅ Fork only; built on this fork's Missing Artwork picker, which has to go upstream first |
 
+## 2026-11-19 (Caught up with upstream v0.3.19)
+
+- ✅ Fork only; the app version now reads 0.3.19 to match upstream.
+- **Provider language tags no longer break TMDB matching.** A title such as "EN| Show (2022)" is now searched on TMDB as "Show", both by automatic matching and in the default search of Metadata Review. Real titles that only look like a tag ("IT: Chapter Two", "WWE: 25") are left alone.
+- **Earlier "unmatched" results are retried once.** Titles that automatic matching had given up on only because of a language tag are put back in the queue one time, after which later "unmatched" results are kept as before.
+- **No TMDB ID list explains itself.** With the No TMDB ID filter on, a note above the Movies / TV Shows list says why titles are still unmatched (no API key, TMDB Library off, matching set to 0) and where to fix it. Opening a card with no TMDB ID now shows Find TMDB match, so you can pick one yourself.
+- **Language auto-clean waits for imports and episode-list preloading.** It pauses while a catalog import holds the import lock or the episode-list trickle is running, instead of only while enrichment is running.
+- **Import log lines are shorter.** The per-item id lists used for Sync History are logged as counts.
+- **User guide and README** now cover Sync History, Episode discovery, Find TMDB match, the No TMDB ID note, language tag stripping, Existing matches and the language review actions and auto-clean, with the matching screenshots.
+
 ## 2026-11-19 (One-time fill of missing episode air dates)
 
 - ✅ Fork only.
