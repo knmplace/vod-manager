@@ -3319,6 +3319,7 @@ type AirDateBackfillStatus = {
   total: number
   processed: number
   filled: number
+  stills_filled?: number
   skipped_no_tmdb_id: number
   errors: number
   started_at: number | null
@@ -3348,12 +3349,12 @@ function AirDateBackfillCard() {
   const interrupted = st?.state === 'running' && !st.running
   return (
     <div id="air-date-backfill-card">
-    <SectionCard title="Fill missing episode air dates" description="One-time job: add the date each episode first aired." icon={<CalendarDays size={14} />}>
+    <SectionCard title="Fill missing episode air dates and images" description="One-time job: add the date and the picture for each episode." icon={<CalendarDays size={14} />}>
       <p className="text-sm text-foreground">
-        Apps like Dispatcharr only show when an episode aired if we have that date. Most of your episodes do not have one yet.
-        This job fills them in from the local TMDB library first, and from TMDB only for what is still missing. It never contacts
-        your providers, never changes a date that is already saved, and runs in the background, so you can keep using the app.
-        You only need to run it once.
+        Apps like Dispatcharr only show when an episode aired, or a picture for it, if we have them. Most of your episodes do not
+        have either yet. This job fills them in from the local TMDB library first, and from TMDB only for what is still missing.
+        It never contacts your providers, never changes a date or picture that is already saved, and runs in the background, so
+        you can keep using the app. You only need to run it once.
       </p>
       {!st && <p className="text-sm text-foreground">Loading...</p>}
       {st && (st.state === 'pending' || interrupted) && (
@@ -3372,7 +3373,7 @@ function AirDateBackfillCard() {
       {st && st.state === 'running' && !interrupted && (
         <div className="space-y-1.5">
           <p className="text-sm text-foreground flex items-center gap-1.5">
-            <Loader2 size={12} className="animate-spin" /> Running: {st.processed} of {st.total} shows checked, {st.filled} episode dates added so far ({pct}%).
+            <Loader2 size={12} className="animate-spin" /> Running: {st.processed} of {st.total} shows checked, {st.filled} episode dates and {st.stills_filled ?? 0} images added so far ({pct}%).
           </p>
           <div className="h-2 w-full rounded bg-secondary overflow-hidden">
             <div className="h-full bg-primary" style={{ width: `${pct}%` }} />
@@ -3386,7 +3387,8 @@ function AirDateBackfillCard() {
           <ul className="text-sm text-foreground list-disc pl-5">
             <li>{st.processed} shows checked</li>
             <li>{st.filled} episode air dates added</li>
-            <li>{st.skipped_no_tmdb_id} shows skipped (no TMDB match, so no date source)</li>
+            <li>{st.stills_filled ?? 0} episode images added</li>
+            <li>{st.skipped_no_tmdb_id} shows skipped (no TMDB match, so no date or image source)</li>
             <li>{st.errors} shows had an error and were skipped</li>
           </ul>
         </div>
@@ -3404,7 +3406,7 @@ function AirDateBackfillPrompt({ onGo }: { onGo: () => void }) {
   return (
     <div className="rounded-md border border-primary/60 bg-card p-3 flex flex-wrap items-center gap-3">
       <p className="text-sm text-foreground flex-1 min-w-[16rem]">
-        New: most episodes have no air date yet, so Dispatcharr and other apps cannot show one. You can fill them in once, in the background,
+        New: most episodes have no air date or picture yet, so Dispatcharr and other apps cannot show them. You can fill them in once, in the background,
         from the Configuration page.
       </p>
       <Button size="sm" onClick={onGo}>Go to Configuration</Button>

@@ -168,8 +168,9 @@ class _TmdbSpy:
     async def _local_first(self, tmdb_id):
         return self.local_first_air
 
-    async def _remote(self, tmdb_id):
+    async def _remote(self, tmdb_id, need_stills=False):
         self.eps_calls += 1
+        self.need_stills_seen = need_stills
         return self.episodes
 
     async def _detail(self, tmdb_id):
@@ -187,8 +188,8 @@ def _setup_series_with_missing(db):
 def test_series_fill_uses_local_store_and_makes_no_tmdb_call(db, monkeypatch):
     sid = _setup_series_with_missing(db)
     spy = _TmdbSpy(monkeypatch)
-    spy.local_eps = [{"season_number": 1, "episode_number": 1, "air_date": "2008-01-20"},
-                     {"season_number": 1, "episode_number": 2, "air_date": "2008-01-27"}]
+    spy.local_eps = [{"season_number": 1, "episode_number": 1, "air_date": "2008-01-20", "still_path": "/1.jpg"},
+                     {"season_number": 1, "episode_number": 2, "air_date": "2008-01-27", "still_path": "/2.jpg"}]
     spy.local_first_air = "2008-01-20"
     asyncio.run(vod_importer.fill_series_air_dates(sid))
     assert _air(db, sid) == {(1, 1): "2008-01-20", (1, 2): "2008-01-27"}
@@ -212,6 +213,7 @@ def test_series_fill_skips_when_nothing_missing_or_no_tmdb_id(db, monkeypatch):
     db.enrich_series_episodes_batch(no_id, pid, [_ep(1)])
     complete = _series(db, tmdb_id="5", release_date="2020-01-01", name="Done")
     db.enrich_series_episodes_batch(complete, pid, [_ep(1, "2020-01-01", provider_stream_id="zz")])
+    db.fill_episode_stills(complete, {(1, 1): "/done.jpg"})
     asyncio.run(vod_importer.fill_series_air_dates(no_id))
     asyncio.run(vod_importer.fill_series_air_dates(complete))
     assert spy.eps_calls == 0 and spy.detail_calls == 0
@@ -271,3 +273,139 @@ def test_get_series_first_air_date_local_reads_store_only(db, monkeypatch):
     monkeypatch.setattr(tmdb_sync, "_tmdb_get", no_network)
     assert asyncio.run(tmdb_sync.get_series_first_air_date_local("1396")) == "2008-01-20"
     assert asyncio.run(tmdb_sync.get_series_first_air_date_local("999")) is None
+
+
+# ---- GH #82: episode still images (movie_image) -------------------------------
+
+@pytest.mark.parametrize("raw,expected", [
+    ("/abc123.jpg", "/abc123.jpg"), (" /a-b_c.png ", "/a-b_c.png"),
+    ("", None), (None, None), ("abc.jpg", None), ("/a b.jpg", None), ("http://x/y.jpg", None), (5, None),
+])
+def test_normalize_still_path(db, raw, expected):
+    assert db.normalize_still_path(raw) == expected
+
+
+def test_episodes_have_still_path_column(db):
+    db.init_db()
+    conn = db._connect()
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(episodes)").fetchall()}
+    finally:
+        conn.close()
+    assert "still_path" in cols
+
+
+def _stills(db, sid):
+    return {(e["season_number"], e["episode_number"]): e.get("still_path") for e in db.list_episodes(sid)}
+
+
+def test_fill_episode_stills_only_fills_null(db):
+    pid = _provider(db)
+    sid = _series(db)
+    db.enrich_series_episodes_batch(sid, pid, [_ep(1), _ep(2), _ep(3)])
+    assert db.fill_episode_stills(sid, {(1, 1): "/one.jpg", (1, 3): "bad", (1, 9): "/nine.jpg"}) == 1
+    assert db.fill_episode_stills(sid, {(1, 1): "/other.jpg", (1, 2): "/two.jpg"}) == 1
+    assert _stills(db, sid) == {(1, 1): "/one.jpg", (1, 2): "/two.jpg", (1, 3): None}
+    assert db.count_episodes_missing_still(sid) == 1
+
+
+def test_export_rows_select_still_path(db):
+    pid = _provider(db)
+    sid = _series(db)
+    db.enrich_series_episodes_batch(sid, pid, [_ep(1)])
+    db.fill_episode_stills(sid, {(1, 1): "/s.jpg"})
+    assert db.get_episode_export_rows_for_series(sid)[0]["still_path"] == "/s.jpg"
+
+
+def test_xc_get_series_info_serves_movie_image_and_releasedate(db, monkeypatch):
+    monkeypatch.setattr(xc_server, "_allowed_category_ids", lambda auth: None)
+    monkeypatch.setattr(xc_server.vod_db, "get_series_export_row_by_export_id", lambda i: {
+        "series_id": 1, "export_series_id": i, "name": "Show", "year": 2020, "category_id": 1,
+        "genre": "", "description": "", "release_date": None, "name_suffix": ""})
+    base = {"export_episode_id": 5, "season_number": 1, "description": None, "duration_secs": None,
+            "container_extension": "mp4", "bitrate": None}
+    monkeypatch.setattr(xc_server.vod_db, "get_episode_export_rows_for_series", lambda sid: [
+        {**base, "episode_number": 1, "name": "A", "air_date": "2020-01-01", "still_path": "/a.jpg"},
+        {**base, "episode_number": 2, "name": "B", "air_date": None, "still_path": None},
+    ])
+    eps = xc_server._handle_player_api_action("get_series_info", {"series_id": "1"}, {})["episodes"]["1"]
+    assert eps[0]["info"]["movie_image"] == "https://image.tmdb.org/t/p/w500/a.jpg"
+    assert eps[0]["info"]["releasedate"] == "2020-01-01" == eps[0]["info"]["air_date"]
+    for key in ("movie_image", "releasedate", "air_date"):
+        assert key not in eps[1]["info"]
+
+
+def test_series_fill_stills_local_first_then_tmdb_with_need_stills(db, monkeypatch):
+    pid = _provider(db)
+    sid = _series(db, tmdb_id="1396", release_date="2008-01-20")
+    db.enrich_series_episodes_batch(sid, pid, [_ep(1, "2008-01-20"), _ep(2, "2008-01-27")])
+    spy = _TmdbSpy(monkeypatch, episodes=[{"season_number": 1, "episode_number": 2, "air_date": "2008-01-27",
+                                           "still_path": "/two.jpg"}])
+    spy.local_eps = [{"season_number": 1, "episode_number": 1, "air_date": "2008-01-20", "still_path": "/one.jpg"}]
+    asyncio.run(vod_importer.fill_series_air_dates(sid))
+    assert _stills(db, sid) == {(1, 1): "/one.jpg", (1, 2): "/two.jpg"}
+    assert spy.eps_calls == 1 and spy.need_stills_seen is True
+
+
+def test_series_fill_stills_complete_locally_makes_no_tmdb_call(db, monkeypatch):
+    pid = _provider(db)
+    sid = _series(db, tmdb_id="1396", release_date="2008-01-20")
+    db.enrich_series_episodes_batch(sid, pid, [_ep(1, "2008-01-20")])
+    spy = _TmdbSpy(monkeypatch)
+    spy.local_eps = [{"season_number": 1, "episode_number": 1, "air_date": "2008-01-20", "still_path": "/one.jpg"}]
+    asyncio.run(vod_importer.fill_series_air_dates(sid))
+    assert _stills(db, sid) == {(1, 1): "/one.jpg"}
+    assert spy.eps_calls == 0 and spy.detail_calls == 0
+
+
+def test_backfill_selection_includes_series_missing_only_a_still(db):
+    pid = _provider(db)
+    only_still = _series(db, tmdb_id="7", name="OnlyStill")
+    db.enrich_series_episodes_batch(only_still, pid, [_ep(1, "2020-01-01")])
+    complete = _series(db, tmdb_id="8", name="Complete")
+    db.enrich_series_episodes_batch(complete, pid, [_ep(1, "2020-01-01", provider_stream_id="zz")])
+    db.fill_episode_stills(complete, {(1, 1): "/c.jpg"})
+    assert db.list_series_ids_missing_air_dates() == [only_still]
+
+
+# ---- tmdb_sync: season rows carry still_path; old cached rows are refetched once ----
+
+def _season_fixture(monkeypatch, cached_rows):
+    tmdb_store.init_db()
+    monkeypatch.setattr(tmdb_sync, "store_enabled", lambda: True)
+    monkeypatch.setattr(tmdb_sync, "get_tmdb_api_key", lambda: "k")
+    shows = {"id": 1, "name": "S", "seasons": [{"season_number": 1}]}
+
+    async def payload(kind, tmdb_id):
+        return shows
+
+    monkeypatch.setattr(tmdb_sync, "fetch_title_payload", payload)
+    tmdb_store.put_season(1, 1, cached_rows)
+    calls = []
+
+    class Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"episodes": [{"episode_number": 1, "name": "E1", "air_date": "2020-01-01", "still_path": "/n.jpg"}]}
+
+    async def get(url, params=None):
+        calls.append(url)
+        return Resp()
+
+    monkeypatch.setattr(tmdb_sync, "_tmdb_get", get)
+    return calls
+
+
+def test_season_fetch_keeps_still_path_and_old_cache_refetched_once_only_when_needed(db, monkeypatch):
+    old = [{"season_number": 1, "episode_number": 1, "name": "E1", "air_date": "2020-01-01"}]  # no still_path key
+    calls = _season_fixture(monkeypatch, old)
+    # A caller that does not need stills is served from the old cache: no request.
+    assert asyncio.run(tmdb_sync.get_series_episode_list("1")) == old
+    assert calls == []
+    # A caller that needs stills refetches once and the row is rewritten with the key.
+    fresh = asyncio.run(tmdb_sync.get_series_episode_list("1", need_stills=True))
+    assert fresh[0]["still_path"] == "/n.jpg" and len(calls) == 1
+    asyncio.run(tmdb_sync.get_series_episode_list("1", need_stills=True))
+    assert len(calls) == 1  # now cached with the key: never refetched again

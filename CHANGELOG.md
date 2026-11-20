@@ -36,8 +36,18 @@ included.
 | Metadata identity matching | [#77](https://github.com/jstevenscl/vod-manager/pull/77) | ✅🔄 Open / under review |
 | TMDB review candidates narrowed to exact title and year | [#78](https://github.com/jstevenscl/vod-manager/pull/78) | ✅🔄 Open / under review |
 | Bulk AI only auto-applies picks whose year fits ours | [#79](https://github.com/jstevenscl/vod-manager/pull/79) | ✅🔄 Open / under review (does not need any other open PR) |
+| Episode air dates, release dates and the one-time fill job | [#83](https://github.com/jstevenscl/vod-manager/pull/83) | Included in upstream v0.3.20 |
 | Poster repair and Fix posters now button | — | ✅ Fork only; to be proposed after the open PRs merge (it shares files with #74, #75, #77 and #78) |
 | More poster choices and the tidier poster picker | — | ✅ Fork only; built on this fork's Missing Artwork picker, which has to go upstream first |
+
+## 2026-11-20 (Caught up with upstream v0.3.20)
+
+- Upstream v0.3.20 merged our episode air dates work (PR #83) and added episode pictures on top of it. This build matches it; the app version now reads 0.3.20.
+- **Episode air dates are now in upstream.** PR #83 (episode air dates, movie release dates and the one-time fill job) is included in upstream v0.3.20 and is no longer fork-only.
+- **New from upstream: episode pictures.** Each episode now also stores its TMDB picture (the "still"), and the series feed to Dispatcharr serves it as `movie_image`, so Dispatcharr shows episode thumbnails instead of blanks. The feed also gives `releasedate` next to `air_date`. Anything TMDB does not have stays blank.
+- **The one-time job fills pictures too.** The Configuration card is now "Fill missing episode air dates and images" and does both in one pass. If you already ran the earlier dates-only job, it is offered again so it can add the pictures. It still uses TMDB only (never your providers) and paces itself under TMDB's limits; you can keep using the app while it runs.
+- **Cached TMDB seasons refresh once.** A season saved before pictures were kept is fetched again one time when its pictures are needed.
+- **User guide and README** gain an "Episode air dates and images" section with a new screenshot.
 
 ## 2026-11-19 (Caught up with upstream v0.3.19)
 

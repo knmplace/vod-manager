@@ -66,9 +66,10 @@ def tmdb(monkeypatch):
     spy = Spy()
 
     async def local(tmdb_id):
-        return [{"season_number": 1, "episode_number": n, "air_date": d} for n, d in spy.local.get(tmdb_id, {}).items()]
+        return [{"season_number": 1, "episode_number": n, "air_date": d, "still_path": f"/s{n}.jpg"}
+                for n, d in spy.local.get(tmdb_id, {}).items()]
 
-    async def remote(tmdb_id):
+    async def remote(tmdb_id, need_stills=False):
         spy.remote_calls += 1
         return []
 
@@ -100,6 +101,7 @@ def test_default_state_is_pending(db):
 def test_only_series_with_tmdb_id_and_missing_dates_are_processed(db, tmdb, monkeypatch):
     with_id = _series(db, "A", "100", (None, None))
     complete = _series(db, "B", "200", ("2020-01-01",))
+    db.fill_episode_stills(complete, {(1, 1): "/kept.jpg"})  # has its date and its picture already
     no_id = _series(db, "C", None, (None,))
     tmdb.local = {"100": {1: "2008-01-20", 2: "2008-01-27"}, "200": {1: "1999-01-01"}}
     seen = []
@@ -116,6 +118,7 @@ def test_only_series_with_tmdb_id_and_missing_dates_are_processed(db, tmdb, monk
     assert _air(db, no_id) == {1: None}
     st = air_date_backfill.get_status()
     assert (st["total"], st["processed"], st["filled"], st["skipped_no_tmdb_id"], st["errors"]) == (1, 1, 2, 1, 0)
+    assert st["stills_filled"] == 2  # GH #82: the pictures are filled in the same pass
 
 
 def test_already_filled_dates_are_never_overwritten(db, tmdb):
@@ -366,7 +369,7 @@ def test_remote_requests_are_paced_across_concurrent_workers(db, tmdb, monkeypat
         _series(db, f"S{i}", str(100 + i), (None,))
     stamps = []
 
-    async def remote(tmdb_id):  # one request per series, entering the pacer like the real season fetch
+    async def remote(tmdb_id, need_stills=False):  # one request per series, entering the pacer like the real season fetch
         async with tmdb_sync._paced_slot():
             stamps.append(ft.now)
         return [{"season_number": 1, "episode_number": 1, "air_date": "2010-01-01"}]
@@ -385,7 +388,7 @@ def test_in_flight_requests_stay_under_the_backfill_share(db, tmdb, monkeypatch)
         _series(db, f"S{i}", str(100 + i), (None,))
     now, peak = [0], [0]
 
-    async def remote(tmdb_id):
+    async def remote(tmdb_id, need_stills=False):
         async with tmdb_sync._paced_slot():
             now[0] += 1
             peak[0] = max(peak[0], now[0])
@@ -491,3 +494,19 @@ def test_parallel_tmdb_store_season_writes_never_lock(tmp_path, monkeypatch):
     [t.join() for t in threads]
     assert errors == []
     assert all(tmdb_store.get_season(n, 10) for n in range(16))
+
+
+def test_a_dates_only_run_from_before_images_is_offered_again(db):
+    air_date_backfill._save({"state": "done", "total": 5, "processed": 5, "filled": 9, "skipped_no_tmdb_id": 1,
+                             "errors": 0, "started_at": 1.0, "finished_at": 2.0})
+    # simulate a state written by the older job: no stills_filled key on disk
+    import config
+    old = config.get_air_date_backfill()
+    old.pop("stills_filled", None)
+    config.save_air_date_backfill(old)
+    st = air_date_backfill.get_status()
+    assert st["state"] == "pending" and (st["total"], st["processed"], st["filled"]) == (0, 0, 0)
+    # a run that did record the counter stays done
+    air_date_backfill._save({"state": "done", "total": 5, "processed": 5, "filled": 9, "stills_filled": 4,
+                             "skipped_no_tmdb_id": 0, "errors": 0, "started_at": 1.0, "finished_at": 2.0})
+    assert air_date_backfill.get_status()["state"] == "done"

@@ -94,12 +94,17 @@ class _Pacer:
         self.limiter.slow_down()
 
 
-_COUNTERS = ("total", "processed", "filled", "skipped_no_tmdb_id", "errors")
+# GH #82: "stills_filled" counts episode images added alongside the air dates ("filled").
+_COUNTERS = ("total", "processed", "filled", "stills_filled", "skipped_no_tmdb_id", "errors")
 _task: asyncio.Task | None = None
 
 
 def _load() -> dict:
     raw = config.get_air_date_backfill()
+    # GH #82: a run that finished before episode images were part of this job (no "stills_filled"
+    # counter on record) only did the dates, so it is offered again as a fresh, pending run.
+    if raw.get("state") == "done" and "stills_filled" not in raw:
+        raw = {}
     state = {k: int(raw.get(k) or 0) for k in _COUNTERS}
     state["state"] = raw.get("state") if raw.get("state") in ("running", "done") else "pending"
     state["started_at"] = raw.get("started_at")
@@ -130,9 +135,12 @@ async def _process(series_id: int, state: dict, tmdb_locks: dict) -> None:
         # local library instead of asking TMDB again.
         async with tmdb_locks.setdefault(tmdb_id, asyncio.Lock()):
             before = await asyncio.to_thread(vod_db.count_episodes_missing_air_date, series_id)
+            stills_before = await asyncio.to_thread(vod_db.count_episodes_missing_still, series_id)
             await vod_importer.fill_series_air_dates(series_id)
             after = await asyncio.to_thread(vod_db.count_episodes_missing_air_date, series_id)
+            stills_after = await asyncio.to_thread(vod_db.count_episodes_missing_still, series_id)
         state["filled"] += max(0, before - after)
+        state["stills_filled"] += max(0, stills_before - stills_after)
     except Exception as exc:  # a bad series is logged and skipped, never aborts the run
         state["errors"] += 1
         logger.warning("[air_date_backfill] series_id=%s skipped: %s", series_id, exc)

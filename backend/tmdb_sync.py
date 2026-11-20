@@ -611,7 +611,7 @@ async def cast_titles(content_type: str, names: list[str], year: int | None) -> 
 _LATEST_SEASON_MAX_AGE = 86400
 
 
-async def get_series_episode_list(tmdb_id: str) -> list[dict]:
+async def get_series_episode_list(tmdb_id: str, need_stills: bool = False) -> list[dict]:
     """Every canonical episode TMDB knows about for a series -- the DVR
     Library's Sonarr/Radarr-style missing-episode view diffs this against
     what's actually in the pool (vod_db.list_episodes_for_series_ids) to
@@ -645,7 +645,11 @@ async def get_series_episode_list(tmdb_id: str) -> list[dict]:
             except Exception as exc:
                 logger.warning("[tmdb_sync] local season read failed for tmdb_id=%s: %s", tmdb_id, exc)
                 cached = None
-            if cached is not None:
+            # GH #82: seasons stored before still images were kept have no "still_path" key at all;
+            # a caller that needs stills treats those as a miss and refetches once (the rewritten
+            # row then carries the key, null or not, so it is never refetched for this again).
+            stale_for_stills = need_stills and bool(cached) and "still_path" not in cached[0]
+            if cached is not None and not stale_for_stills:
                 await note_lookup(True)
                 return cached
         await note_lookup(False)
@@ -659,6 +663,7 @@ async def get_series_episode_list(tmdb_id: str) -> list[dict]:
                     "episode_number": ep["episode_number"],
                     "name": ep.get("name"),
                     "air_date": ep.get("air_date"),
+                    "still_path": ep.get("still_path"),
                 }
                 for ep in sr.json().get("episodes", [])
             ]

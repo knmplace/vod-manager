@@ -1460,6 +1460,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("series", "release_date", "TEXT"),
         # KNM: 2026-11-12 -- per-episode air date (ISO YYYY-MM-DD), served in the XC episode info block.
         ("episodes", "air_date", "TEXT"),
+        # GH #82 -- per-episode TMDB still image path (e.g. "/abc.jpg"), served as movie_image in the XC episode info.
+        ("episodes", "still_path", "TEXT"),
         ("movie_sources", "bitrate", "INTEGER"),
         ("episode_sources", "bitrate", "INTEGER"),
         ("provider_live_accounts", "dispatcharr_profile_id", "INTEGER"),
@@ -10869,10 +10871,59 @@ def count_episodes_missing_air_date(series_id: int) -> int:
         conn.close()
 
 
+# GH #82 -- episode still images (TMDB still_path) are filled together with air dates: they come
+# from the same TMDB season data, fill-only, never replacing a stored value.
+_STILL_PATH_RE = re.compile(r"^/[A-Za-z0-9_.\-]{1,200}$")
+
+
+def normalize_still_path(value) -> str | None:
+    """A TMDB image path like "/abc123.jpg", or None when empty or not path-shaped."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value if _STILL_PATH_RE.match(value) else None
+
+
+def count_episodes_missing_still(series_id: int) -> int:
+    conn = _connect()
+    try:
+        return conn.execute(
+            "SELECT COUNT(*) c FROM episodes WHERE series_id=? AND (still_path IS NULL OR still_path='')",
+            (series_id,),
+        ).fetchone()["c"]
+    finally:
+        conn.close()
+
+
+def fill_episode_stills(series_id: int, stills: dict[tuple[int, int], str]) -> int:
+    """Sets still_path on this series' episodes that have none, matched by
+    (season, episode). Returns how many were filled."""
+    valid = {k: p for k, v in stills.items() if (p := normalize_still_path(v))}
+    if not valid:
+        return 0
+    with _WRITE_LOCK:
+        conn = _connect()
+        try:
+            n = 0
+            for (season, episode), path in valid.items():
+                n += conn.execute(
+                    "UPDATE episodes SET still_path=? WHERE series_id=? AND season_number=? AND episode_number=? "
+                    "AND (still_path IS NULL OR still_path='')",
+                    (path, series_id, season, episode),
+                ).rowcount
+            _commit_with_retry(conn)
+            return n
+        finally:
+            conn.close()
+
+
 # KNM: 2026-11-19 -- series the one-time air date backfill should visit: numeric TMDB id
-# and at least one episode with no air date. Series with missing dates but no usable
-# TMDB id are only counted (nothing local or TMDB-side can fill them).
+# and at least one episode with no air date (or, GH #82, no still image). Series with
+# missing data but no usable TMDB id are only counted (nothing local or TMDB-side can fill them).
 _TMDB_ID_IS_NUMERIC = "s.tmdb_id GLOB '[0-9]*' AND s.tmdb_id NOT GLOB '*[^0-9]*'"
+_EPISODE_MISSING_DATE_OR_STILL = (
+    "(e.air_date IS NULL OR e.air_date='' OR e.still_path IS NULL OR e.still_path='')"
+)
 
 
 def list_series_ids_missing_air_dates() -> list[int]:
@@ -10880,7 +10931,7 @@ def list_series_ids_missing_air_dates() -> list[int]:
     try:
         rows = conn.execute(
             f"SELECT s.id FROM series s WHERE {_TMDB_ID_IS_NUMERIC} AND EXISTS ("
-            "SELECT 1 FROM episodes e WHERE e.series_id=s.id AND (e.air_date IS NULL OR e.air_date='')) "
+            f"SELECT 1 FROM episodes e WHERE e.series_id=s.id AND {_EPISODE_MISSING_DATE_OR_STILL}) "
             "ORDER BY s.id"
         ).fetchall()
         return [r["id"] for r in rows]
@@ -10893,7 +10944,7 @@ def count_series_missing_air_dates_without_tmdb_id() -> int:
     try:
         return conn.execute(
             f"SELECT COUNT(*) c FROM series s WHERE NOT (s.tmdb_id IS NOT NULL AND {_TMDB_ID_IS_NUMERIC}) AND EXISTS ("
-            "SELECT 1 FROM episodes e WHERE e.series_id=s.id AND (e.air_date IS NULL OR e.air_date=''))"
+            f"SELECT 1 FROM episodes e WHERE e.series_id=s.id AND {_EPISODE_MISSING_DATE_OR_STILL})"
         ).fetchone()["c"]
     finally:
         conn.close()
@@ -11598,7 +11649,7 @@ def get_episode_export_rows_for_series(series_id: int) -> list[dict]:
             SELECT
                 e.id AS episode_id, e.series_id AS series_id, e.season_number AS season_number,
                 e.episode_number AS episode_number, e.name AS name, e.description AS description,
-                e.duration_secs AS duration_secs, e.air_date AS air_date,
+            e.duration_secs AS duration_secs, e.air_date AS air_date, e.still_path AS still_path,
                 es.provider_id AS provider_id, es.provider_stream_id AS provider_stream_id,
                 es.container_extension AS container_extension, es.bitrate AS bitrate
             FROM episodes e

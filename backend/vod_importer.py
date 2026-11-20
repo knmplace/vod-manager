@@ -1820,6 +1820,9 @@ async def _enrich_one_series_source(
                 dates = {(e["season_number"], e["episode_number"]): e.get("air_date") for e in eps if e.get("air_date")}
                 if dates:
                     await _to_thread(vod_db.fill_episode_air_dates, series_id, dates)
+                stills = {(e["season_number"], e["episode_number"]): e.get("still_path") for e in eps if e.get("still_path")}
+                if stills:
+                    await _to_thread(vod_db.fill_episode_stills, series_id, stills)
             except Exception:
                 logger.warning("[_enrich_one_series_source] TMDB enrichment failed for library series_id=%s", series_id, exc_info=True)
         await _to_thread(
@@ -1995,25 +1998,33 @@ def _provider_episode_air_date(ep: dict) -> str | None:
 
 
 async def fill_series_air_dates(series_id: int) -> None:
-    """Fills a series' missing episode air dates and missing release date.
-    Local TMDB library first (never calls TMDB); TMDB only for what is still
-    missing, at most one show detail + its season lookups, which are themselves
-    read-through the local library."""
+    """Fills a series' missing episode air dates and still images (GH #82) and its
+    missing release date. Local TMDB library first (never calls TMDB); TMDB only for
+    what is still missing, at most one show detail + its season lookups, which are
+    themselves read-through the local library."""
     try:
         series = await _to_thread(vod_db.get_series, series_id)
         tmdb_id = str((series or {}).get("tmdb_id") or "").strip()
         if not tmdb_id.isdigit():
             return
         need_release = not str(series.get("release_date") or "").strip()
-        need_eps = await _to_thread(vod_db.count_episodes_missing_air_date, series_id) > 0
-        if not (need_release or need_eps):
+        need_dates = await _to_thread(vod_db.count_episodes_missing_air_date, series_id) > 0
+        need_stills = await _to_thread(vod_db.count_episodes_missing_still, series_id) > 0
+        if not (need_release or need_dates or need_stills):
             return
-        if need_eps:
-            local = await tmdb_sync.get_series_episode_list_local(tmdb_id)
-            dates = {(e["season_number"], e["episode_number"]): e.get("air_date") for e in local if e.get("air_date")}
+
+        async def _apply(eps: list[dict]) -> None:
+            dates = {(e["season_number"], e["episode_number"]): e.get("air_date") for e in eps if e.get("air_date")}
             if dates:
                 await _to_thread(vod_db.fill_episode_air_dates, series_id, dates)
-            need_eps = await _to_thread(vod_db.count_episodes_missing_air_date, series_id) > 0
+            stills = {(e["season_number"], e["episode_number"]): e.get("still_path") for e in eps if e.get("still_path")}
+            if stills:
+                await _to_thread(vod_db.fill_episode_stills, series_id, stills)
+
+        if need_dates or need_stills:
+            await _apply(await tmdb_sync.get_series_episode_list_local(tmdb_id))
+            need_dates = await _to_thread(vod_db.count_episodes_missing_air_date, series_id) > 0
+            need_stills = await _to_thread(vod_db.count_episodes_missing_still, series_id) > 0
         if need_release:
             first_air = await tmdb_sync.get_series_first_air_date_local(tmdb_id)
             if first_air and await _to_thread(vod_db.fill_missing_release_date, "series", series_id, first_air):
@@ -2022,11 +2033,8 @@ async def fill_series_air_dates(series_id: int) -> None:
             detail = await tmdb_sync.get_series_full_details(tmdb_id)
             if detail:
                 await _to_thread(vod_db.fill_missing_release_date, "series", series_id, detail.get("release_date"))
-        if need_eps:
-            remote = await tmdb_sync.get_series_episode_list(tmdb_id)
-            dates = {(e["season_number"], e["episode_number"]): e.get("air_date") for e in remote if e.get("air_date")}
-            if dates:
-                await _to_thread(vod_db.fill_episode_air_dates, series_id, dates)
+        if need_dates or need_stills:
+            await _apply(await tmdb_sync.get_series_episode_list(tmdb_id, need_stills=need_stills))
     except Exception as exc:
         logger.warning("[fill_series_air_dates] series_id=%s skipped: %s", series_id, exc)
 
