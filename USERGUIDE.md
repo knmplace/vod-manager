@@ -1475,10 +1475,41 @@ The **Show menu** button at the left of the top bar brings it back. Your
 browser remembers which one you picked.
 
 On long pages, a round **Return to top** button appears at the bottom right once
-you have scrolled down a little; one click scrolls smoothly back to the top. On
+you have scrolled down a little (a bit sooner on Metadata Review, whose lists are long); one click scrolls smoothly back to the top. On
 the **Configuration** and **Curation & Maintenance** pages the sections start
 collapsed, each with a one-line description under its title, so you can scan the
 page and open only what you need.
+
+### Episode list preloading
+
+**This is ON by default.** After you update, VOD Manager starts quietly fetching
+episode lists in the background for Xtream Codes providers: up to **100 shows
+per provider every 15 minutes, one request every 3 seconds**. It only covers
+series that have not had their episode list fetched yet, so the first episode
+view of a show is faster and there is no large burst of requests. Opening a
+series still loads its episodes immediately, and the existing import,
+enrichment and on-demand paths are unchanged.
+
+To change or turn it off, open **Configuration → Refresh Schedule → Episode
+list preloading**: *Shows per batch* (0–500; **set it to 0 to turn this
+scheduled preloading off**), *Pause between batches* (5 minutes–24 hours) and
+*Gap between requests* (1–60 seconds). The page shows an estimate of how many
+shows per hour that works out to. A provider's batch stops after three
+consecutive failures or when that provider is already in backoff, and a series
+source that recently failed waits 24 hours before another automatic attempt.
+Inactive providers and sources in languages you have not enabled are skipped.
+
+To watch it work, open **Curation & Maintenance → Episode discovery** (expand
+the section by clicking its title). While a batch is running it shows how many
+sources have been fetched out of the batch total, with a count of errors and of
+providers paused because they were in backoff, and a **Cancel episode
+discovery** button that stops the batch after the request in flight. Between
+batches it reads "Waiting for the next scheduled tick", and the last batch's
+result stays on screen. The same progress also appears in the status banner at
+the top of the page while a batch runs. (Progress and Cancel by
+[@knmplace](https://github.com/knmplace).)
+
+![Episode discovery card on Curation & Maintenance](docs/screenshots/episode-discovery.png)
 
 Above the catalog itself, the dashboard always shows two live cards:
 
@@ -1510,6 +1541,24 @@ names each provider whose latest import failed, with the error (for example
 succeeds, or when you deactivate or delete it; **Sync History** keeps the
 per-provider record. Fix the provider (credentials, URL, User-Agent)
 and run **Import** again.
+
+### Sync History
+
+**Curation & Maintenance → Sync History** (click the section title to expand
+it) lists every catalog import, newest first: when it ran, which provider,
+whether it finished or failed, how many catalog cards it changed, and how long
+it took. Click a run's date to open its report: the timings, the counters for
+that run ("What this run did"), and the individual movies and series it added
+or changed, on **Movies** and **Series** tabs, each with an **Open** shortcut to
+that page. A run's changes are *added* (a brand-new title) or *changed* (a
+provider source was attached, or the title was archived or restored by your
+import rules). A failed run shows its error. Tick one or more reports and use
+**Delete selected reports** to clear them; this only removes the report and
+never changes your catalog. Reports from before this screen existed show their
+original start and end times. (Sync History report by
+[@knmplace](https://github.com/knmplace).)
+
+![Sync History with one run expanded, showing its counters and Movies and Series changes](docs/screenshots/sync-history.png)
 
 On the **Movies** and **TV Shows** pages, the **All categories** dropdown next to
 the provider filter shows only the items placed in one of your categories —
@@ -1729,10 +1778,33 @@ what it could not fill, so a normal pass costs no TMDB requests. **Run now** doe
 
 **Finding items with no TMDB ID.** The **No TMDB ID** button next to *Archived*
 on the Movies and TV Shows pages lists only the titles that still have no TMDB
-match. This is wider than **Metadata Review**, which only lists titles with no
-year or an ambiguous auto-match; a title with a year that simply never matched
-shows up only here. Open one to use *Search TMDB*, or run **Match titles without
-a TMDB ID** on the TMDB Library page to have them matched by name and year.
+match. **Metadata Review** lists the same titles (no year, a year that never
+matched, or an ambiguous auto-match), so the two counts agree. While the filter
+is on, a note above the list says whether automatic matching is running and
+links to the page to turn it on (or to Metadata Review).
+
+![The note shown above the list while the No TMDB ID filter is on](docs/screenshots/no-tmdb-id-hint.png)
+
+**Pick a match yourself.** Open a title with no TMDB ID and click **Find TMDB
+match**. It searches TMDB (your local TMDB library first, when it is on) using
+the title with any language tag such as `EN|` or `ES -`, a trailing year and a
+quality label like `4K:` removed, and lists the results with poster, year, TMDB
+id and overview. Click one to save its TMDB id (and year, when TMDB gives one).
+Type a different title in the box to search again, or use *Set TMDB id* when you
+already know the number. A matching id may merge the title into the card you
+already have.
+
+![Find TMDB match in a title's details](docs/screenshots/find-tmdb-match.png)
+
+**Have them matched for you.** On the **TMDB Library** page, save a TMDB API key
+and turn the library **on**, then click **Match titles without a TMDB ID**.
+Automatic matching only runs while the library is on (the button is disabled
+when it is off, and nothing runs in the background). It matches 2,000 titles per
+run and 4 runs a day, series first, so a catalog with many thousands of
+unmatched titles takes a few days. It searches with the same cleaned title
+(language tag and trailing year removed). Titles TMDB cannot find are retried
+after a week, and ones it cannot settle are listed in Metadata Review with the
+candidates.
 
 ![The No TMDB ID filter with Select all filtered and Remove from category](docs/screenshots/no-tmdb-filter-and-remove.png)
 
@@ -1802,7 +1874,10 @@ you still review and confirm yourself:
   at a time. A fix is only ever applied when the AI reports **high**
   confidence; anything medium, low, or with no confident match is left
   completely untouched, with the AI's reasoning shown so you know why it
-  was skipped. A progress summary (`N resolved · M skipped · E errors`)
+  was skipped. A **year guard** adds a second check: a high-confidence pick
+  is also skipped when its release year is more than one year away from the
+  year the catalog holds for the title (a title with no stored year is not
+  blocked by this). A progress summary (`N resolved · M skipped · E errors`)
   appears once the job finishes, with an expandable per-item detail list.
   Duplicate Finder's version is a little different: a group whose
   candidates already agree on one TMDB id merges immediately with no AI
@@ -2177,7 +2252,7 @@ Each candidate also has its own **flag** icon to report "this isn't
 actually the same title" directly from the group, without leaving Duplicate
 Finder — see [Flagging wrong content](#flagging-wrong-content) in §9.
 
-![Orphan Checker, Duplicate Finder, and TMDB Lists](docs/screenshots/curation-tools.png)
+![Curation & Maintenance: each tool is a collapsible section, including Orphan Checker, Duplicate Finder, TMDB Lists, Episode discovery and Sync History](docs/screenshots/curation-tools.png)
 ![Duplicate Finder with TMDB-confirmed matches](docs/screenshots/duplicate-finder.png)
 
 ### Needs Review
@@ -2206,7 +2281,35 @@ existing pool entry, sources and categories merge into it automatically,
 same as everywhere else in the app. The search looks in your
 local TMDB library (TMDB Library page) first when it is on, and only asks TMDB
 when that has nothing, so a name search works even without a TMDB key as long
-as the local library can answer it.
+as the local library can answer it. Suggested TMDB matches are narrowed to
+the same cleaned title and year as the item, and a quality prefix or tag a provider
+adds to the name (`4K:`, `[4K]`, `UHD |`, `HD:`, a trailing `4K-EN -`) is stripped
+from the automatic search first; text you type into the search box yourself is
+never altered.
+
+**Existing matches.** The **Existing matches** button on this page lists
+titles that have no TMDB identity of their own but share a name with a title
+already in your catalog, for Movies and TV Shows separately. Each row shows the
+incoming title, the existing candidate(s) and why they look alike (same title and
+year, year differs by N, or year missing). Choose a candidate with its radio
+button, then:
+
+- **Approve merge** merges the incoming title into the chosen existing one:
+  sources and category placements move to the existing title, which keeps its
+  identity.
+- **Keep separate** keeps both titles active and dismisses the pair so it is
+  not suggested again.
+- **Archive selected** archives the incoming title and removes its category
+  placements.
+- **User Merge** (also on the main Metadata Review list) searches TMDB for each
+  selected title and applies the result **only when exactly one candidate** is
+  found. Titles with no candidate, or several, are skipped and listed with the
+  reason; nothing is guessed.
+
+Every bulk action asks you to confirm first, and shift-click selects a range.
+**Hide adult titles** is on by default here.
+
+![Metadata Review's Existing matches view](docs/screenshots/existing-matches.png)
 
 A series that already carries a TMDB id but no year gets resolved
 automatically in the background after each provider import, straight from
@@ -2275,7 +2378,7 @@ Report** (sidebar → System) reads the language tags embedded in the audio of a
 few sources at a time and lists the ones that don't match what the catalog says.
 Nothing is changed until you decide; it is an audit, not an automatic fix.
 
-![The Language Mismatch Report, with monitoring off and nothing waiting for review](docs/screenshots/language-mismatch-report.png)
+![The Language Mismatch Report, with monitoring off, auto-clean off and nothing waiting for review](docs/screenshots/language-mismatch-report.png)
 
 **How a check works.** The app reads only the first small chunk of a source's
 stream (not the whole file), saves it to a temporary file and runs `ffprobe` on
@@ -2289,7 +2392,11 @@ A check never changes playback by itself.
   language found in the audio, and the proposed result.
 - **No usable tag** — shown separately under **Unknown language review**, where you
   choose one of your enabled playback languages (your Primary Language is
-  pre-selected) and confirm it.
+  pre-selected) and confirm it. Rows can be selected in bulk: **Confirm selected as
+  XX** records one language for all of them in a single request (up to 250 at a
+  time), **Retry selected** queues them for another check, **Archive selected**
+  archives the movie or series (the source itself is kept), and **Delete selected**
+  removes the sources. Each asks for confirmation first.
 
 **Monitoring is off by default.** Press **Enable monitoring** to let the app check
 sources quietly in the background, or **Run one cycle now** to run a single batch.
@@ -2318,10 +2425,46 @@ connection is never pushed:
 be selected in bulk (shift-click selects a range):
 
 - **Apply language** — records the language found in the audio as the source's
-  language. The movie or series is not archived.
-- **Archive parent** — records that language and archives the movie or series,
-  shown when the language found is outside your enabled playback languages.
+  language. The movie or series is not archived. When the audio carried several
+  languages and none is a clear single answer, the row shows a **Choose language**
+  list of the observed tags; pick one and use **Apply selected language**.
+- **Archive parent** — shown when every language found is outside your enabled
+  playback languages. It sets the source to the language found, which hides that
+  source, and archives the movie or series **only if no other source has a wanted
+  language**; if another feed is wanted, the title stays active.
 - **Keep as-is** — changes nothing and stops future checks of that source.
+- **Approve all proposed** — applies each row's proposed action in one go after a
+  single confirmation, and reports one summary. A language you already decided on a
+  source is never overwritten by a later check.
+
+A language you confirm by hand is shown as "Language: XX (confirmed)" in the source
+preview. Manual approvals are recorded the same way as checks, so they appear under
+**Completed checks today** and count toward any daily cap.
+
+#### Auto-clean unwanted-language feeds (off by default)
+
+An optional extra under the report, **Auto-clean unwanted-language feeds**, does
+the "hide it" part without you clicking. It is **off by default** and nothing
+happens until you press **Turn on auto-clean** and confirm.
+
+A feed is hidden only when three independent signals agree: the audio check found
+tracks and none is a wanted language, TMDB's original language is not a wanted
+language, and no TMDB spoken language is wanted either. It only hides a feed while
+another wanted feed keeps the title playable (it never archives a title), and it
+never touches a source someone already decided. It reads only checks already done
+and TMDB details already stored, so it contacts neither your providers nor TMDB.
+
+- **Preview what it would hide** lists the feeds it would act on, and how many it
+  left alone and why, without changing anything.
+- It works in small batches (**Feeds per batch**, default 25; **Seconds between
+  batches**, default 300; **Cooldown after other jobs**, default 900), pauses while
+  an import, sync, enrichment or episode preloading is running, and waits the
+  cooldown afterwards. After a restart it waits one cooldown before its first batch.
+- **Recent auto-clean changes** logs every feed it hid with the old and new
+  language. **Revert** puts a feed back exactly as it was, and auto-clean will not
+  touch that feed again. A change can be reverted once.
+
+![The auto-clean panel, off, with its pacing settings](docs/screenshots/language-autoclean.png)
 
 When a check finds a mismatch, a notice appears in the bell at the top of the
 screen. It clears itself the next time you open the report and nothing is left to
@@ -2547,7 +2690,7 @@ regular XC client first, to rule out a provider-side issue.
 **Catalog status says "Import failed for …".** The card names the provider
 whose most recent import failed and the error type. Check that provider's URL,
 credentials and User-Agent (§5), then run **Import** again. If several providers
-fail, only the latest shows — Sync History lists each run.
+fail, only the latest shows — Curation & Maintenance → Sync History lists each run.
 
 **Emby/Jellyfin shows an empty library after the .strm export.** Confirm the
 export reported files written, that the media server mounts the same folder
