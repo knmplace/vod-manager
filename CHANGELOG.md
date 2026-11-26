@@ -40,6 +40,13 @@ included.
 | Poster repair and Fix posters now button | — | ✅ Fork only; to be proposed after the open PRs merge (it shares files with #74, #75, #77 and #78) |
 | More poster choices and the tidier poster picker | — | ✅ Fork only; built on this fork's Missing Artwork picker, which has to go upstream first |
 
+## 2026-11-25 (Download sign-in no longer locks out a Dispatcharr server)
+
+- ✅ Fork only.
+- **Fixed: TV apps using downloads could get vod_manager temporarily blocked by Dispatcharr.** With more than one Dispatcharr connection saved, a request that did not say which server it belonged to was tried on the first server again and again. Dispatcharr counts each refusal and, after 10 in a minute, refuses everything from vod_manager for a while. vod_manager now remembers which server accepted each key and goes there first.
+- **A refused key is not sent to that server again for 10 minutes.** The person still sees "Invalid key". If a key starts working on a server that just refused it (for example, the account was re-enabled), it can take up to 10 minutes to be accepted. Changing a connection's address, or restarting vod_manager, clears this at once. Servers that are unreachable or busy are not remembered this way and are tried again on the next request.
+- Keys themselves are not kept for this, only a one-way fingerprint, and keys are still only ever sent to the Dispatcharr connections you saved.
+
 ## 2026-11-20 (Caught up with upstream v0.3.20)
 
 - Upstream v0.3.20 merged our episode air dates work (PR #83) and added episode pictures on top of it. This build matches it; the app version now reads 0.3.20.
