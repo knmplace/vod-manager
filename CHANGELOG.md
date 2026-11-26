@@ -40,6 +40,13 @@ included.
 | Poster repair and Fix posters now button | — | ✅ Fork only; to be proposed after the open PRs merge (it shares files with #74, #75, #77 and #78) |
 | More poster choices and the tidier poster picker | — | ✅ Fork only; built on this fork's Missing Artwork picker, which has to go upstream first |
 
+## 2026-11-26 (Setup note for the TV app download server)
+
+- ✅ Fork only.
+- **New user guide section** explaining how to set up this server so the KNM Media TV app can
+  request downloads: what to turn on here, what to enter on the TV, how requests behave and what
+  each error message means. Documentation only; nothing in the app changed.
+
 ## 2026-11-25 (Download sign-in no longer locks out a Dispatcharr server)
 
 - ✅ Fork only.

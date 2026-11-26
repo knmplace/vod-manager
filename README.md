@@ -148,6 +148,9 @@ goes from *Waiting for encoder* to *Importing* to *In library*. If Radarr or Son
 shows and episodes your own Plex, Jellyfin or Emby already has, and asks before you download them again. See the
 [User Guide](USERGUIDE.md#handing-finished-downloads-to-radarr-or-sonarr).
 
+**KNM Media TV app (this fork only):** the app can ask this server to add movies and shows to your
+library. See [setting up the download server](USERGUIDE.md#download-server-for-the-knm-media-tv-app-knm-fork-only).
+
 ## Connecting Dispatcharr instances
 
 VOD & DVR Manager distinguishes two separate relationships with Dispatcharr:

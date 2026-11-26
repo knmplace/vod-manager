@@ -19,6 +19,7 @@ walkthrough, see [README.md](README.md).
 5. [Adding your first provider](#5-adding-your-first-provider)
    - [Library sources — local folders, SMB, SFTP, and cloud storage](#library-sources--local-folders-smb-sftp-and-cloud-storage)
 6. [Connecting Dispatcharr](#6-connecting-dispatcharr)
+   - [Download server for the KNM Media TV app](#download-server-for-the-knm-media-tv-app-knm-fork-only) (sits just before section 7)
 7. [DVR recordings](#7-dvr-recordings)
 8. [Security hardening](#8-security-hardening)
 9. [Browsing and managing your catalog](#9-browsing-and-managing-your-catalog)
@@ -1137,6 +1138,59 @@ shown. It is optional, and nothing changes until you add a server.
 - **Download anyway or Cancel.** When you queue a movie, an episode, a season or a selection, the app first checks
   your library. If any of it is already there a dialog says so ("Already in your library (Jellyfin: Movies)") and,
   for a season or selection, lists which episodes or titles, with **Download anyway** and **Cancel**.
+
+### Download server for the KNM Media TV app (KNM fork only)
+
+The KNM Media TV app can ask this server to add a movie or show to your library. This works only
+with this fork (`knmplace/vod-manager`); the upstream project does not have it. The person using
+the TV signs in with their own Dispatcharr user, so they never need a VOD & DVR Manager login.
+
+**On this server**
+
+1. Run this fork and note the address a TV can reach it on, for example `http://192.0.2.10:8282`.
+2. Set up and turn on [downloading into a library folder](#downloading-files-into-a-library-folder).
+3. Under **Configuration → Dispatcharr Connections**, add each Dispatcharr server your users sign
+   in to. Keys are checked only against these saved connections.
+4. Open **System → KNM Downloads**. Under **Allow-list**, pick a server, find the user and press
+   **Add user**. Downloads are off for everyone who is not listed; Dispatcharr admins are always
+   allowed. Listing users needs the saved connection to have its own token.
+5. Set the **Default daily cap** (5 unless you change it), or give a person their own cap. The cap
+   applies to admins too.
+
+**On the TV**
+
+1. Sign in to Dispatcharr in the app first. The download server uses that sign-in.
+2. Open **Settings → Accounts & sources → Downloads**.
+3. Enter the **Download server address**. Optionally add a second address, used when the first
+   does not answer (for example one for home and one for away). The **Connection number** can
+   stay blank: the server finds the connection that accepts your key.
+4. Choose **Connect**. Once you are allowed to download, a **Downloads** entry appears in the side menu with your requests.
+   Nothing is contacted while this is Off.
+
+**How requests behave**
+
+- A title is matched by TMDB id, otherwise by the same name with a year either side, and it needs
+  a source in your catalog.
+- A show request queues every episode that has a source and counts as one title toward the cap.
+- Asking again for a title already requested returns the existing request.
+- The daily cap and the allow-list follow the username (capitals ignored) across all servers. The
+  day starts at midnight New York time; set the `KNM_DAY_TZ` environment variable to another time
+  zone name to change that (an unknown name means UTC).
+- The TV shows *Queued*, *Downloading*, *Delayed, retrying*, *Downloaded, being prepared* (waiting
+  for Radarr or Sonarr, if you use that handoff), *Ready*, *Download failed, an admin has been
+  told* or *Cancelled*. Retry or cancel requests under **System → KNM Downloads → Requests**.
+
+| Message on the TV | What to check |
+| --- | --- |
+| Sign-in required, Invalid key, Unknown server | The TV's Dispatcharr sign-in, the saved connection, and the connection number |
+| Could not reach the server | This server cannot reach that Dispatcharr connection |
+| Downloads are not enabled for your account | Add the user to the allow-list and keep **Allowed** ticked |
+| That title isn't available to download | No matching title with a source in the catalog |
+| Daily limit of N titles reached | Raise the cap, or wait for the next day |
+| Downloads are not available right now | The downloader's settings under **Download Configuration → Downloads** |
+
+The app sends the user's Dispatcharr API key with each request. If the server is reachable from
+outside your home network, put it behind HTTPS (see [Security hardening](#8-security-hardening)).
 
 ## 7. DVR recordings
 
